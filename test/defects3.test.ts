@@ -296,3 +296,54 @@ describe("6. measured state never misleads", () => {
     }
   });
 });
+
+describe("7. a send whose acknowledgement was lost is not asked twice", () => {
+  test("the page: the prompt id is chosen with the draft and every retry of the same text carries it", async () => {
+    const app = (await import("../web/src/app.ts")) as Record<string, any>;
+    const a = "inc_a";
+    const item = { incidentId: a, title: a, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null };
+    let m = app.update(app.init({ session: "s" }).model, app.Message.ReceivedInbox({ items: [item] })).model;
+    m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
+    m = app.update(m, app.Message.ChangedDraft({ text: "why" })).model;
+    m = app.update(m, app.Message.ChangedDraft({ text: "why is A failing?" })).model;
+    const chosen = m.draftIds[a].promptId;
+    const send = () => {
+      m = app.update(m, app.Message.SubmittedPrompt()).model;
+      const [commandId, entry] = Object.entries(m.sending as Record<string, { promptId: string }>).at(-1)!;
+      return { commandId, promptId: entry.promptId };
+    };
+    const first = send();
+    expect(first.promptId).toBe(chosen);
+    // The service committed it, but the acknowledgement never arrived.
+    m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.FailedAskThread({ commandId: first.commandId, failure: { _tag: "Unknown" } }) })).model;
+    const second = send();
+    expect(second.commandId).not.toBe(first.commandId);
+    expect(second.promptId).toBe(chosen);
+    m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.FailedAskThread({ commandId: second.commandId, failure: { _tag: "Unknown" } }) })).model;
+    // Changing the text after a try is a different prompt.
+    m = app.update(m, app.Message.ChangedDraft({ text: "why is A failing now?" })).model;
+    expect(send().promptId).not.toBe(chosen);
+  });
+
+  test("the service: the same prompt id asked twice records one prompt and one run", async () => {
+    const { testService } = await import("./fixtures/service.ts");
+    const { IncidentId, threadIdOf, runIdOf } = await import("../src/domain/ids.ts");
+    const { service, cluster, client } = await testService();
+    try {
+      cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await service.collect("shop-api/production");
+      const incident = IncidentId.make(await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!));
+      const ask = () => client((api) => api.AskThread(threadIdOf(incident), { subject: incident, title: "t", promptId: "prompt:s:0", text: "why?", mode: "investigate", origin: "page", override: "auto" }));
+      await ask();
+      await ask();
+      const asked = await service.read(
+        (db) => db.prepare("SELECT data FROM journal WHERE type = 'PromptAsked' AND json_extract(data, '$.promptId') = 'prompt:s:0'").all() as Array<{ data: string }>,
+      );
+      expect(asked).toHaveLength(1);
+      const runs = await service.read((db) => (db.prepare("SELECT count(*) AS n FROM journal WHERE stream = ?").get(`Run/${runIdOf(threadIdOf(incident), "prompt:s:0")}`) as { n: number }).n);
+      expect(runs).toBe(1);
+    } finally {
+      await service.stop();
+    }
+  });
+});

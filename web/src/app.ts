@@ -56,7 +56,13 @@ export const Model = Schema.Struct({
   /** What the owner has typed, per incident: a draft stays with the incident it was typed on. */
   drafts: Schema.Record(Schema.String, Schema.String),
   /** Prompts sent and not yet acknowledged, by command id. The draft stays until its send is confirmed. */
-  sending: Schema.Record(Schema.String, Schema.Struct({ subject: Schema.String, text: Schema.String })),
+  sending: Schema.Record(Schema.String, Schema.Struct({ subject: Schema.String, text: Schema.String, promptId: Schema.String })),
+  /**
+   * Each draft's prompt id, chosen when the draft is started and reused by every retry of the same text, so a send
+   * whose acknowledgement was lost is not asked twice: the service ignores a prompt id it already has. `sent` is the
+   * text last tried; editing it after a try makes a new prompt with a new id.
+   */
+  draftIds: Schema.Record(Schema.String, Schema.Struct({ promptId: Schema.String, sent: Schema.NullOr(Schema.String) })),
   override: Override,
   notice: Schema.NullOr(Schema.String),
   status: Schema.NullOr(ServiceStatus),
@@ -136,6 +142,7 @@ export const init = (flags: Flags): Return => ({
     thread: null,
     drafts: {},
     sending: {},
+    draftIds: {},
     override: "auto",
     notice: null,
     status: null,
@@ -408,15 +415,38 @@ export const update = (model: Model, message: Message): Return =>
     ClickedArchive: ({ incidentId }) => archiveIncident(model, incidentId),
     ChangedEnvFilter: ({ filter }) => ({ model: { ...model, envFilter: filter } }),
     ChangedSortOrder: ({ order }) => ({ model: { ...model, sortOrder: order } }),
-    ChangedDraft: ({ text }) => (model.focus ? { model: { ...model, drafts: { ...model.drafts, [model.focus]: text } } } : { model }),
+    ChangedDraft: ({ text }) => {
+      if (!model.focus) return { model };
+      const current = model.draftIds[model.focus];
+      const fresh = !current || (current.sent !== null && current.sent !== text.trim());
+      if (!fresh) return { model: { ...model, drafts: { ...model.drafts, [model.focus]: text } } };
+      const { commandId, commandIds } = DomainFoldkit.next(model.commandIds);
+      return {
+        model: {
+          ...model,
+          commandIds,
+          drafts: { ...model.drafts, [model.focus]: text },
+          draftIds: { ...model.draftIds, [model.focus]: { promptId: `prompt:${commandId}`, sent: null } },
+        },
+      };
+    },
     ChangedOverride: ({ override }) => ({ model: { ...model, override } }),
     SubmittedPrompt: () => {
       const draft = draftOf(model);
       if (!model.focus || !draft.trim() || isSending(model) || model.page?.disposition === "archived") return { model };
       const { commandId, commandIds } = DomainFoldkit.next(model.commandIds);
       const title = model.page?.title ?? model.inbox.find((i) => i.incidentId === model.focus)?.title ?? model.focus;
+      const known = model.draftIds[model.focus];
+      // The same text again reuses the draft's id; a draft whose id is unknown (or whose text changed since a try) gets one now.
+      const promptId = known && (known.sent === null || known.sent === draft.trim()) ? known.promptId : `prompt:${commandId}`;
       return {
-        model: { ...model, commandIds, sending: { ...model.sending, [commandId]: { subject: model.focus, text: draft } }, notice: null },
+        model: {
+          ...model,
+          commandIds,
+          sending: { ...model.sending, [commandId]: { subject: model.focus, text: draft, promptId } },
+          draftIds: { ...model.draftIds, [model.focus]: { promptId, sent: draft.trim() } },
+          notice: null,
+        },
         commands: [
           Command.mapMessage(
             Client.AskThread({
@@ -424,7 +454,7 @@ export const update = (model: Model, message: Message): Return =>
               input: {
                 subject: model.focus,
                 title,
-                promptId: commandId,
+                promptId,
                 text: draft.trim(),
                 mode: "investigate",
                 origin: "page",
@@ -552,8 +582,10 @@ export const update = (model: Model, message: Message): Return =>
           if (!sent) return { model: { ...model, sending } };
           // Clear the draft only if it is still what was sent; anything typed since stays.
           const drafts = { ...model.drafts };
+          const draftIds = { ...model.draftIds };
           if (drafts[sent.subject] === sent.text) delete drafts[sent.subject];
-          return { model: { ...model, sending, drafts } };
+          if (draftIds[sent.subject]?.promptId === sent.promptId) delete draftIds[sent.subject];
+          return { model: { ...model, sending, drafts, draftIds } };
         },
         FailedAskThread: ({ commandId, failure }: { commandId: string; failure: { readonly _tag: string } }) => {
           const { [commandId]: _, ...sending } = model.sending;
