@@ -24,6 +24,8 @@ const SignalFields = {
   at: Schema.Number,
   /** Occurrences this report adds. */
   count: Schema.Number,
+  /** When the oldest of them happened, if earlier than `at`. */
+  firstAt: Schema.optionalKey(Schema.Number),
   /** A redacted, bounded line that shows the signal. */
   sample: Schema.optionalKey(Schema.String),
   /** How to see the same thing again. */
@@ -91,7 +93,7 @@ export class Incident extends Domain.Aggregate("Incident", {
   decide: {
     ReportSignal: (s, cmd) =>
       s._tag === "Unopened"
-        ? [new IncidentOpened({ ...fieldsOf(cmd), firstAt: cmd.at })]
+        ? [new IncidentOpened({ ...fieldsOf(cmd), firstAt: cmd.firstAt ?? cmd.at })]
         : [
             new SignalRecurred({
               at: Math.max(s.lastAt, cmd.at),

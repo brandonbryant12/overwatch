@@ -4,7 +4,7 @@ import { parseDuration } from "./duration.ts";
 import type { MetricRule } from "./detection.ts";
 
 /**
- * Overwatch configuration, read from the plugin entry's `options` in the user's own OpenCode config.
+ * Overwatch configuration: the apps, environments, sources and watchers in the service's config file.
  * Nothing here has an environment-specific default: apps, checkouts, contexts and queries all come from the user.
  */
 export interface PermissionRule {
@@ -126,7 +126,7 @@ export function expandPath(path: string, base?: string): string {
 
 function defaultDataDir(): string {
   const xdg = process.env.XDG_DATA_HOME;
-  return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "share"), "opencode-overwatch");
+  return join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "share"), "overwatch");
 }
 
 function permissionRules(value: unknown, path: string, errors: string[]): PermissionRule[] {
@@ -309,7 +309,7 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
       id,
       app: value.app,
       environment: value.environment,
-      everyMs: duration(value.every, "15m", `${path}.every`, errors),
+      everyMs: duration(value.every, "10m", `${path}.every`, errors),
       sources,
       skills: [...(app?.skills ?? []), ...strings(value.skills)],
       investigate: value.investigate !== false,
