@@ -28,7 +28,11 @@ import {
   RequestRun,
   routePrompt,
   Run,
+  RunClosed,
   RunCompleted,
+  RunFailed,
+  RunNotSent,
+  WrongSession,
   RunRequested,
   RunSent,
   runIdOf,
@@ -212,9 +216,9 @@ describe("threads and runs", () => {
         ),
         Story.view(ThreadPage, thread, (v) => v?.handoff?.ruledOut[0] === "a bad deploy of the database"),
         Story.view(Inbox, INBOX, (v) => v === null || v.items.length === 0 || v.items[0]!.verdict === "real"),
-        // The completed run is idempotent.
+        // A completed run is closed: a second finding is refused (a retried command keeps its receipt instead).
         Story.when(runRef, new CompleteRun({ sessionId, finding })),
-        Story.then(runRef),
+        Story.rejected(new RunClosed()),
       ),
     );
   });
@@ -245,3 +249,39 @@ describe("routing a prompt (plan 6.3)", () => {
 });
 
 void [RequestRun, AskThread];
+
+describe("a run's transitions are strict", () => {
+  const runRef = Run.ref(runIdOf(threadId, "s-1"));
+  const sessionId = sessionIdOf(threadId, "s-1");
+  const requested = new RunRequested({
+    threadId,
+    subject: id,
+    promptId: "s-1",
+    mode: "investigate",
+    sessionId,
+    messageId: messageIdOf(threadId, "s-1"),
+    newSession: true,
+    text: "why?",
+    origin: "page",
+    handoff: null,
+    at: T0,
+  });
+  const sent = new RunSent({ threadId, sessionId, messageId: messageIdOf(threadId, "s-1"), at: T0 });
+
+  test("a finding cannot complete a run that was never sent", () =>
+    run(held(Story.given(runRef, requested), Story.when(runRef, new CompleteRun({ sessionId, finding })), Story.rejected(new RunNotSent()))));
+
+  test("a finding cannot complete a run that failed, and a failed run cannot be sent again", () =>
+    run(
+      held(
+        Story.given(runRef, requested, sent, new RunFailed({ threadId, sessionId, reason: "timed out", at: T0 })),
+        Story.when(runRef, new CompleteRun({ sessionId, finding })),
+        Story.rejected(new RunClosed()),
+        Story.when(runRef, new MarkRunSent({})),
+        Story.rejected(new RunClosed()),
+      ),
+    ));
+
+  test("only the run's own session can complete it", () =>
+    run(held(Story.given(runRef, requested, sent), Story.when(runRef, new CompleteRun({ sessionId: "ses_someone_else", finding })), Story.rejected(new WrongSession()))));
+});

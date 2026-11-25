@@ -192,7 +192,11 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
         Effect.gen(function* () {
           const runs = yield* Run;
           yield* (runs.send(Run.ref(runId as never), command as MarkRunSent, { commandId }) as Effect.Effect<unknown, { readonly _tag: string }>).pipe(
-            Effect.catchIf((e) => e._tag === "RunUnknown", () => Effect.void),
+            // A refused transition (unknown, closed, not sent, another session) changes nothing; it is logged.
+            Effect.catchIf(
+              (e) => ["RunUnknown", "RunClosed", "RunNotSent", "WrongSession"].includes(e._tag),
+              (e) => Effect.sync(() => log(`run ${runId}: ${commandId} refused (${e._tag})`)),
+            ),
           );
         }),
       ),
