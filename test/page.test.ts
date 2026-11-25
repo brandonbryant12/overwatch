@@ -105,7 +105,11 @@ describe("the page", () => {
   });
 
   test("priority ordering ranks production errors above newer info items, and tier filters work", () => {
-    const withAll = { ...base, inbox: [qaInfo, stagingWarn, prodError] };
+    const env = (app: string, environment: string, tier: "production" | "staging" | "development") => ({
+      app, environment, tier, everyMs: 60_000, checkedThrough: null, lastError: null, expectsReadings: false, notReadyPods: null, memoryPctOfLimit: null,
+    });
+    const status = { environments: [env("shop-api", "production", "production"), env("shop-api", "staging", "staging"), env("billing-cron", "qa", "development")] } as never;
+    const withAll = { ...base, status, inbox: [qaInfo, stagingWarn, prodError] };
     expect(visibleInbox(withAll).map((i) => i.incidentId)).toEqual([inc1, inc2, inc3]);
     expect(visibleInbox({ ...withAll, sortOrder: "recent" }).map((i) => i.incidentId)).toEqual([inc3, inc2, inc1]);
     expect(visibleInbox({ ...withAll, envFilter: "prod" }).map((i) => i.incidentId)).toEqual([inc1]);

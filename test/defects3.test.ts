@@ -446,3 +446,20 @@ describe("8. every shape of secret is redacted on every way text enters", () => 
     }
   });
 });
+
+describe("9. the page uses the tier the service reports, not the environment's name", () => {
+  test("an environment called live with an explicit production tier stays under the production filter, and one called prod-like but staging does not", async () => {
+    const app = (await import("../web/src/app.ts")) as Record<string, any>;
+    const item = (id: string, environment: string) => ({ incidentId: id, title: id, app: "shop-api", environment, severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null });
+    const env = (environment: string, tier: string) => ({ app: "shop-api", environment, tier, everyMs: 60_000, checkedThrough: null, lastError: null, expectsReadings: false, notReadyPods: null, memoryPctOfLimit: null });
+    const model = {
+      ...app.init({ session: "s" }).model,
+      inbox: [item("inc_live", "live"), item("inc_prodlike", "prod-mirror")],
+      status: { environments: [env("live", "production"), env("prod-mirror", "staging")] },
+    };
+    expect(app.visibleInbox({ ...model, envFilter: "prod" }).map((i: { incidentId: string }) => i.incidentId)).toEqual(["inc_live"]);
+    expect(app.visibleInbox({ ...model, envFilter: "preprod" }).map((i: { incidentId: string }) => i.incidentId)).toEqual(["inc_prodlike"]);
+    // Before any status, nothing that might be production is filtered away.
+    expect(app.visibleInbox({ ...model, status: null, envFilter: "prod" })).toHaveLength(2);
+  });
+});

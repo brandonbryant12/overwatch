@@ -11,7 +11,7 @@ import {
   draftOf,
   environmentChips,
   type EnvState,
-  isProdEnv,
+  isProduction,
   isSending,
   Message,
   visibleInbox,
@@ -260,7 +260,7 @@ function noticeBarView(text: string, h: H): Html {
 
 function inboxRailView(model: Model, h: H): Html {
   const items = visibleInbox(model);
-  const prodCount = model.inbox.filter((i) => isProdEnv(i.environment)).length;
+  const prodCount = model.inbox.filter((i) => isProduction(model, i)).length;
   const preprodCount = model.inbox.length - prodCount;
 
   const filterOption = (value: EnvFilter, label: string, count?: number): Html =>
@@ -339,7 +339,7 @@ function inboxRailView(model: Model, h: H): Html {
                   )
                 : h.ul(
                     [h.Class("inbox-list"), h.Role("listbox"), h.AriaLabel("Incidents")],
-                    items.map((item) => inboxItemView(item, item.incidentId === model.focus, h)),
+                    items.map((item) => inboxItemView(model, item, item.incidentId === model.focus, h)),
                   ),
         ],
       ),
@@ -389,8 +389,8 @@ function inboxEmptyView(model: Model, h: H): Html {
   );
 }
 
-function inboxItemView(item: InboxItem, focused: boolean, h: H): Html {
-  const prod = isProdEnv(item.environment);
+function inboxItemView(model: Model, item: InboxItem, focused: boolean, h: H): Html {
+  const prod = isProduction(model, item);
   return h.li(
     [
       h.Key(item.incidentId),
@@ -456,7 +456,7 @@ function focusView(model: Model, h: H): ReadonlyArray<Html> {
     return [focusLoadingView(h)];
   }
   return [
-    focusHeaderView(page, h),
+    focusHeaderView(model, page, h),
     signalEvidenceView(page, model.copiedQuery, h),
     findingsSectionView(page, h, model.copiedSummary),
     threadSectionView(model.thread, model.status?.opencode.connected ?? null, h),
@@ -504,9 +504,9 @@ function focusLoadingView(h: H): Html {
   );
 }
 
-function focusHeaderView(page: IncidentPageState, h: H): Html {
+function focusHeaderView(model: Model, page: IncidentPageState, h: H): Html {
   const archived = page.disposition === "archived";
-  const prod = isProdEnv(page.environment);
+  const prod = isProduction(model, page);
   return h.header(
     [h.Class("focus-header")],
     [

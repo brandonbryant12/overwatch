@@ -223,10 +223,14 @@ const BlurActive = Command.define("BlurActive", {
   }),
 });
 
-/** Whether an environment name represents production tier. */
-export function isProdEnv(environment: string): boolean {
-  const lower = environment.toLowerCase();
-  return lower === "prod" || lower === "production" || lower.startsWith("prod-") || lower.endsWith("-prod");
+/**
+ * The tier the service reports for an app's environment (its `tier` setting), never a guess from the name: an
+ * environment called `live` can be production. Before the first status arrives the tier is unknown and counts as
+ * production, so nothing that might be production is filtered out of view.
+ */
+export function isProduction(model: Pick<Model, "status">, item: { readonly app: string; readonly environment: string }): boolean {
+  const env = model.status?.environments.find((e) => e.app === item.app && e.environment === item.environment);
+  return (env?.tier ?? "production") === "production";
 }
 
 const SEVERITY_RANK: Record<string, number> = { error: 3, warn: 2, info: 1 };
@@ -305,19 +309,19 @@ export function environmentChips(model: Pick<Model, "status" | "inbox">): Readon
     });
 }
 
-export function visibleInbox(model: Pick<Model, "inbox" | "envFilter" | "sortOrder">): ReadonlyArray<InboxItem> {
+export function visibleInbox(model: Pick<Model, "inbox" | "envFilter" | "sortOrder" | "status">): ReadonlyArray<InboxItem> {
   const filtered =
     model.envFilter === "all"
       ? model.inbox
       : model.envFilter === "prod"
-        ? model.inbox.filter((item) => isProdEnv(item.environment))
-        : model.inbox.filter((item) => !isProdEnv(item.environment));
+        ? model.inbox.filter((item) => isProduction(model, item))
+        : model.inbox.filter((item) => !isProduction(model, item));
 
   return [...filtered].sort((a, b) => {
     if (model.sortOrder === "recent") return b.lastAt - a.lastAt;
     const sevDiff = (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0);
     if (sevDiff !== 0) return sevDiff;
-    const prodDiff = (isProdEnv(b.environment) ? 1 : 0) - (isProdEnv(a.environment) ? 1 : 0);
+    const prodDiff = (isProduction(model, b) ? 1 : 0) - (isProduction(model, a) ? 1 : 0);
     if (prodDiff !== 0) return prodDiff;
     return b.lastAt - a.lastAt;
   });
