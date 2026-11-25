@@ -1,7 +1,7 @@
 # Overwatch command center: plan
 
-Status: final plan, fifth revision, 2026-11-25, after a second review by Gemini 4 Neon and GPT-6.2 Astra. Nothing
-in this plan is built yet. Section 11 lists what that review changed.
+Status: fifth revision, 2026-11-25. Phase 1A is built on the `command-center` branch: 110 tests and an end-to-end
+run against OpenCode 2.4.1 pass. The design pass is next. Section 11 lists what the second review changed.
 
 This revision replaces the design that hosted everything inside OpenCode. That design was reviewed by two
 independent models; what they found, and why it led here, is in the appendix.
@@ -24,6 +24,11 @@ From the owner, and treated as fixed:
 9. It is event sourced.
 10. Anything on screen can be prompted on: put a thing in focus, type, and an agent works with that thing as its
     subject. Overwatch decides sensibly whether that continues an existing session or starts a new one.
+
+11. It gets better with use. It learns from how the owner works with it, adapts and can be customised, and "the
+    arrow always points in the direction of improvement". Nobody expects the first version to be right.
+12. Other people will fork it. This version sets the architecture, the guides and the foundation a fork can
+    configure for itself.
 
 The goal is the most robust system that can be built upon. No earlier choice (plugin, GUI, no daemon) is binding.
 
@@ -281,6 +286,32 @@ Rules that hold for all of them:
 - Available three ways: the web app (a command palette), the loopback API, and an OpenCode tool, so agents and
   the owner's own sessions search the same index.
 
+### 5.4 Getting better over time
+
+The event log already holds every decision the owner makes. What turns that into improvement is a loop, and every
+step of it produces something explicit that the owner approves. The system never rewrites itself silently.
+
+1. **Goals.** A short record, in the owner's words, of what matters for each app and environment. Everything else
+   is measured against it.
+2. **Measurement, by code, weekly.** How often triage proposals were right; how much of the inbox was archived
+   unread; repeats that got through; routing choices the owner overrode; incidents the owner found that Overwatch
+   missed; how often each rule fired.
+3. **An interview.** A short OpenCode session that brings specific questions from those numbers ("you archived 9
+   of 11 memory alerts in staging: stop raising them?"), never an open-ended survey. Answers become goals and rules.
+4. **Change proposals.** Each is one concrete edit to a rule, a threshold, a prompt, a skill or a schedule, with
+   its evidence and how its effect will be measured. Approved changes are events, so they are versioned and can
+   be undone. The effect is measured afterwards, and a change that made things worse is flagged.
+5. **Replay first.** A proposed rule or prompt is tried against past incidents from the journal before it is
+   adopted ("would this have hidden October's outage?"). Replay reaches only the evidence that was stored.
+6. **A playbook per app.** Lessons from resolved incidents, kept as a file the owner can read and edit, loaded by
+   investigations.
+
+Limits, stated up front: one person is a small amount of signal, so noise preferences are learned quickly and
+subtler things slowly; and the system cannot easily know what it missed.
+
+What this needs from earlier phases, and has: every owner action is an event that records who or what issued
+it, and rules, thresholds and prompts are versioned data, not constants.
+
 ## 6. Prompting on anything, and sessions
 
 ### 6.1 Everything is addressable
@@ -423,10 +454,16 @@ It is done when these pass:
 
 ### Design pass
 
-As soon as phase 1A's page exists, a dedicated pass on its look and feel, done with the `frontend-design` skill.
-This is one person's own tool, so it can be opinionated, dense and fun: it does not have to look like a product.
-Phase 1A therefore builds the page plain and keeps view logic apart from styling. The design pass sets the
-visual language (type, colour, motion, density, how focus and the prompt bar feel) that every later page follows.
+A dedicated pass on look and feel by Gemini 4 Neon, using the repository's `gemini-frontend-design` skill. This is
+one person's own tool, so it can be opinionated, dense and fun: it does not have to look like a product. It sets
+the visual language (logo, type, colour, motion, density, how focus and the prompt bar feel) that every later page
+follows, records it in `docs/design.md`, adds a demo mode so the page can be seen full of realistic data, and
+leaves mock-ups of the pages still to be built.
+
+### Learning loop
+
+Designed with the owner straight after the design pass (5.4), then built in steps alongside the later phases:
+goals and measurement first, the interview and change proposals next, replay last.
 
 ### Phase 1B: the service in full
 
@@ -488,6 +525,10 @@ Export and restore, 50 environments, upgrade paths, the downstream install guide
 4. Whether Datadog APM (spans) is in use for the pilot app, and with which keys.
 
 ## 10. Not in this plan
+
+Also deliberately out: the system changing its own rules, thresholds or prompts without the owner approving the
+change.
+
 
 Remediation in any environment, spend tracking, Bun, mobile, multi-user access control, paging integrations.
 
