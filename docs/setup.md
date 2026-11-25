@@ -160,8 +160,9 @@ origins.
 
 Data lives in `dataDir` (default `~/.local/share/overwatch`): the database `overwatch.sqlite`, `worktrees/`, and
 `logs/` when run by launchd. Only one service may have a database open: a second one (a terminal and launchd both
-running it, say) refuses to start and names the process that has it. The lock is `overwatch.sqlite.lock`; one left
-by a process that died is taken over.
+running it, say) refuses to start and names the process that has it. The lock is held by the operating system on
+`overwatch.sqlite.lock` and released when the process exits or dies, so there is nothing to clean up after a crash;
+`overwatch.sqlite.lock.holder` only says who holds it.
 
 ## 6. Keep it running with launchd
 
@@ -215,7 +216,7 @@ guarantee about every kind of work.
 | Runs stay `queued` | OpenCode is not connected (see above). |
 | A run failed with "finished twice without filing a finding" | The model ended its turn twice without calling `file_finding`. Prompt on the incident again; it starts from the handoff. |
 | launchd starts it but `kubectl` fails | The agent's `PATH` lacks `kubectl` or its login helper. Reinstall from a terminal where `which kubectl` works. |
-| The service will not start: "Another Overwatch service (pid …) has … open" | Another service already has the database: stop it (`launchctl bootout gui/$(id -u)/dev.overwatch.service`, or the other terminal). If that pid is not Overwatch, remove the `.lock` file the message names. |
+| The service will not start: "Another Overwatch service (pid …) has … open" | Another service already has the database: stop it (`launchctl bootout gui/$(id -u)/dev.overwatch.service`, or the other terminal). The lock is released by the operating system when that process exits, so there is no file to remove. |
 | `restore` refuses a file as "not an Overwatch backup" | It is not a whole Overwatch database (does not open, lacks Overwatch's tables, or fails SQLite's integrity check). The current database was not touched. |
 | The page says it has not been built | `pnpm install` could not load the bundler (often the native binding behind a proxy). See [The native binary](#the-native-binary). |
 | An environment on the strip says "Not checked for …" | Its last full check is older than three polling intervals: the service is not running, a source keeps failing, or the laptop slept; `bin/overwatch status` shows each watcher's last run and error. |

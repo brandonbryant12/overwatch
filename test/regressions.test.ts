@@ -171,23 +171,31 @@ describe("A4. one service per database", () => {
 });
 
 describe("A4. the writer lock", () => {
-  test("a lock left by a process that died is taken over; one held by a live process is refused", async () => {
-    const { writeFileSync } = await import("node:fs");
+  test("a lock held by a process that died is free again; one held by a live process is refused with its pid", async () => {
     const { join } = await import("node:path");
     const { spawn } = await import("node:child_process");
     const { acquireWriterLock } = await import("../src/host/lock.ts");
     const { tempDir } = await import("./fixtures/support.ts");
     const file = join(tempDir("lock"), "overwatch.sqlite");
-    writeFileSync(`${file}.lock`, JSON.stringify({ pid: 2_147_483_000, purpose: "service" }));
+    const holder = (extra: string) =>
+      spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", "-e", `import(${JSON.stringify(new URL("../src/host/lock.ts", import.meta.url).pathname)}).then((m) => { m.acquireWriterLock(${JSON.stringify(file)}); console.log("held"); ${extra} })`], { stdio: ["ignore", "pipe", "ignore"] });
+    const held = (proc: ReturnType<typeof holder>) => new Promise<void>((r) => proc.stdout!.on("data", (c) => String(c).includes("held") && r()));
+    // Killed while holding it: the operating system releases it.
+    const killed = holder("setTimeout(() => {}, 60000)");
+    await held(killed);
+    killed.kill("SIGKILL");
+    await new Promise((r) => killed.on("exit", r));
     acquireWriterLock(file).release();
-    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"]);
+    // Alive and holding it: refused, naming the holder.
+    const alive = holder("setTimeout(() => {}, 60000)");
     try {
-      writeFileSync(`${file}.lock`, JSON.stringify({ pid: other.pid, purpose: "service", since: "earlier" }));
-      expect(() => acquireWriterLock(file)).toThrow(`(pid ${other.pid}`);
+      await held(alive);
+      expect(() => acquireWriterLock(file)).toThrow(`(pid ${alive.pid}`);
     } finally {
-      other.kill();
+      alive.kill();
     }
   });
+
 });
 
 describe("A5. restore never replaces a good database with a bad one", () => {
