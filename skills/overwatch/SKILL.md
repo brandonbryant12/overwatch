@@ -13,7 +13,7 @@ What you can do from any session:
 - Read one incident with its timeline and checked findings: `OverwatchApi_IncidentPage_get` with the incident id.
 - Read a thread (the prompts asked about an incident, how each was routed, the last handoff): `OverwatchApi_ThreadPage_get`
   with the thread id, which is `thr_` followed by the incident id.
-- Search everything, archived things included: `OverwatchApi_Search` with `{ "text": "..." }`. An exact id also matches.
+- Search everything, archived things included: `OverwatchApi_Search_ask` with `{ "text": "..." }`. An exact id also matches.
 
 `query_telemetry` and `file_finding` need a run token, which only sessions Overwatch starts are given. Do not invent one.
 

@@ -34,7 +34,7 @@ export const MCP_SERVER_NAME = "overwatch";
 
 /** The `toMcp` tools: reads only. Names are `OverwatchApi_<name>_<operation>`. */
 export const EXPOSED = ["Inbox.get", "IncidentPage.get", "ThreadPage.get", "Search"] as const;
-export const EXPOSED_TOOL_NAMES = ["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search"];
+export const EXPOSED_TOOL_NAMES = ["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search_ask"];
 export const SESSION_TOOL_NAMES = ["query_telemetry", "file_finding"];
 
 export interface McpPorts {

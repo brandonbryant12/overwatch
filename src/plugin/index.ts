@@ -36,7 +36,7 @@ export function investigatorPermissions(extra: ReadonlyArray<PermissionRule> = [
     { action: "read", resource: "*.env.*", effect: "deny" },
     { action: "read", resource: "*.env.example", effect: "allow" },
     ...GIT_READ.map((resource): PermissionRule => ({ action: "shell", resource, effect: "allow" })),
-    ...["query_telemetry", "file_finding", "OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search"].map(
+    ...["query_telemetry", "file_finding", "OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search_ask"].map(
       (tool): PermissionRule => ({ action: `${MCP_SERVER}_${tool}`, resource: "*", effect: "allow" }),
     ),
     ...extra,

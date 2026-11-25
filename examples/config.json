@@ -1,0 +1,24 @@
+// Overwatch service configuration. Copy to ~/.config/overwatch/config.json and replace every value.
+// Everything here is an example: no name, path, context or query in it is real.
+{
+  "service": { "port": 7450 },
+  "opencode": {
+    // Leave out "url" to find the OpenCode server the way the OpenCode client does.
+    "autoInvestigate": true,
+    "runTimeoutMinutes": 20
+  },
+  "apps": {
+    "shop-api": {
+      "checkout": "~/code/shop-api",
+      "environments": {
+        "production": {
+          "sources": {
+            "pods": { "type": "kubernetes", "context": "prod-cluster", "namespace": "shop", "selector": "app=shop-api" }
+          }
+        }
+      }
+    }
+  },
+  "watchers": [{ "app": "shop-api", "environment": "production", "every": "10m" }],
+  "lookback": { "initial": "24h", "max": "14d", "overlap": "2m", "slice": "6h" }
+}
