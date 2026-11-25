@@ -34,7 +34,7 @@ import { SearchStore } from "../domain/search.ts";
 import { IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
 import { ConfigureWatcher, RecordGap, Watcher } from "../domain/watcher.ts";
 import { layerSqlite, SqliteHost } from "../host/sqlite.ts";
-import { runWatcher, type WatcherRunSummary } from "./collector.ts";
+import { runWatcher, type CollectorPorts, type WatcherRunSummary } from "./collector.ts";
 import type { ServiceConfig } from "./config.ts";
 import { mcpLayer, type McpPorts } from "./mcp.ts";
 import { deliverNotifications, macNotifier, recordNotificationIntents, type Notifier } from "./notify.ts";
@@ -80,6 +80,8 @@ export interface ServiceHandle {
   readonly stop: () => Promise<void>;
   /** The MCP tools' ports, for tests that call the tools directly. */
   readonly mcpPorts: McpPorts;
+  /** The collector's ports, for tests that run a watcher with a crash in the middle. */
+  readonly collectorPorts: CollectorPorts;
   /** Deliver notifications that are due now (or at `now`). Runs on its own every 30 seconds. */
   readonly deliverNotifications: (options?: { readonly now?: number }) => Promise<number>;
 }
@@ -558,6 +560,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     work: () => worker.tick(),
     status,
     mcpPorts,
+    collectorPorts,
     deliverNotifications: (options?: { readonly now?: number }) => deliverNow(options?.now),
     stop: async () => {
       for (const timer of timers) clearInterval(timer);

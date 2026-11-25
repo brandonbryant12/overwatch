@@ -52,52 +52,48 @@ describe("A1. text is redacted where it enters, before it is stored, indexed or 
 });
 
 describe("A2. occurrence counts survive a crash between reporting and the checkpoint", () => {
-  test("three source lines are three occurrences, whatever the crash and whatever arrived meanwhile", async () => {
-    const { DatabaseSync } = await import("node:sqlite");
-    const { createServiceTables } = await import("../src/service/tables.ts");
+  test("three source lines are three occurrences in the incident aggregate, whatever the crash and whatever arrived meanwhile", async () => {
     const { runWatcher } = await import("../src/service/collector.ts");
-    const { fakeCluster } = await import("./fixtures/cluster.ts");
-    const { testConfig } = await import("./fixtures/service.ts");
     const { tempDir } = await import("./fixtures/support.ts");
-    const db = new DatabaseSync(":memory:");
-    createServiceTables(db);
-    const config = testConfig(tempDir("a2"));
-    const cluster = fakeCluster();
-    // The incident as the model keeps it: each command id counts once (a receipt), its count adds up.
-    const receipts = new Map<string, number>();
-    let crashAfterNextReport = true;
-    const ports = {
-      runtime: { options: config.options, exec: cluster.exec, fetch, now: Date.now, log: () => undefined, sleep: async () => undefined },
-      atomically: async <A,>(work: (d: typeof db) => A) => {
-        db.exec("BEGIN");
-        try {
-          const r = work(db);
-          db.exec("COMMIT");
-          return r;
-        } catch (e) {
-          db.exec("ROLLBACK");
-          throw e;
+    const tempDirFor = () => tempDir("a2");
+    const { service, cluster } = await testService();
+    try {
+      const ports = service.collectorPorts;
+      // The first report reaches the incident aggregate (its receipt is recorded), then the process dies before the
+      // outbox row is cleared: the next run sends the same report again, with the same command id.
+      let crashAfterNextReport = true;
+      const crashing = {
+        ...ports,
+        report: async (r: Parameters<typeof ports.report>[0]) => {
+          await ports.report(r);
+          if (crashAfterNextReport) {
+            crashAfterNextReport = false;
+            throw new Error("killed");
+          }
+        },
+      };
+      const watcher = (await import("./fixtures/service.ts")).testConfig(tempDirFor()).options.watchers[0]!;
+      const now = Date.now();
+      cluster.log(now - 10 * 60_000, "ERROR payment 42 timed out after 300ms");
+      cluster.log(now - 9 * 60_000, "ERROR payment 43 timed out after 300ms");
+      await runWatcher(crashing, watcher).catch(() => undefined);
+      cluster.log(now - 1_000, "ERROR payment 44 timed out after 300ms");
+      await runWatcher(crashing, watcher);
+      await runWatcher(crashing, watcher);
+      const occurrences = await service.read((db) => {
+        const rows = db.prepare("SELECT type, data FROM journal WHERE stream LIKE 'Incident/%' ORDER BY position").all() as Array<{ type: string; data: string }>;
+        let n = 0;
+        for (const row of rows) {
+          const data = JSON.parse(row.data) as { count?: number; occurrences?: number };
+          if (row.type === "IncidentOpened") n = data.count ?? 0;
+          if (row.type === "SignalRecurred") n = data.occurrences ?? n;
         }
-      },
-      read: async <A,>(work: (d: typeof db) => A) => work(db),
-      report: async (r: { commandId: string; count: number }) => {
-        if (!receipts.has(r.commandId)) receipts.set(r.commandId, r.count);
-        if (crashAfterNextReport) {
-          crashAfterNextReport = false;
-          throw new Error("killed");
-        }
-      },
-      recordGap: async () => undefined,
-    };
-    const watcher = config.options.watchers[0]!;
-    const now = Date.now();
-    cluster.log(now - 10 * 60_000, "ERROR payment 42 timed out after 300ms");
-    cluster.log(now - 9 * 60_000, "ERROR payment 43 timed out after 300ms");
-    await runWatcher(ports as never, watcher).catch(() => undefined);
-    cluster.log(now - 1_000, "ERROR payment 44 timed out after 300ms");
-    await runWatcher(ports as never, watcher);
-    await runWatcher(ports as never, watcher);
-    expect([...receipts.values()].reduce((a, b) => a + b, 0)).toBe(3);
+        return n;
+      });
+      expect(occurrences).toBe(3);
+    } finally {
+      await service.stop();
+    }
   });
 });
 
@@ -228,47 +224,57 @@ describe("A5. restore never replaces a good database with a bad one", () => {
 });
 
 describe("A6. time spent waiting for OpenCode does not count against a run", () => {
-  test("a run requested while OpenCode was closed gets its whole time limit once it is sent", async () => {
-    const { DatabaseSync } = await import("node:sqlite");
-    const { createServiceTables } = await import("../src/service/tables.ts");
-    const { makeWorker } = await import("../src/service/worker.ts");
-    const { messageIdOf } = await import("../src/domain/ids.ts");
-    const db = new DatabaseSync(":memory:");
-    createServiceTables(db);
-    const thread = ThreadId.make("thr_t");
-    let now = 0;
+  test("a run requested while OpenCode was closed gets its whole time limit once it is sent, through the service's own sent projection", { timeout: 30_000 }, async () => {
+    const limitMs = 1_500;
     let up = false;
-    let status = "requested";
-    const calls: string[] = [];
-    let pending: Record<string, unknown> = { runId: RunId.make("run_t"), threadId: thread, subject: IncidentId.make("inc_t"), promptId: "p", mode: "investigate", sessionId: "ses_t", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: "why?", origin: "page", handoff: null, status: "requested", nudges: [], at: 0, sentAt: null };
-    const worker = makeWorker({
-      opencode: { connect: async () => (up ? "x" : undefined), createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, newUserMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => void calls.push("interrupt"), answer: async () => undefined } as never,
-      atomically: async (work: (d: typeof db) => unknown) => work(db),
-      pendingRuns: async () => [pending] as never,
-      incidentPage: async () => null,
-      prepareCode: async () => ({ directory: "/nonexistent", lines: [], basis: { path: "/nonexistent", commit: null, deployed: false, note: "no code" } }),
-      runStatus: async () => status,
-      markSent: async () => {
-        status = "sent";
-        pending = { ...pending, status: "sent", sentAt: now };
-      },
-      adopt: async () => undefined,
-      nudge: async () => undefined,
-      fail: async (_: string, reason: string) => void calls.push(`fail: ${reason}`),
-      now: () => now,
-      runTimeoutMs: 60_000,
-      log: () => undefined,
-    } as never);
-    await worker.tick();
-    now = 120_000; // two minutes with OpenCode closed
-    up = true;
-    await worker.tick(); // sent now
-    now = 150_000;
-    await worker.tick(); // thirty seconds into its turn
-    expect(calls).toEqual([]);
-    now = 190_000;
-    await worker.tick(); // seventy seconds after it was sent
-    expect(calls).toEqual(["interrupt", "fail: no finding within 1 minutes"]);
+    const interrupted: string[] = [];
+    const port = {
+      connect: async () => (up ? "http://opencode.test" : undefined),
+      createSession: async () => undefined,
+      prompt: async () => undefined,
+      synthetic: async () => undefined,
+      newUserMessages: async () => [],
+      promptState: async () => ({ kind: "running" as const }),
+      interrupt: async (session: string) => void interrupted.push(session),
+      answer: async () => undefined,
+    };
+    const { service, cluster, client } = await testService({ opencode: port as never, config: { opencode: { runTimeoutMinutes: limitMs / 60_000 } } });
+    const events = (type: string) =>
+      service.read((db) => db.prepare("SELECT data FROM journal WHERE type = ? AND stream LIKE 'Run/%'").all(type) as Array<{ data: string }>);
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) {
+        await service.work();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    try {
+      cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await service.collect("shop-api/production");
+      const incident = IncidentId.make(await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!));
+      await client((api) => api.AskThread(threadIdOf(incident), { subject: incident, title: "t", promptId: "p", text: "why?", mode: "investigate", origin: "page", override: "auto" }));
+      // OpenCode is closed for longer than the whole time limit.
+      await settle();
+      await new Promise((r) => setTimeout(r, limitMs + 500));
+      await settle();
+      expect(await events("RunSent")).toHaveLength(0);
+      expect(await events("RunFailed")).toHaveLength(0);
+      up = true;
+      for (let i = 0; i < 40 && (await events("RunSent")).length === 0; i++) await settle();
+      expect(await events("RunSent")).toHaveLength(1);
+      // Well inside the limit counted from the send: still running.
+      await settle();
+      expect(await events("RunFailed")).toHaveLength(0);
+      expect(interrupted).toEqual([]);
+      // Past the limit counted from the send: interrupted and failed for that reason.
+      await new Promise((r) => setTimeout(r, limitMs + 200));
+      for (let i = 0; i < 40 && (await events("RunFailed")).length === 0; i++) await settle();
+      const failed = await events("RunFailed");
+      expect(failed).toHaveLength(1);
+      expect(JSON.parse(failed[0]!.data).reason).toContain("no finding within");
+      expect(interrupted).toHaveLength(1);
+    } finally {
+      await service.stop();
+    }
   });
 });
 
@@ -707,14 +713,30 @@ describe("B4. environments at a glance", () => {
 });
 
 describe("B6. a finding's product summary can be copied as one paragraph", () => {
-  test("the copy button copies the same paragraph the notification sends, and says it was copied", async () => {
+  test("the copy button copies the same paragraph the notification sends, says Copied only once the clipboard took it, and says so when it could not", async () => {
     const app = (await import("../web/src/app.ts")) as Record<string, any>;
+    const Effect = await import("effect/Effect");
     const { productSummary } = await import("../src/domain/finding.ts");
     const product = { impact: "Some card payments fail at checkout", affected: "customers paying by card", since: "10:05 UTC", status: "ongoing" };
     const text = productSummary(product);
     expect(text).toBe("Some card payments fail at checkout. Affected: customers paying by card. Since: 10:05 UTC. Status: ongoing.");
-    const result = app.update(app.init({ session: "s" }).model, app.Message.ClickedCopySummary({ runId: "run_1", text }));
-    expect(result.model.copiedSummary).toBe("run_1");
+    const start = app.init({ session: "s" }).model;
+    const result = app.update(start, app.Message.ClickedCopySummary({ runId: "run_1", text }));
     expect(result.commands).toHaveLength(1);
+    expect(result.model.copiedSummary).toBe(null);
+    // The clipboard takes it: Copied.
+    const written: string[] = [];
+    const ok = await Effect.runPromise(app.copyToClipboard(text, "run_1", { writeText: async (v: string) => void written.push(v) }));
+    expect(written).toEqual([text]);
+    expect(app.update(result.model, ok).model.copiedSummary).toBe("run_1");
+    // The clipboard refuses, or there is none: the owner is told, and nothing says Copied.
+    for (const clipboard of [{ writeText: async () => Promise.reject(new Error("Document is not focused.")) }, undefined]) {
+      const failed = (await Effect.runPromise(app.copyToClipboard(text, "run_1", clipboard))) as { _tag: string };
+      expect(failed._tag).toBe("FailedCopy");
+      const after = app.update(result.model, failed).model;
+      expect(after.copiedSummary).toBe(null);
+      expect(after.notice).toContain("Could not copy");
+    }
+    expect(((await Effect.runPromise(app.copyToClipboard(text, "run_1", { writeText: async () => Promise.reject(new Error("Document is not focused.")) }))) as { reason: string }).reason).toContain("Document is not focused");
   });
 });

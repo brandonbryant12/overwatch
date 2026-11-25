@@ -112,7 +112,9 @@ export const Message = defineMessageUnion({
   PressedJumpToPrompt: {},
   ClickedCopyQuery: { query: Schema.String },
   ClickedCopySummary: { runId: Schema.String, text: Schema.String },
-  CompletedCopyQuery: {},
+  /** The clipboard took the text; `target` is "query" or the run id of a summary. */
+  CompletedCopy: { target: Schema.String },
+  FailedCopy: { reason: Schema.String },
   CompletedDomEffect: {},
   ReceivedResult: { result: Client.Message },
 });
@@ -201,17 +203,23 @@ const SyncTheme = Command.define("SyncTheme", {
     }),
 });
 
+type Clipboard = { writeText(v: string): Promise<void> } | undefined;
+
+/** Copies text and says whether it worked: a page without clipboard access, or a refused write, is a failure. */
+export const copyToClipboard = (text: string, target: string, clipboard: Clipboard) =>
+  Effect.tryPromise(async () => {
+    if (!clipboard) throw new Error("this page has no clipboard access (it needs to be opened from 127.0.0.1)");
+    await clipboard.writeText(text);
+  }).pipe(
+    Effect.as(Message.CompletedCopy({ target })),
+    Effect.catch((error) => Effect.succeed(Message.FailedCopy({ reason: String((error as { cause?: unknown }).cause ?? error).replace(/^Error: /, "") }))),
+  );
+
 const CopyText = Command.define("CopyText", {
-  args: { text: Schema.String },
-  messages: [Message.CompletedCopyQuery],
-  execute: ({ text }) =>
-    Effect.tryPromise(async () => {
-      const nav = (globalThis as unknown as { navigator?: { clipboard?: { writeText(v: string): Promise<void> } } }).navigator;
-      if (nav?.clipboard) await nav.clipboard.writeText(text);
-    }).pipe(
-      Effect.ignore,
-      Effect.as(Message.CompletedCopyQuery()),
-    ),
+  args: { text: Schema.String, target: Schema.String },
+  messages: [Message.CompletedCopy, Message.FailedCopy],
+  execute: ({ text, target }) =>
+    copyToClipboard(text, target, (globalThis as unknown as { navigator?: { clipboard?: Clipboard } }).navigator?.clipboard),
 });
 
 const BlurActive = Command.define("BlurActive", {
@@ -564,15 +572,15 @@ export const update = (model: Model, message: Message): Return =>
       if (!model.focus || model.page?.disposition === "archived") return { model };
       return { model, commands: [FocusSelector({ selector: "#prompt-input" })] };
     },
-    ClickedCopySummary: ({ runId, text }) => ({
-      model: { ...model, copiedSummary: runId },
-      commands: [CopyText({ text })],
+    ClickedCopySummary: ({ runId, text }) => ({ model, commands: [CopyText({ text, target: runId })] }),
+    ClickedCopyQuery: ({ query }) => ({ model, commands: [CopyText({ text: query, target: "query" })] }),
+    // "Copied" only once the clipboard took it; a failure says so and how to copy by hand.
+    CompletedCopy: ({ target }) => ({
+      model: target === "query" ? { ...model, copiedQuery: true } : { ...model, copiedSummary: target },
     }),
-    ClickedCopyQuery: ({ query }) => ({
-      model: { ...model, copiedQuery: true },
-      commands: [CopyText({ text: query })],
+    FailedCopy: ({ reason }) => ({
+      model: { ...model, copiedQuery: false, copiedSummary: null, notice: `Could not copy: ${reason}. Select the text and copy it by hand.` },
     }),
-    CompletedCopyQuery: () => ({ model }),
     CompletedDomEffect: () => ({ model }),
     ReceivedResult: ({ result }) =>
       Client.Message.match(result, {
