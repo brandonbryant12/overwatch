@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { backup, clearSearch, restore } from "./backup.ts";
 import { registerSourceType } from "../collect/sources/index.ts";
-import { defaultConfigPath, loadConfig, loadExtensions } from "./config.ts";
+import { defaultConfigPath, loadConfig, prepareConfig } from "./config.ts";
 import { install, plist, uninstall } from "./launchd.ts";
 import { startService } from "./service.ts";
 
@@ -27,12 +27,13 @@ const configPath = flag("--config") ?? defaultConfigPath();
 const command = args[0] ?? "help";
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1]!.startsWith("--")));
 
+/** Every command reads the configuration through this: file, extensions, validation. */
+const prepare = () => prepareConfig(configPath, { registerSourceType });
 const dbFile = () => join(loadConfig(configPath).dataDir, "overwatch.sqlite");
 async function main() {
   switch (command) {
     case "serve": {
-      const config = loadConfig(configPath);
-      await loadExtensions(config.extensions, { registerSourceType });
+      const config = await prepare();
       const service = await startService(config);
       const stop = async () => {
         await service.stop();
@@ -43,9 +44,7 @@ async function main() {
       return;
     }
     case "check": {
-      const loaded = loadConfig(configPath);
-      await loadExtensions(loaded.extensions, { registerSourceType });
-      const config = loadConfig(configPath);
+      const config = await prepare();
       if (config.errors.length) {
         console.error(`${configPath} has problems:\n- ${config.errors.join("\n- ")}`);
         process.exitCode = 1;
@@ -53,7 +52,7 @@ async function main() {
       return;
     }
     case "status": {
-      const config = loadConfig(configPath);
+      const config = await prepare();
       const response = await fetch(`http://127.0.0.1:${config.port}/status`).catch(() => undefined);
       if (!response) {
         console.error(`The service is not answering on port ${config.port}.`);
@@ -83,7 +82,7 @@ async function main() {
       return;
     }
     case "launchd": {
-      const config = loadConfig(configPath);
+      const config = await prepare();
       const main = fileURLToPath(import.meta.url);
       const agentsDir = flag("--agents-dir");
       const action = positional[1];

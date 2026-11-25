@@ -104,6 +104,17 @@ export async function loadExtensions(paths: ReadonlyArray<string>, registries: R
   }
 }
 
+/**
+ * The one way every command gets its configuration: read the file, load the extensions it lists (so their source
+ * types exist), then parse and validate. `check`, `serve` and every other command go through here.
+ */
+export async function prepareConfig(file = defaultConfigPath(), registries: Readonly<Record<string, unknown>>): Promise<ServiceConfig> {
+  const first = loadConfig(file);
+  if (first.extensions.length === 0) return first;
+  await loadExtensions(first.extensions, registries);
+  return loadConfig(file);
+}
+
 export function loadConfig(file = defaultConfigPath()): ServiceConfig {
   let text: string;
   try {

@@ -265,3 +265,43 @@ describe("A6. time spent waiting for OpenCode does not count against a run", () 
     expect(calls).toEqual(["interrupt", "fail: no finding within 1 minutes"]);
   });
 });
+
+describe("A7. every command loads, extends and validates the configuration the same way", () => {
+  test("a config using an extension's source type is valid for check and for serve", { timeout: 60_000 }, async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { spawn, spawnSync } = await import("node:child_process");
+    const { tempDir } = await import("./fixtures/support.ts");
+    const dir = tempDir("a7");
+    writeFileSync(
+      join(dir, "fork-source.ts"),
+      `export default ({ registerSourceType }) => registerSourceType({ type: "fork-source", queryHelp: "", validate: () => [], collect: async () => ({ signals: [], samples: [], notes: [] }), query: async () => "" });\n`,
+    );
+    const port = 7400 + Math.floor(Math.random() * 400);
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({
+        extensions: ["fork-source.ts"],
+        service: { port },
+        dataDir: join(dir, "data"),
+        opencode: { url: "http://127.0.0.1:1" },
+        apps: { a: { checkout: dir, environments: { e: { sources: { s: { type: "fork-source" } } } } } },
+        watchers: [{ app: "a", environment: "e" }],
+      }),
+    );
+    const bin = new URL("../bin/overwatch", import.meta.url).pathname;
+    const check = spawnSync(bin, ["check", "--config", join(dir, "config.json")], { encoding: "utf8" });
+    expect(check.stdout).toContain("is valid");
+    const serve = spawn(bin, ["serve", "--config", join(dir, "config.json")], { stdio: ["ignore", "pipe", "pipe"] });
+    try {
+      let status: { configErrors?: string[] } | undefined;
+      for (let i = 0; i < 100 && !status; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        status = await fetch(`http://127.0.0.1:${port}/status`).then((r) => r.json() as never, () => undefined);
+      }
+      expect(status?.configErrors).toEqual([]);
+    } finally {
+      serve.kill("SIGTERM");
+    }
+  });
+});
