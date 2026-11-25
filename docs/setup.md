@@ -161,8 +161,9 @@ origins.
 Data lives in `dataDir` (default `~/.local/share/overwatch`): the database `overwatch.sqlite`, `worktrees/`, and
 `logs/` when run by launchd. Only one service may have a database open: a second one (a terminal and launchd both
 running it, say) refuses to start and names the process that has it. The lock is held by the operating system on
-`overwatch.sqlite.lock` and released when the process exits or dies, so there is nothing to clean up after a crash;
-`overwatch.sqlite.lock.holder` only says who holds it.
+`overwatch.sqlite.writer` and released when the process exits or dies, so there is nothing to clean up after a crash;
+`overwatch.sqlite.writer.holder` only says who holds it. An `overwatch.sqlite.lock` left by an earlier version is only
+consulted: if that version is still running the new one refuses to start, and a note left by one that died is removed.
 
 ## 6. Keep it running with launchd
 
