@@ -333,9 +333,11 @@ Rows never move while the owner is looking. New arrivals collect under "new sinc
 
 | Way out | Means | Comes back |
 | --- | --- | --- |
-| **Done** | I have dealt with this, or accept it | Only if it gets materially worse than it was, or, when a fix was linked, if it recurs after the fix shipped. It returns labelled with the reason |
-| **Later** | Not now | At a time ("2d", "monday") or when something changes (a new finding, a deploy, a merge), saying which |
-| **Never** | Stop raising this | Never, unless it becomes severe enough to break through. It makes a rule (5.2) and takes an optional one-tap reason: noise, expected or duplicate |
+| **Done** | This is dealt with | If it happens again, after one polling interval of grace for occurrences already in flight; when a fix is linked, only after that fix is released. It returns saying how many times it happened since |
+| **Later** | Not now | At a time ("2d", "monday"), when something changes (a new finding, a deploy), or when it gets worse (twice the rate and at least five more, or a rise in severity). "Until it gets worse" is how the owner says "I know about this level". It returns saying which |
+| **Never** | Stop raising this | Only if severity rises or the rate reaches ten times what it was. It takes an optional one-tap reason (noise, expected, duplicate) and appears in the one list of what is muted (5.2) |
+
+A row that comes back from Done three times in 14 days offers Later-until-worse or Never, and applies neither.
 
 Acting on an item and handing it to an agent are not ways out. They are prompts (section 6).
 
@@ -648,6 +650,10 @@ guarantee); the builder makes them pass; the assessor then grades. Nothing new i
 defect is open, and if two gradings in a row show no improvement the loop stops and the owner is told why.
 
 Increments 0 (the second grading's defects) and 1 (the daily loop) are built; see "Built so far".
+
+The third grading was B minus again, with several areas up and none down. The assessor's first set of tests is in
+`test/pending/`: 38 tests, of which 18 fail on what exists. Making those 18 pass, and nothing else, is the next
+pass. Increment 2 starts only when a grading reaches B.
 
 2. **Ready for the real thing.** Everything so far has run against fakes and a scripted model. Before more is
    added: a `doctor` command that checks the laptop (the launchd agent, each cluster sign-in, the registry proxy
