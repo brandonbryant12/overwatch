@@ -1,6 +1,6 @@
 # Using Overwatch
 
-What exists in phase 1A, and what does not yet. Anything marked *planned* is described in
+What exists now, and what does not yet. Anything marked *planned* is described in
 [plans/command-center.md](plans/command-center.md) and is not built.
 
 ## What the service does on its own
@@ -30,37 +30,70 @@ What exists in phase 1A, and what does not yet. Anything marked *planned* is des
 ## Environments at a glance
 
 Under the header, a strip shows every watched app and environment, production first, with its state in words and a
-glyph: `Checked, quiet`, `N open` (needs a look), `Over a limit`, `Check failing: …`, `Not checked yet`, or
-`Not checked for <time>` once three polling intervals have passed without a full check. Each shows how long ago it
-was checked and, for Kubernetes, the latest readiness (`all pods ready`, `2 not ready`) and memory against limit.
-Anything not measured says so; not checked and stale use the hatched unknown pattern, so an empty inbox with stale
-environments never looks like a healthy one.
+glyph: `Checked, quiet`, `N open` (needs a look), `Over a limit`, `Check failing: …`, `Checked, memory not measured`,
+`Not checked yet`, `Not checked for <time>` once three polling intervals have passed without a full check, or
+`Not checked since <time> (signed out)` when its connection is suspended. Each shows how long ago it was checked and,
+for Kubernetes, the latest readiness and memory against limit.
+
+"Quiet", on the strip or as the inbox's all-clear, comes from one rule: never while any environment is suspended,
+failing, not yet checked, stale, over a limit, missing a reading it should have, or has something open, and never
+while a cause is waiting on you. An empty inbox with something unchecked says "Inbox empty", not "All quiet".
 
 ## The inbox
 
-The page at `http://127.0.0.1:7450` shows the inbox on the left: every incident that needs a look, ranked by severity
-and environment tier (or sorted by most recent), with filters for `All`, `Prod`, and `Pre-prod`. Each row shows its
-severity glyph, app and environment, occurrence count, age, and the verdict once there is a finding. It updates live;
-there is no reload button.
+The page at `http://127.0.0.1:7450` shows the inbox on the left, grouped by why each thing needs you:
+
+- **Needs you**: something that stops Overwatch working (a signed-out connection, everything offline, OpenCode not
+  running while work waits), anything that came back, and a production incident whose finding says real or unsure or
+  whose investigation failed after its retry.
+- **Working**: an agent is on it and there is nothing to do yet; collapsed to a count.
+- **New**: arrived, or changed (a new finding, a rise in severity), since you last looked at it.
+- **Quiet**: handled without you (the finding says not real), or looked at and unchanged; collapsed to a count.
+
+A row is in the first group that applies, with one line saying why when it needs you. Within a group rows are ranked
+by severity and tier (or by most recent), with filters for `All`, `Prod` and `Pre-prod` by the tier each environment
+is configured with.
+
+**Rows never move while you look.** A row that changes updates in place. What arrives, or now belongs in another group,
+waits behind that group's `N new` line; press `r` (or click the line, or come back to the page) to show them, sorted.
+When nothing is shown at all, what arrives is shown at once. "Since you last looked" is kept in your browser.
 
 To explore the page with realistic data without connecting to a real cluster or OpenCode, run `pnpm run demo` (use
-`-- --port <n>` for a custom port or `-- --empty` for the empty inbox state).
+`-- --port <n>` for a custom port or `-- --empty` for the empty inbox state). It seeds every group, an incident marked
+Done, one that came back saying why, one deferred until something changes, a muted one, and a suspended connection.
 
-Things leave the inbox one way in phase 1A:
+## Three ways out
 
-- **Archive** (click the archive icon or press `a` / `e` on a focused item): the incident leaves the inbox for good
-  and focus advances to the next item. More occurrences of the same signal update the archived incident (its count
-  and timeline) without bringing it back.
+Each is one key on the incident in focus, or a button on its row and in its header. Each says what it did, with
+`u` to undo; anything that left the inbox can be found by search and put back from its page.
 
-*Planned*: snooze, suppress (rules), delegate, act, grouping one cause across environments into one decision, and
-items coming back only for something materially new.
+- **Done** (`d`): "this is dealt with." It comes back if it happens again: "Back: happened again 3 times since you
+  marked it done." Occurrences already in flight (within one polling interval of Done) do not count.
+- **Later** (`l`): "not now." Type until when: `2h`, `2d`, `tomorrow` or `monday` (9:00 your time), `worse` for
+  until it gets worse, or nothing for until something changes (a new finding on it, or a deploy in its environment).
+  Any Later also comes back if it gets worse: the severity rises, or the rate reaches twice what it was with at least
+  five more. It comes back saying which. `w` is Later until it gets worse, in one key: "I know about this level, tell
+  me if it grows."
+- **Never** (`n`): "stop raising this." Before you confirm, it shows how many it would have hidden over the last 14
+  days; you can give a reason (noise, expected, duplicate). It mutes this incident's fingerprint in its app and
+  environment, and breaks through only if the severity rises or the rate reaches ten times what it was. `m` (or
+  `Muted N` above the inbox) lists everything muted with its reason, how many it hid this week, when it last did, and
+  Undo.
+
+A Done that came back three times within 14 days was probably the wrong way out: its row offers `w` Later until it
+gets worse, or `n` Never. It only offers. Every way out, undo and return is an event recording who issued it. The
+thresholds are configuration (see [customizing.md](customizing.md)).
+
+*Planned*: grouping one cause across environments into one decision, bulk actions, and a general rule editor.
 
 ## Focus and the prompt bar
 
 Click an incident (or step through the inbox with `j` / `k`) to put it in focus. The right stage shows what was seen
 (the redacted sample line and the copyable command to see it again), structured findings with product impact, root
-cause, next check, ruled-out hypotheses, unchecked gaps, and each citation marked verified (`✓ Verified by code`) or
-unverifiable (`? Unverifiable`, rendered on a hatched unknown surface), the thread (active sessions, latest handoff
+cause, next check, ruled-out hypotheses, unchecked gaps, and each quote marked `✓ Exact quote matched` (found where
+the finding says, which proves the words are there, not that the conclusion is right) or `? Not matched` (on a hatched
+unknown surface). A finding's header shows how many of its quotes matched ("2 of 3 quotes matched") and whether the
+code it read was the deployed code, not the model's own confidence; the thread (active sessions, latest handoff
 for fresh sessions, and every prompt with its `held`, `queued`, `sent`, `answered`, or `failed` status), and the
 incident timeline.
 
@@ -77,8 +110,10 @@ Kubernetes `logs`, `get`, `describe` and `top`, never free-form `kubectl` argume
 and history with `git_history` (`log`, `show`, `blame`, `diff`); it has no shell. It files a finding with
 `file_finding`. A quote attributed to a telemetry source must be in what that source returned to the session (a
 query result, or a sample line the brief attributes to it); a quote from a file must be in that file. The owner's
-question and Overwatch's own description of the incident are shown to the session but are not evidence. A finding
-with a quote that is not where it says is refused with the reason, and the agent tries again.
+question and Overwatch's own description of the incident are shown to the session but are not evidence; a quote from
+`git_history`'s output counts. A finding with a quote that is not where it says is refused with the reason, and the
+agent tries again. A verdict of real with the cause marked observed needs at least one matched quote; without one the
+cause is recorded as inferred, and the agent is told.
 
 Each finding has a **Copy summary** button: impact, who is affected, since when and status as one paragraph, to paste
 to someone outside engineering. What you type in the prompt bar belongs to the incident it was typed on, and stays
@@ -89,27 +124,22 @@ evidence, a selection, a search result set) as the focus, and modes other than i
 
 ## Same session or a new one
 
-Before you send, the prompt bar shows your locked focus target and what will happen, for example
-`continues ses_...: continues the idle session` or `new session: a new session`. The decision is a pure function of
-the thread's sessions, the mode, and your choice in the segmented selector (`Auto`, `New`, `Here`) next to the input:
+Sessions are workers you do not manage. Before you send, the prompt bar shows your locked focus target and where the
+prompt will go, for example `continues ses_...: continues the idle session` or `new session: a new session`:
 
-| Choice | What happens |
-| --- | --- |
-| `Auto` | No session yet, or the last one failed: a new session. An idle session in the same mode: continue it. A running one: the prompt is queued behind its current turn (never interrupting it). Several: the most recent idle one. |
-| `New` | Always a new session. It starts from the thread's handoff, so it knows what was concluded and ruled out. |
-| `Here` | The latest session, whatever its state. |
+- No session yet, or the last one failed: a new session. An idle session: continue it. A running one: the prompt is
+  queued behind its current turn (never interrupting it). Several: the most recent idle one.
+- **Shift+Enter** sends in a new session instead. It starts from the thread's handoff, so it knows what was concluded
+  and ruled out.
 
 The thread runs the same function again when your prompt arrives, so what the page showed and what happens agree.
 
-*Planned*: answering a session that waits on a permission first, and starting fresh when the deployed revision
-changed or the session grew too large.
-
 ## Keyboard shortcuts and theme
 
-Press `?` anywhere on the page to open the keyboard reference: `j`/`k` (or arrow keys) move focus through the inbox,
-`a`/`e` archive the focused incident, `p`/`Enter` jump to the prompt bar, `/` or `⌘K` open search, `1`/`2`/`3`
-switch environment filters, `t` toggles between Night Watch (dark) and Daylight Chart (light), and `Esc` closes
-overlays or leaves the prompt input.
+Press `?` anywhere on the page for the keyboard reference: `j`/`k` (or arrow keys) move through the rows as shown,
+`d` Done, `l` Later, `w` Later until it gets worse, `n` Never, `u` undo, `r` show new rows, `m` the muted list,
+`p`/`Enter` jump to the prompt bar (Shift+Enter there sends in a new session), `/` or `⌘K` search, `1`/`2`/`3`
+environment filters, `t` theme, and `Esc` closes a sheet or leaves the prompt input.
 
 ## Working from OpenCode
 
@@ -122,14 +152,15 @@ thread, and search. Only sessions Overwatch started can query telemetry or file 
 
 ## Search
 
-Search covers incidents (archived ones too), findings, prompts, and threads, by words or by exact id. Press `/` or
-`⌘K` (or click the search bar in the header) to search from the page and jump directly into any incident, including
-archived ones. Search is also available via the Api's `Search` query and the MCP tool `OverwatchApi_Search_ask`.
+Search covers incidents wherever they went (Done, Later, Never), findings, prompts, and threads, by words or by exact
+id. Press `/` or `⌘K` (or click the search bar in the header) to jump into any incident; one that left the inbox shows
+where it went and a `Put back` button. Search is also available via the Api's `Search` query and the MCP tool `OverwatchApi_Search_ask`.
 *Planned*: filtering by app/environment/time and prompting directly on a search result set.
 
 ## When OpenCode is closed
 
-Polling, the page, archive, and search keep working. The top header shows OpenCode's live connection state and how
+Polling, the page, the ways out, and search keep working. With work waiting, `Needs you` shows one item: OpenCode is
+not running, with how many investigations wait. The top header shows OpenCode's live connection state and how
 many runs are waiting (click it to inspect all watchers and queue counts from `/status`). A prompt you send is
 recorded and its run waits: the prompt bar notes that it will queue, the thread shows it as `queued`, and
 `bin/overwatch status` shows OpenCode not connected and how many runs wait. When OpenCode starts, each waiting run is
@@ -138,10 +169,28 @@ itself, and if a turn was not resumed Overwatch asks the session once to continu
 by Overwatch and recorded before anything is sent, so nothing is sent twice.
 
 A run whose session ends twice without a finding, or that runs past `opencode.runTimeoutMinutes`, fails with the
-reason on the thread. Prompt again to start a new session from the handoff.
+reason on the thread, and is retried once in a fresh session. If the retry fails too, the work is parked: a production
+incident then shows under `Needs you` with the reason. Prompt again to start a new session from the handoff.
 
 ## When a source is failing
 
-The run's failure is in `bin/overwatch status` (`last_error`), the source's checkpoint stays where it was, and the
-next run covers the same time again. *Planned* (phase 1B): classifying failures (sign-in, permission, rate limit,
-unreachable, configuration), backing off and suspending, one inbox item per cause, and a Connections page.
+Overwatch does not hammer a thing that is broken, and tells you once. Each failure is classified by what it says:
+
+| Kind | Example | What Overwatch does |
+| --- | --- | --- |
+| Sign-in | `You must be logged in to the server (Unauthorized)`, a rejected Datadog key | One confirming attempt at the next poll, then suspended. |
+| Permission | `pods is forbidden: … cannot list` | That source is suspended; the rest keep working. |
+| Configuration | an unknown namespace or context | Suspended until its configuration changes. |
+| Rate limit | HTTP 429 | Waits as long as asked, else a growing wait. Never suspended. |
+| Unreachable | timeouts, refused connections, gateway errors, the VPN down | A growing wait (1m, 2m, 4m… up to 30m), then suspended after 5 in a row. |
+
+A sign-in failure is per connection (a kubectl context, a Datadog site): every source behind it waits. A suspended
+connection is one item under `Needs you` with the exact command that fixes it, updated quietly while it lasts and gone
+once it recovers; if every connection is unreachable at once, that is one item, "Offline or off the VPN". Its
+environments show `Not checked since …`, never quiet, and nothing read through it is counted, so its incidents
+neither resolve nor come back. Overwatch tries a suspended connection again every 30 minutes with one ordinary poll,
+and at once after waking from sleep or a network change; when it works, the source catches up from its checkpoint.
+Suspending and resuming are events on the watcher. The limits are configuration (`failures`).
+
+*Planned*: a Connections page with retry and resume buttons, turning off only the one check a permission forbids (a
+whole source is suspended today), and pausing the agent queue when the model provider (not OpenCode) is down.

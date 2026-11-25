@@ -56,14 +56,18 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   checked before any argv is built; never pass an agent's string through as an argument. The investigator has no
   shell. (`regressions.test.ts` A9, `mcp.test.ts`)
 - **Citations are checked by code, with provenance.** Everything a session is shown is recorded with what it is: a
-  source's own output under that source's name, other context-pack parts as `brief:<kind>`. A quote attributed to a
-  source verifies only against that source's rows; a file quote only against the file in the thread's worktree. The
-  finding records which code it read. `query_telemetry` and `file_finding` refuse calls without the session id from
+  source's own output under that source's name, `git_history` output as `git:<operation>`, other context-pack parts
+  as `brief:<kind>`. A quote attributed to a source verifies only against that source's rows; a file quote only
+  against the file in the thread's worktree; any other label is never verified. A real verdict with an observed cause
+  needs a matched quote, or it is recorded as inferred and the reply says so (`claimable`). The finding records which
+  code it read. The page shows how many quotes matched and labels them "Exact quote matched", never the model's own
+  confidence. `query_telemetry` and `file_finding` refuse calls without the session id from
   `_meta`, with another session's token, or for a finished run. (`mcp.test.ts`)
 - **The plugin has no Effect and no domain client at run time**; its imports from OpenCode's packages are types only.
   It holds no state and schedules nothing. Its `API_VERSION` equals the service's. (`plugin.test.ts`)
 - **The investigator is denied by default.** Add narrow rules through the plugin's `permissions` option, not by
   widening `investigatorPermissions`.
+- **No session picker.** The prompt bar previews where a prompt goes; Shift+Enter is the one override (a new session).
 - **The page holds no logic of its own.** State and pure selectors live in `web/src/app.ts` (tested in
   `page.test.ts`), HTML builders in `web/src/views.ts`, glyphs in `web/src/icons.ts`, styling only in
   `web/src/style.css`, following `docs/design.md`. It reads through the typed client and `watch`; `/status` is decoded
@@ -76,8 +80,24 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   after; never report before the checkpoint is saved. (`regressions.test.ts` A2)
 - **Runs are strict.** requested → sent → completed | failed; only the run's own session completes it; time limits
   count from `sentAt`. (`domain.test.ts`, `regressions.test.ts` A6)
-- **Unknown is never healthy.** A metric not sampled by the last poll is `unknown`; an environment not fully checked
-  within three intervals is stale; the page says so in words and with the unknown pattern. (`regressions.test.ts` B1, B4)
+- **Unknown is never healthy.** A metric not sampled by the last poll is `unknown`, and a missing sample breaks a run
+  of samples; an environment not fully checked within three intervals is stale; a suspended one says since when. The
+  page says so in words and with the unknown pattern. "Quiet" comes only from `notQuietBecause` / `allQuiet` in
+  `web/src/app.ts`; do not write another. (`regressions.test.ts` B1, B4; `defects3.test.ts` 6; `daily.test.ts`, over
+  generated states)
+- **Three ways out, each meaning one thing.** Done: back if it happens again after one polling interval. Later: back at
+  a time, on a change (finding, deploy), or when it gets worse; any Later comes back when worse. Never: back only on a
+  severity rise or ten times the rate. `decide` decides it, with thresholds sent as data (`comeBack`); every way out,
+  undo and return is an event naming who issued it, and a return carries one line saying why. Do not add a way out.
+  (`domain.test.ts`, `daily.test.ts`)
+- **Rows never move while the owner looks.** `arrangedInbox` keeps the shown layout; arrivals and regrouped rows wait
+  behind a group's line until `r`, a click on it, or coming back to the page. Grouping is only `groupInbox`.
+  (`daily.test.ts` C, `browser.test.ts`)
+- **Failures are classified, not retried blindly** (`src/collect/failures.ts`). Sign-in suspends after one confirming
+  attempt; others back off to `failures.ceiling`; a suspended connection is probed at that pace and on wake or network
+  change. The `connections` table is polling state; suspension and resumption are Watcher events. One cause, one item
+  (`causesOf`); everything unreachable at once is one cause. Agent work is retried once in a fresh session, then
+  parked (`RunFailed.retryAs`). (`daily.test.ts` D, `domain.test.ts`)
 - **No spend tracking or caps**; only timeouts and concurrency limits.
 - **Free text is redacted where it enters** (`src/domain/redact.ts`, by name and by how random it looks): the
   aggregates redact prompts, signal titles, samples and queries, findings, handoffs and reasons in `decide`, before

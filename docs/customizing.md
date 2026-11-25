@@ -51,7 +51,7 @@ service talks to OpenCode, also `pnpm run e2e`; if you touched `src/host`, also 
 
 **Your own changes as data.** Later phases will have the system propose changes to its own rules, thresholds and
 prompts from how you use it. To keep that possible: what the owner does is recorded as an event with who issued it
-(a prompt's `origin`, an archive's `actor`), and thresholds and prompts are configuration and files, not constants
+(a prompt's `origin`, a way out's `actor`), and thresholds and prompts are configuration and files, not constants
 in code. Keep new ones that way.
 
 ## The configuration file
@@ -188,6 +188,12 @@ service yet.
 | `redaction.allow`, `redaction.patterns` | none | Regular expressions to keep, and extra ones to redact. |
 | `dataDir` | `~/.local/share/overwatch` | Database, worktrees and logs. |
 | `notify` | `true` | The master switch for notifications; each environment's `notify` decides within it. Notifications are macOS only. |
+| `comeBack.multiple`, `comeBack.atLeast` | `2`, `5` | A Later comes back when the rate (occurrences in the last day) reaches `multiple` times what it was, with at least `atLeast` more. |
+| `comeBack.neverMultiple` | `10` | Never breaks through at this many times the rate it had when muted. |
+| `comeBack.offerAfter`, `comeBack.offerWithin` | `3`, `14d` | A Done that came back this many times within this long offers Later until it gets worse, or Never. |
+| `failures.backoff` | `1m` | The first wait after a failure that may pass (unreachable, rate limited); it doubles each time. |
+| `failures.ceiling` | `30m` | The longest wait, and how often a suspended connection is tried again. |
+| `failures.attempts` | `5` | Unreachable failures in a row before a connection is suspended. Sign-in always suspends after one confirming attempt. |
 | `timeouts.investigation` / `fix` / `verify`, `concurrency.investigations` / `watchers`, `schedule`, `model`, `permissions` | | *Not used yet* by the service. |
 
 ## Adding an app, an environment, a watcher
@@ -255,6 +261,10 @@ shown are plain tables in `src/service/tables.ts`.
 | How long de-duplication state is kept (14 days) | `SEEN_KEEP_MS` in `src/service/collector.ts` |
 | Metric rules (defaults) and series length (120 points) | `DEFAULT_METRIC_RULES` in `src/collect/detection.ts` (or `metrics` per environment); `SERIES_POINTS` in `src/service/collector.ts` |
 | When an environment counts as stale (3 polling intervals) | `STALE_INTERVALS` in `web/src/app.ts` |
+| When the page may say quiet | `notQuietBecause` and `allQuiet` in `web/src/app.ts` (one rule; `test/daily.test.ts` checks it over generated states) |
+| Which inbox group a row is in | `groupInbox` in `web/src/app.ts` |
+| How a failure is classified, and the fix it suggests | `classifyFailure`, `fixFor` in `src/collect/failures.ts` |
+| Done's grace after it is marked (one polling interval of the watcher) | `graceMs` in `src/service/service.ts` (`report`) |
 | Which Kubernetes resources, flags and values agents and collection may use | `READABLE`, `FLAGS` in `src/collect/sources/kubernetes.ts` |
 | Which git history operations investigators may use | `src/service/history.ts` |
 

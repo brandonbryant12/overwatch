@@ -199,7 +199,7 @@ A backup is one consistent SQLite copy: incidents, threads, unfinished runs, sch
 and the journal travel together. Restore copies the backup next to the database, checks it (it opens, it has
 Overwatch's tables, SQLite's integrity check passes) and only then replaces the database in one rename; it refuses
 while a service has the database open. The restore test (`test/service.test.ts`) shows the restored service sends
-nothing to OpenCode again and keeps archived incidents out of the inbox; that is what is tested, not a general
+nothing to OpenCode again and keeps incidents marked Done out of the inbox; that is what is tested, not a general
 guarantee about every kind of work.
 
 ## Troubleshooting by symptom
@@ -213,6 +213,8 @@ guarantee about every kind of work.
 | OpenCode logs `[overwatch] the service is not answering` | Start the service; the plugin does not need a restart. If it says the Api versions differ, update the plugin and the service together (they are one repository). |
 | The investigator says it has no token, or tools are refused | Tools need the run token Overwatch puts in the prompt and must be called from that run's session. A session you started yourself can read and search, not query telemetry or file findings. |
 | A watcher's `last_error` names a source | The source failed for that run; its checkpoint did not move, so the next run covers the same time. For Kubernetes, run the same `kubectl` command from the error in a terminal. |
+| `Needs you` says a connection is signed out, not allowed, configured wrongly or unreachable | Run the fix command the item shows. Overwatch tries again by itself every `failures.ceiling` (30 minutes), and at once after the laptop wakes or the network changes; the item closes when it works. `bin/overwatch status` shows each environment's `suspended`. |
+| `Needs you` says "Offline or off the VPN" | Every connection is unreachable at once: connect to the network or VPN. One item, not one per source. |
 | Runs stay `queued` | OpenCode is not connected (see above). |
 | A run failed with "finished twice without filing a finding" | The model ended its turn twice without calling `file_finding`. Prompt on the incident again; it starts from the handoff. |
 | launchd starts it but `kubectl` fails | The agent's `PATH` lacks `kubectl` or its login helper. Reinstall from a terminal where `which kubectl` works. |

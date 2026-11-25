@@ -32,9 +32,11 @@ again instead of skipping it.
 
 ## Nothing is told twice, and everything leaves the inbox
 
-The inbox holds things that need a decision, and each has a way out that sticks. *Settled*: archive is a
-disposition, separate from the incident's state, so more of the same signal updates an archived incident without
-bringing it back.
+The inbox holds things that need a decision, and each has a way out that means one clear thing: Done (dealt with;
+back if it happens again), Later (not now; back at a time, on a change, or when it gets worse), Never (stop raising
+this; back only through a rise in severity or a much higher rate). A way out is a disposition, separate from the
+incident's state: more of the same signal updates the incident without bringing it back unless its way out says so,
+and whatever brings it back says why in one line. Every way out can be undone, and is an event naming who took it.
 
 ## One model, typed from the store to the browser
 

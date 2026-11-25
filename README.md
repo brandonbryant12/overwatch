@@ -12,9 +12,10 @@ It is two programs:
 - **OpenCode 2**, which runs every agent session, reached through a thin plugin that registers the investigator agent,
   a skill, and the service's MCP server.
 
-This is phase 1A of the plan in [docs/plans/command-center.md](docs/plans/command-center.md): one thin slice through
-every layer, with one collector (Kubernetes through read-only `kubectl`), one incident page with an inbox, focus,
-archive and a prompt bar, and one investigator. Much of the plan is not built yet; the documents below say what is.
+This is the plan in [docs/plans/command-center.md](docs/plans/command-center.md) built through its first daily loop:
+collectors for Kubernetes (read-only `kubectl`) and Datadog, an inbox grouped by why it needs you with three ways out
+(Done, Later, Never) and undo, focus and a prompt bar, failure handling that suspends and resumes connections by
+itself, and one investigator. Much of the plan is not built yet; the documents below say what is.
 
 ## Documentation
 

@@ -605,6 +605,14 @@ It is done when these pass:
 - Trust and daily usefulness: the reviewed defects fixed with regression tests; measured signals become
   incidents; deploy context and the deployed commit; notifications; environments at a glance; Datadog through
   the service; copy for a finding's plain summary.
+- The second grading's defects (build order item 0), each with a test that fails on the code before it
+  (`test/defects3.test.ts`).
+- The daily loop (build order item 1): the inbox grouped by why, three ways out (Done, Later, Never) with undo and
+  the muted list, rows that stay put, coming back with a reason, the bounce offer, failure classification with
+  suspension and automatic recovery, one item per cause, agent work retried once then parked, the all-quiet rule, and
+  no session picker. Left out on purpose: a general rule editor, bulk actions, grouping one cause across
+  environments, a Connections page, turning off only the one forbidden read, and pausing the queue when the model
+  provider (rather than OpenCode) is down.
 
 ### Build order from here
 

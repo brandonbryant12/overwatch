@@ -99,9 +99,12 @@ Usage rules:
 
 ## 6. Component Patterns
 
-- **Connected segmented controls** (`.segmented`, `role="radiogroup"`): Used for mutually exclusive filters (`All` / `Prod` / `Pre-prod`), sort orders (`Priority` / `Recent`), and session routing (`Auto` / `New` / `Here`). Never use a wall of separate bordered buttons for mode selection.
-- **Inbox row** (`.inbox-item`): `3px` left semantic rail, 2-line clamped title, single monospace `app / environment` metadata line, optional concise verdict line, and a hover/focus-revealed archive icon button with `propagation: "Stop"`.
-- **Citation block** (`.citation`): Verified quotes use a recessed `--bg-well` box with a solid `--state-ok` left rail; unverifiable quotes use `--hatch-unknown` diagonal stripes, dashed border, and dashed `?` icon so unverified claims never resemble verified facts.
+- **Connected segmented controls** (`.segmented`, `role="radiogroup"`): Used for mutually exclusive filters (`All` / `Prod` / `Pre-prod`), sort orders (`Priority` / `Recent`), and Never's optional reason (`noise` / `expected` / `duplicate`). The prompt bar has no session picker: the routing preview says where a prompt goes, and Shift+Enter (hinted beside Send) sends in a new session. Never use a wall of separate bordered buttons for mode selection.
+- **Inbox groups** (`.inbox-group`): `Needs you` (its title in `--accent`), `Working`, `New`, `Quiet`, each with a count; Working and Quiet are collapsed toggles (`aria-expanded`). Rows never move while visible: what arrives waits behind the group's `.pending-line` (`N new · r to show`, on `--accent-surface` with a dashed top border).
+- **Inbox row** (`.inbox-item`): `3px` left semantic rail, 2-line clamped title, single monospace `app / environment` metadata line, a `why` line in Needs you (`.item-why`, accent when it came back), optional concise verdict line, and hover/focus-revealed Done / Later / Never glyph buttons (`.item-way-btn`) with `propagation: "Stop"`. A Done that keeps coming back adds `.bounce-offer` with its two one-key choices.
+- **Cause row** (`.cause-item`): a dashed `--state-suspended` rail on the unknown hatch, the slashed-circle glyph, the cause in words, and its fix as a monospace `.cause-fix` well.
+- **Way-out sheets** (`.way-sheet`): Later's single input with its grammar spelled out in the label and errors in `--state-error`; Never's preview of what it would have hidden on a `--state-warn` rail, the reason chips, and one amber primary button. The muted list (`.muted-sheet`) lists each muted row with its reason, hidden count this week, last hidden time and Undo.
+- **Citation block** (`.citation`): Quotes labelled `Exact quote matched` use a recessed `--bg-well` box with a solid `--state-ok` left rail; `Not matched` quotes use `--hatch-unknown` diagonal stripes, dashed border, and dashed `?` icon so unverified claims never resemble verified facts.
 - **Docked Prompt Bar** (`.prompt-dock`): Locked visually to the focused subject with an amber top border (`--accent-border`) and focus chip (`⌖ app/env · title`). Always displays the deterministic routing preview from `routePrompt()` before sending, plus an explicit notice when OpenCode is offline.
 - **Overlays** (`.overlay-backdrop` + `.search-palette` / `.status-sheet` / `.shortcuts-sheet`): Native dialog semantics (`role="dialog"`, `aria-modal="true"`), dismissible via `Escape` or backdrop click.
 
@@ -111,19 +114,26 @@ All shortcuts are wired declaratively through Foldkit's `Dom.streamFromKeyBindin
 
 | Key | Action |
 | --- | --- |
-| `j` / `ArrowDown` | Focus next incident in visible inbox |
-| `k` / `ArrowUp` | Focus previous incident in visible inbox |
+| `j` / `ArrowDown` | Focus the next row as shown (collapsed groups are skipped until opened) |
+| `k` / `ArrowUp` | Focus the previous row as shown |
+| `d` | Done: dealt with; comes back if it happens again. Advances focus |
+| `l` | Later: opens the sheet (`2h`, `tomorrow`, `monday`, `worse`, or empty for until something changes) |
+| `w` | Later until it gets worse, in one key |
+| `n` | Never: opens the sheet with what it would have hidden and the optional reason |
+| `u` | Undo the last way out, or put back the incident in focus if it has left the inbox |
+| `r` | Show the rows waiting behind the `N new` lines, sorted |
+| `m` | Open the muted list |
 | `p` / `Enter` | Focus the prompt bar for the currently focused incident |
-| `a` / `e` | Archive the focused incident and advance focus to the next item |
-| `/` or `⌘K` (`Ctrl+K`) | Open Search palette (incidents, findings, prompts, archived items) |
+| `Shift+Enter` (in the prompt bar) | Send in a new session instead of where the preview says |
+| `/` or `⌘K` (`Ctrl+K`) | Open Search palette (incidents wherever they went, findings, prompts) |
 | `1` / `2` / `3` | Filter inbox: All / Prod / Pre-prod |
 | `t` | Toggle Night Watch / Daylight Chart theme |
 | `?` | Toggle keyboard shortcuts reference |
-| `Esc` | Close active overlay or blur the prompt bar |
+| `Esc` | Close active overlay or sheet, or blur the prompt bar |
 
 ## 8. Adding a New Page (Phase 1B & Phase 2+)
 
-When building the planned pages (Fleet, Environment detail, Grouped Inbox Decisions, Connections, Command Palette with arbitrary focus targets), follow these rules:
+When building the planned pages (Fleet, Environment detail, Connections, Command Palette with arbitrary focus targets), follow these rules:
 
 1. **Reuse `:root` tokens verbatim** from `web/src/style.css` (mirrored in `docs/design/mockups/tokens.css`). Do not introduce one-off hex colors.
 2. **Keep every object focusable**: Any row, pod tile, connection, or metric window must carry a typed reference so clicking or pressing `p` locks it into the docked Prompt Bar's Focus Chip.
@@ -132,6 +142,6 @@ When building the planned pages (Fleet, Environment detail, Grouped Inbox Decisi
 5. **Reference the static mock-ups** in `docs/design/mockups/`:
    - `fleet.html`: Apps by environment tier
    - `environment.html`: Pods by revision, CPU/memory against limits, rollout status
-   - `inbox-decisions.html`: Grouped decisions with act, snooze, archive, suppress, delegate, and Rules
+   - `inbox-decisions.html`: An early mock-up of grouped decisions; the built inbox (groups, three ways out, muted list) supersedes it
    - `connections.html`: Healthy, rate-limited, and suspended connections with fix commands
    - `command-palette.html`: Search and command palette with arbitrary focus chip ("prompt on this")
