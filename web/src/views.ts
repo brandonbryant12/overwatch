@@ -9,6 +9,8 @@ import type { SearchHit } from "../../src/domain/search.ts";
 import type { IncidentPageState, InboxItem, ThreadPageState } from "../../src/domain/views.ts";
 import {
   draftOf,
+  environmentChips,
+  type EnvState,
   isProdEnv,
   isSending,
   Message,
@@ -85,6 +87,7 @@ export function renderDocument(model: Model, h: H, routePreview: string): Docume
       [h.Class("app"), h.DataAttribute("theme", model.theme)],
       [
         headerView(model, h),
+        ...(model.status ? [fleetStripView(model, h)] : []),
         ...(model.notice ? [noticeBarView(model.notice, h)] : []),
         ...(model.connection === "offline" && !model.notice
           ? [noticeBarView("Service connection lost. Waiting to reconnect.", h)]
@@ -108,6 +111,33 @@ export function renderDocument(model: Model, h: H, routePreview: string): Docume
       ],
     ),
   };
+}
+
+const ENV_GLYPH: Record<EnvState, string> = { failing: "◆", attention: "▲", unchecked: "?", stale: "?", quiet: "●" };
+
+/** Each watched environment, compact: its state in words and a glyph, how fresh its last check is, readiness and memory. */
+function fleetStripView(model: Model, h: H): Html {
+  const chips = environmentChips(model);
+  return h.nav(
+    [h.Class("fleet-strip"), h.AriaLabel("Environments")],
+    chips.length === 0
+      ? [h.span([h.Class("fleet-empty")], ["No watchers configured."])]
+      : chips.map((chip) =>
+          h.div(
+            [h.Key(chip.key), h.Class(`env-chip state-${chip.state} tier-${chip.tier}`), h.Title(`${chip.key} (${chip.tier}): ${chip.label}`)],
+            [
+              h.div(
+                [h.Class("env-chip-top")],
+                [
+                  h.span([h.Class("env-chip-name")], [chip.key]),
+                  h.span([h.Class("env-chip-state")], [h.span([h.Class("env-chip-glyph"), h.AriaHidden(true)], [ENV_GLYPH[chip.state]]), chip.label]),
+                ],
+              ),
+              ...(chip.details.length ? [h.div([h.Class("env-chip-details")], [chip.details.join(" · ")])] : []),
+            ],
+          ),
+        ),
+  );
 }
 
 function headerView(model: Model, h: H): Html {

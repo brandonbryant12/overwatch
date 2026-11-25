@@ -15,6 +15,29 @@ export type WatcherStatus = typeof WatcherStatus.Type;
 
 export const Checkpoint = Schema.Struct({ watcher: Schema.String, source: Schema.String, at: Schema.Number });
 
+/** A measured value and what its rule made of it: breach, clear, pending, no_data, measured, or unknown (not sampled by the last check). */
+export const MetricReading = Schema.Struct({
+  value: Schema.NullOr(Schema.Number),
+  limit: Schema.NullOr(Schema.Number),
+  state: Schema.String,
+  sampledAt: Schema.NullOr(Schema.Number),
+});
+export type MetricReading = typeof MetricReading.Type;
+
+/** One app environment as the fleet strip shows it: facts only; the page decides how it reads. */
+export const EnvironmentStatus = Schema.Struct({
+  app: Schema.String,
+  environment: Schema.String,
+  tier: Schema.Literals(["production", "staging", "development"]),
+  everyMs: Schema.Number,
+  /** The oldest of its sources' checkpoints: until when every source has been read. Null until all have been. */
+  checkedThrough: Schema.NullOr(Schema.Number),
+  lastError: Schema.NullOr(Schema.String),
+  notReadyPods: Schema.NullOr(MetricReading),
+  memoryPctOfLimit: Schema.NullOr(MetricReading),
+});
+export type EnvironmentStatus = typeof EnvironmentStatus.Type;
+
 export const ServiceStatus = Schema.Struct({
   name: Schema.Literal("overwatch"),
   version: Schema.String,
@@ -29,5 +52,8 @@ export const ServiceStatus = Schema.Struct({
   }),
   watchers: Schema.Array(WatcherStatus),
   checkpoints: Schema.Array(Checkpoint),
+  environments: Schema.Array(EnvironmentStatus),
+  /** The service's clock when it answered, so ages are measured against it. */
+  at: Schema.Number,
 });
 export type ServiceStatus = typeof ServiceStatus.Type;

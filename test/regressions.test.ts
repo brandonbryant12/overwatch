@@ -665,3 +665,35 @@ describe("B3. the owner is told when a production incident opens and when its fi
     expect(config.options.apps.a!.environments.prod!.notify).toBe(true);
   });
 });
+
+describe("B4. environments at a glance", () => {
+  test("status reports each environment's freshness and latest readings; the strip never shows unknown or stale as quiet", async () => {
+    const { environmentChips } = await import("../web/src/app.ts");
+    const { service, cluster } = await testService();
+    try {
+      const before = (await service.status()) as any;
+      expect(environmentChips({ status: before, inbox: [] })[0]).toMatchObject({ key: "shop-api/production", state: "unchecked", label: "Not checked yet" });
+      cluster.state.memoryMi = 256;
+      await service.collect("shop-api/production");
+      const after = (await service.status()) as any;
+      const chip = environmentChips({ status: after, inbox: [] })[0]!;
+      expect(chip.state).toBe("quiet");
+      expect(chip.details).toContain("all pods ready");
+      expect(chip.details).toContain("memory 50% of limit");
+      // Hours later with no check: stale, not quiet.
+      expect(environmentChips({ status: { ...after, at: after.at + 3 * 3_600_000 }, inbox: [] })[0]).toMatchObject({ state: "stale", label: "Not checked for 3h" });
+      // A metric the last check did not sample reads as not measured.
+      cluster.state.top = false;
+      await service.collect("shop-api/production");
+      const unmeasured = environmentChips({ status: (await service.status()) as any, inbox: [] })[0]!;
+      expect(unmeasured.details).toContain("memory not measured");
+      // An open incident, and a failing check.
+      const item = { incidentId: "inc_1", title: "x", app: "shop-api", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null };
+      expect(environmentChips({ status: after, inbox: [item as never] })[0]).toMatchObject({ state: "attention", label: "1 open" });
+      const failing = { ...after, environments: [{ ...after.environments[0], lastError: "failed: pods" }] };
+      expect(environmentChips({ status: failing, inbox: [] })[0]!.state).toBe("failing");
+    } finally {
+      await service.stop();
+    }
+  });
+});

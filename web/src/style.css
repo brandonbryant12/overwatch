@@ -2069,6 +2069,47 @@ button:disabled, input:disabled {
 }
 
 /* Responsive mobile & narrow viewport layout */
+
+/* ---------- Fleet strip: every watched environment at a glance ----------
+   State is glyph + words + border pattern, never colour alone. Not checked and stale use the unknown hatch. */
+.fleet-strip {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: var(--bg-deck);
+  border-bottom: 1px solid var(--border-hairline);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.fleet-empty { color: var(--ink-muted); font-size: var(--text-sm); }
+.env-chip {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 13rem;
+  max-width: 22rem;
+  padding: 6px 10px;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-well);
+  font-size: var(--text-sm);
+}
+.env-chip-top { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.env-chip-name { font-family: var(--font-mono); color: var(--ink-primary); font-weight: 600; white-space: nowrap; }
+.env-chip-state { display: inline-flex; gap: 4px; align-items: baseline; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.env-chip-details { color: var(--ink-muted); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.env-chip.state-failing { border-color: var(--state-error-border); border-left: 3px solid var(--state-error); background: var(--state-error-surface); }
+.env-chip.state-failing .env-chip-state { color: var(--state-error); }
+.env-chip.state-attention { border-color: var(--state-warn-border); border-left: 3px solid var(--state-warn); background: var(--state-warn-surface); }
+.env-chip.state-attention .env-chip-state { color: var(--state-warn); }
+.env-chip.state-quiet { border-color: var(--state-ok-border); border-left: 3px solid var(--state-ok); }
+.env-chip.state-quiet .env-chip-state { color: var(--state-ok); }
+.env-chip.state-unchecked,
+.env-chip.state-stale { border: 1px dashed var(--state-unknown-border); background-image: var(--hatch-unknown); }
+.env-chip.state-unchecked .env-chip-state,
+.env-chip.state-stale .env-chip-state { color: var(--state-unknown); }
+
 @media (max-width: 860px) {
   .app {
     height: auto;

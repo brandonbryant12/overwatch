@@ -102,6 +102,11 @@ describe("the page in a headless browser", () => {
       cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
       await service.collect("shop-api/production");
       await browser.until("the new incident to appear without a reload", "document.querySelectorAll('.inbox-item').length === 1");
+      await browser.until(
+        "the fleet strip to show the environment checked, with its open incident",
+        "(document.querySelector('.fleet-strip .env-chip')?.textContent ?? '').includes('1 open') && document.querySelector('.env-chip.state-attention') !== null",
+        20_000,
+      );
 
       await browser.evaluate("document.querySelector('.inbox-item').click()");
       await browser.until("focus", "document.querySelector('.inbox-item.focused') !== null && document.querySelector('#prompt-input') !== null");

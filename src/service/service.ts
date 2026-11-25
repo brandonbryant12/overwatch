@@ -413,6 +413,30 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       opencode: { connected: w.opencode !== undefined, url: w.opencode ?? null, checkedAt: w.checkedAt, waitingRuns: w.waiting, runningRuns: w.running },
       watchers: watchers.map((row) => ({ ...row })) as unknown as ServiceStatus["watchers"],
       checkpoints: checkpoints.map((row) => ({ ...row })) as unknown as ServiceStatus["checkpoints"],
+      environments: await read((db) =>
+        options.watchers.map((w) => {
+          const env = options.apps[w.app]!.environments[w.environment]!;
+          const at = w.sources.map((source) => (db.prepare("SELECT at FROM checkpoints WHERE watcher = ? AND source = ?").get(w.id, source) as { at: number } | undefined)?.at);
+          const runRow = db.prepare("SELECT last_error FROM watcher_runs WHERE watcher = ?").get(w.id) as { last_error: string | null } | undefined;
+          const reading = (metric: string) => {
+            const row = db.prepare("SELECT state, observed, limit_value, sampled_at FROM metric_state WHERE watcher = ? AND metric = ? ORDER BY checked_at DESC LIMIT 1").get(w.id, metric) as
+              | { state: string; observed: number | null; limit_value: number | null; sampled_at: number | null }
+              | undefined;
+            return row ? { value: row.observed, limit: row.limit_value, state: row.state, sampledAt: row.sampled_at } : null;
+          };
+          return {
+            app: w.app,
+            environment: w.environment,
+            tier: env.tier,
+            everyMs: w.everyMs,
+            checkedThrough: at.every((x) => x !== undefined) && at.length ? Math.min(...(at as number[])) : null,
+            lastError: runRow?.last_error ?? null,
+            notReadyPods: reading("not_ready_pods"),
+            memoryPctOfLimit: reading("memory_pct_of_limit"),
+          };
+        }),
+      ),
+      at: Date.now(),
     };
     // Checked against the same schema the page decodes with.
     return Schema.encodeSync(ServiceStatus)(value);

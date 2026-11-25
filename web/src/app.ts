@@ -221,6 +221,71 @@ export function isProdEnv(environment: string): boolean {
 const SEVERITY_RANK: Record<string, number> = { error: 3, warn: 2, info: 1 };
 
 /** Returns inbox items filtered and sorted according to the current view controls. */
+/** How an environment reads on the fleet strip. Unknown and stale are their own states, never shown as quiet. */
+export type EnvState = "failing" | "attention" | "unchecked" | "stale" | "quiet";
+
+export interface EnvChip {
+  readonly key: string;
+  readonly app: string;
+  readonly environment: string;
+  readonly tier: string;
+  readonly state: EnvState;
+  /** What the state is, in words: the page never relies on colour alone. */
+  readonly label: string;
+  readonly details: ReadonlyArray<string>;
+}
+
+const age = (ms: number) => {
+  const mins = Math.max(0, Math.floor(ms / 60_000));
+  if (mins < 1) return "under a minute";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  return hrs < 48 ? `${hrs}h` : `${Math.floor(hrs / 24)}d`;
+};
+
+/** An environment counts as stale once three of its polling intervals have passed without a full check. */
+export const STALE_INTERVALS = 3;
+
+/** The fleet strip: one chip per watched environment, production first, from the service's status and the live inbox. */
+export function environmentChips(model: Pick<Model, "status" | "inbox">): ReadonlyArray<EnvChip> {
+  const status = model.status;
+  if (!status) return [];
+  const tierRank: Record<string, number> = { production: 0, staging: 1, development: 2 };
+  return [...status.environments]
+    .sort((a, b) => (tierRank[a.tier] ?? 3) - (tierRank[b.tier] ?? 3) || a.app.localeCompare(b.app) || a.environment.localeCompare(b.environment))
+    .map((env): EnvChip => {
+      const open = model.inbox.filter((i) => i.app === env.app && i.environment === env.environment).length;
+      const since = env.checkedThrough === null ? null : status.at - env.checkedThrough;
+      const breaching = [env.notReadyPods, env.memoryPctOfLimit].some((m) => m?.state === "breach");
+      let state: EnvState;
+      let label: string;
+      if (env.lastError) {
+        state = "failing";
+        label = `Check failing: ${env.lastError.slice(0, 80)}`;
+      } else if (since === null) {
+        state = "unchecked";
+        label = "Not checked yet";
+      } else if (since > STALE_INTERVALS * env.everyMs) {
+        state = "stale";
+        label = `Not checked for ${age(since)}`;
+      } else if (open > 0 || breaching) {
+        state = "attention";
+        label = open > 0 ? `${open} open` : "Over a limit";
+      } else {
+        state = "quiet";
+        label = "Checked, quiet";
+      }
+      const details: string[] = [];
+      if (since !== null) details.push(`checked ${age(since)} ago`);
+      const ready = env.notReadyPods;
+      if (ready) details.push(ready.state === "unknown" || ready.value === null ? "readiness not measured" : ready.value === 0 ? "all pods ready" : `${ready.value} not ready`);
+      const memory = env.memoryPctOfLimit;
+      if (memory) details.push(memory.state === "unknown" || memory.value === null ? "memory not measured" : `memory ${Math.round(memory.value)}% of limit`);
+      if (state !== "attention" && open > 0) details.push(`${open} open`);
+      return { key: `${env.app}/${env.environment}`, app: env.app, environment: env.environment, tier: env.tier, state, label, details };
+    });
+}
+
 export function visibleInbox(model: Pick<Model, "inbox" | "envFilter" | "sortOrder">): ReadonlyArray<InboxItem> {
   const filtered =
     model.envFilter === "all"
