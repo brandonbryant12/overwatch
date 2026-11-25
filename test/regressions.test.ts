@@ -119,7 +119,7 @@ describe("A3. a quote attributed to a source verifies only against what that sou
     let status = "requested";
     const worker = makeWorker({
       opencode: { connect: async () => "x", createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, userMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => undefined, answer: async () => undefined } as never,
-      atomically: async (work) => work(db),
+      atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [{ runId: RunId.make("run_c"), threadId: thread, subject: page.incidentId, promptId: "p", mode: "investigate", sessionId: "ses_c", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: question, origin: "page", handoff: null, status: "requested" as const, nudges: [], at: 0 }] as never,
       incidentPage: async () => page as never,
       checkoutOf: () => undefined,
