@@ -1,12 +1,69 @@
 # Overwatch command center: plan
 
-Status: fifth revision, 2026-11-25. Phase 1A is built on the `command-center` branch, the page has had its design
-pass (`docs/design.md`), and a second-pass review's defects have been fixed with regression tests
-(`test/regressions.test.ts`). `pnpm run check` and the end-to-end script are the measure of what passes. Section 11
-lists what the second plan review changed.
+Status: sixth revision, 2026-11-25. Built on the `command-center` branch: the first slice (phase 1A), a design
+pass (`docs/design.md`), and a pass that fixed an independent review's defects and restored daily usefulness
+(measured signals, deploy context, notifications, environments at a glance, Datadog). `pnpm run check` and the
+end-to-end script are the measure of what passes. Section 0 is the product in one page and the rules that keep it
+simple; section 7 is the build order.
 
 This revision replaces the design that hosted everything inside OpenCode. That design was reviewed by two
 independent models; what they found, and why it led here, is in the appendix.
+
+## 0. The product in one page
+
+A great product can be simple while everything in it is thought through. Overwatch asks its owner to learn five
+things, and everything else works without being thought about.
+
+1. **The inbox**: what needs you, grouped by why. Nothing else is in it.
+2. **Three ways out**: Done, Later, Never.
+3. **Focus and the prompt bar**: put anything in focus and ask about it.
+4. **The environments strip**: is everything checked and quiet?
+5. **Search**: find anything, do anything, from the keyboard.
+
+Threads, sessions, routing, rules, tiers and the event log exist to make those five work. They are visible when
+wanted and never required.
+
+### Rules that keep it simple
+
+These bind everyone who builds on this, people and agents.
+
+- **Fit an existing idea.** A feature must be expressible as an item, a way out, a focus, an environment or a
+  rule. A new idea needs a written reason in this plan before it is built.
+- **One way to do each thing.**
+- **Defaults over settings.** A setting exists only when two reasonable owners would choose differently.
+- **Everything automatic shows its work in one line and can be undone.** "Hidden by your rule (14 this week)."
+  "Back because memory rose 40% since you marked it done."
+- **Unknown never looks healthy.**
+- **If it cannot be explained in one sentence in `docs/using.md`, it is not ready.**
+- **Each pass says what it left out.** Declining a good idea is part of the work.
+
+### Borrowed, and from where
+
+Ideas taken after looking at products that solve neighbouring problems. Each is in the section named.
+
+| Idea | From | Section |
+| --- | --- | --- |
+| Group the inbox by why it needs you; rows never move under you | Plannotator Inbox | 5.1 |
+| An ask says what it holds up; answer several in one send; "set aside" tells the agent | Plannotator Inbox | 5.5 |
+| Prompt on a selection, not only on a whole thing | Plannotator | 6.1 |
+| Any agent session can raise something for the owner | Plannotator Inbox | 5.5 |
+| Done means "back only if it gets worse" | Sentry | 5.1 |
+| "Fixed" reopens when it recurs; "never" does not | Rollbar, BugSnag | 5.1 |
+| Later can wait for a change, and says why it came back | Superhuman, Datadog | 5.1 |
+| Try a rule against recent history before turning it on | PagerDuty | 5.2 |
+| Show what is believed, what was ruled out and what was not checked | Datadog Bits, Grafana, AWS DevOps Agent | 5.6 |
+| Trust is how much evidence was verified, not the model's stated confidence | Cleric's own findings | 5.6 |
+| "Was this right?", and a correction is remembered for that problem | Datadog Bits, AWS DevOps Agent | 5.6 |
+| A timeline of key moments first, everything on request | FireHydrant, Grafana | 5.6 |
+| A release is healthy, regressed, inconclusive or under-covered | Argo Rollouts | 6.6 |
+| New kinds of error since a release are a signal of their own | Datadog Watchdog | 6.6 |
+| Candidate changes are ranked with evidence, never one culprit | Sentry users' complaints | 6.6 |
+| Many environments as a grid where only the hot ones are vivid; trends on one scale | Honeycomb | 6.7 |
+| A palette that shows each shortcut, typed snooze, a link for every focus | Linear, Superhuman | 6.7 |
+| A theme is three values | Linear | 6.7 |
+| What is learned has a source, waits for approval, and is superseded, never overwritten | Devin, Datadog, Zep | 5.4 |
+| The owner's decisions become the test set for any proposed change | Braintrust | 5.4 |
+| Show what feedback changed | complaints about feedback that changes nothing | 5.4 |
 
 ## 1. The core facts
 
@@ -246,16 +303,30 @@ Rules that hold for all of them:
 
 ## 5. Not being trapped in lists
 
-### 5.1 One inbox, and everything leaves it
+### 5.1 One inbox, three ways out
 
-- The owner's home is an inbox of items that need a decision: an incident that needs a call, an ask, an insight
-  worth a look, a pull request waiting. Not a log of everything that happened.
-- Every item has the same exits: **act** (answer, approve, open in a session), **snooze** (until a time or until
-  something changes), **archive** (done, do not show again), **suppress** (never raise this kind of thing, with a
-  scope and an optional expiry), **delegate** (let an agent take it further).
-- An item that has left the inbox comes back only for something materially new: a state change, a regression
-  past a threshold, a snooze ending. More occurrences of the same thing update the item quietly.
-- Everything else is reachable by search and by the digest.
+The owner's home is an inbox of things that need a decision. It is not a log of what happened.
+
+**Grouped by why it needs you**, in this order:
+
+- **Needs you**: a question holding up work, or a production problem nobody has decided on.
+- **New since you looked**.
+- **Agents working**: nothing to do yet. Collapsed to a count.
+- **Quiet**: handled without you. Collapsed to a count.
+
+Rows never move while the owner is looking. New arrivals collect under "new since you looked".
+
+**Three ways out**, one key each, the same for every kind of item:
+
+| Way out | Means | Comes back |
+| --- | --- | --- |
+| **Done** | I have dealt with this, or accept it | Only if it gets materially worse than it was, or, when a fix was linked, if it recurs after the fix shipped. It returns labelled with the reason |
+| **Later** | Not now | At a time ("2d", "monday") or when something changes (a new finding, a deploy, a merge), saying which |
+| **Never** | Stop raising this | Never, unless it becomes severe enough to break through. It makes a rule (5.2) and takes an optional one-tap reason: noise, expected or duplicate |
+
+Acting on an item and handing it to an agent are not ways out. They are prompts (section 6).
+
+Everything that has left the inbox stays reachable by search and counts in the digest only if its way out allows.
 
 ### 5.2 The same thing is never shown twice
 
@@ -273,8 +344,10 @@ Rules that hold for all of them:
 - A suppression can be overridden by severity: a rule that hides a nuisance does not hide it becoming an outage.
 - After sleep, a burst of new work is capped and summarised, not started all at once.
 - The digest obeys the same dispositions: something archived or suppressed does not come back there either.
-- Suppressions and auto-archive choices are Rules: events like any other, visible, searchable, reversible, and
-  applied by code before anything reaches the inbox. "This rule hid 14 things this week" is shown, so a rule that
+- A Never is a Rule. There is one list of rules, each showing what it has hidden and when it last did, with undo
+  beside it. Before a rule is turned on, the page shows what it would have hidden over the last weeks.
+- Rules are events like any other, searchable and reversible, and applied by code before anything reaches the
+  inbox. "This rule hid 14 things this week" is shown, so a rule that
   hides too much is noticed.
 - Bulk actions: archive all like this; make it a rule.
 
@@ -314,6 +387,28 @@ subtler things slowly; and the system cannot easily know what it missed.
 What this needs from earlier phases, and has: every owner action is an event that records who or what issued
 it, and rules, thresholds and prompts are versioned data, not constants.
 
+### 5.5 Being asked
+
+- An agent raises an **ask**: one question, two or three options, a recommended default, and what is waiting on
+  the answer. It appears under "needs you".
+- Any OpenCode session can raise one through Overwatch's `ask_owner` tool, not only sessions Overwatch started.
+  The inbox is where every agent brings its questions.
+- Several asks can be answered and sent together. Any left unanswered stay open, and the agent is told not to ask
+  again.
+- **Set aside** is Later for an ask: the agent is told to carry on without waiting.
+- A session that has stopped making progress, or is waiting on a permission nobody can see, is shown as stalled.
+
+### 5.6 What a finding shows
+
+- **Believed, ruled out, not checked**: three short lists, each line with its evidence. Disproved explanations
+  stay visible, because knowing what it is not is half the value.
+- **Trust is counted, not claimed**: "3 of 4 quotes verified", and whether the code read was the deployed code.
+  The model's own confidence word is not shown.
+- **Was this right?** One key for yes, one for no with what it really was. A correction is kept against that
+  problem's fingerprint and given to the next investigation of it. This is the first piece of 5.4.
+- **The timeline shows key moments**: opened, a deploy, a finding, a decision, a change of state. Everything else
+  is one toggle away.
+
 ## 6. Prompting on anything, and sessions
 
 ### 6.1 Everything is addressable
@@ -321,6 +416,8 @@ it, and rules, thresholds and prompts are versioned data, not constants.
 Every thing the page can show has a typed reference: an incident, an insight, an environment, a pod, a metric
 over a window, one timeline entry, one piece of evidence, a change, a commit, a connection, a search result set,
 or a selection of several. Hover, select or open any of them and it is the focus.
+
+A selection is a focus too: select a line in a finding, a log excerpt or a diff and prompt on exactly that.
 
 One prompt bar, always available, takes what the owner types plus the focus. The same works from the keyboard on
 any row, chart or tile. Examples: "why is memory climbing here", "compare this with last week", "is this the
@@ -404,6 +501,23 @@ an unreliable peer.
   be recreated at the exact commit. Today's plugin deletes both when a session ends, which would make
   continuing a session impossible.
 
+### 6.6 Changes and releases, kept simple
+
+- A release is graded **healthy, regressed, inconclusive or under-covered**, with how much traffic and telemetry
+  the grade rests on.
+- **New kinds of error since a release** are a signal of their own, separate from "more of an old error".
+- When a problem follows a change, candidate changes are **ranked with their evidence**. Overwatch never names a
+  single culprit.
+- A fix has two visible steps: the proposed change in the thread, then a draft pull request once verify passes.
+
+### 6.7 The page
+
+- With many environments the strip becomes a grid in which only the ones that need attention are vivid; trends
+  are small charts on one shared scale so they compare honestly.
+- The palette shows each command's shortcut beside it, takes typed times for Later, and every focus has a link.
+- A theme is three values (base, accent, contrast), so the owner and any fork can make it theirs.
+- A quiet ambient cue for overall health, and an all-clear state worth reaching.
+
 The web app is the overview: the inbox, the fleet by environment tier, an environment page (pods by revision,
 memory and CPU against limits, replicas, rollout), incident and insight pages with timelines, connections, and
 search. It is served by the service on loopback and holds no logic of its own.
@@ -454,51 +568,30 @@ It is done when these pass:
 8. **Plugin.** It loads in a fresh worktree with no Effect at run time and gives the investigator the Overwatch
    tools under deny-by-default permissions.
 
-### Design pass
+### Built so far
 
-A dedicated pass on look and feel by Gemini 4 Neon, using the repository's `gemini-frontend-design` skill. This is
-one person's own tool, so it can be opinionated, dense and fun: it does not have to look like a product. It sets
-the visual language (logo, type, colour, motion, density, how focus and the prompt bar feel) that every later page
-follows, records it in `docs/design.md`, adds a demo mode so the page can be seen full of realistic data, and
-leaves mock-ups of the pages still to be built.
+- Phase 1A: the slice above.
+- Design pass one: the visual language, logo, themes, keyboard use, demo mode (`pnpm run demo`).
+- Trust and daily usefulness: the reviewed defects fixed with regression tests; measured signals become
+  incidents; deploy context and the deployed commit; notifications; environments at a glance; Datadog through
+  the service; copy for a finding's plain summary.
 
-### Learning loop
+### Build order from here
 
-Designed with the owner straight after the design pass (5.4), then built in steps alongside the later phases:
-goals and measurement first, the interview and change proposals next, replay last.
+Each increment is small, ends in something the owner uses, and is graded independently before the next is built
+on it. Nothing new is built on a grade below B.
 
-### Phase 1B: the service in full
-
-The remaining collectors behind `ExternalSystem` boundaries, with the hardening and tests that exist today; the
-failure handling of 4.1; the 10-minute schedule for every watcher; the Catalog and Connection aggregates;
-install and uninstall of the launchd agent; `overwatch status`; storage compaction.
-Exit: it polls unattended for a week through sleep and restarts with every run accounted for, and disk growth
-and rebuild time at a year's volume are measured and acceptable. Parity with today's plugin is not a goal.
-
-### Phase 2: the command center
-
-The inbox as grouped decisions with act, snooze, archive, suppress and delegate; Rules; fleet, environment,
-incident and connection pages; search in the page, the API and as a tool; the prompt bar with focus, context packs, Threads and session
-routing; the skill that lets any OpenCode session act on Overwatch.
-Exit: starting from an empty inbox each morning is normal, anything archived stays gone, any past incident is
-found by search in seconds, and any thing on any page can be asked about without leaving it.
-
-### Phase 3: triage to verified release
-
-Triage proposals; asks; easy fixes as draft pull requests; the Change aggregate with delivery through build and
-release (GitHub and Jenkins); verified recovery; commit and pull request monitoring with risk review.
-Exit: one real fix is followed from detection to verified recovery in production with no bookkeeping by hand.
-
-### Phase 4: looking deeper
-
-Spans and regression measurement; the daily and weekly analyses; the Insight lifecycle with the never-twice rule;
-improvement ideas that can become issues or draft pull requests; the digest; a scorecard of how often each kind of
-agent output was accepted.
-Exit: over a month, most accepted insights were new to the owner and none was a repeat.
-
-### Phase 5: handover
-
-Export and restore, 50 environments, upgrade paths, the downstream install guide, running without launchd.
+1. **The daily loop.** The inbox grouped by why (5.1), three ways out, the rule list with preview (5.2), rows that
+   stay put; and failure handling (4.1), because an expired sign-in is the first thing a real laptop will hit.
+2. **Bring me in.** Asks, including `ask_owner` for any session (5.5); what a finding shows and "was this right?"
+   (5.6); prompting on a selection (6.1); the palette and links (6.7). With it, design pass two: personality, the
+   environment grid, the all-clear state.
+3. **Fix it.** The fixer and draft pull requests; a change followed to release; release grades and verified
+   recovery (6, 6.6); Jenkins.
+4. **Look deeper.** Spans and regressions; insights with the never-twice rule; the digest.
+5. **Get better.** The rest of 5.4: goals, measurement, the interview, change proposals, replay.
+6. **Hand over.** Retention, 50 environments, upgrade paths, a real launchd install and the phase 0 checks on a
+   downstream machine.
 
 ## 8. Risks
 
@@ -530,6 +623,12 @@ Export and restore, 50 environments, upgrade paths, the downstream install guide
 
 Also deliberately out: the system changing its own rules, thresholds or prompts without the owner approving the
 change.
+
+Good ideas declined to keep it simple, each to be reconsidered only if use shows the need: reaching the page from
+a phone or through a tunnel; continuing across devices; a related-incident card (fingerprints and grouping cover
+it); starring timeline events (key moments are chosen by code); sweeping notes for follow-ups; postmortem drafts;
+a tree view of hypotheses (three lists do the job); several reviewing models before the scorecard shows one is
+not enough; a settings page.
 
 
 Remediation in any environment, spend tracking, Bun, mobile, multi-user access control, paging integrations.
