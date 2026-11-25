@@ -51,18 +51,33 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   a view already shows a write you just made.
 - **Ids before actions.** Session, message and run ids are chosen by the model and recorded before anything is sent to
   OpenCode; every OpenCode call the service makes is idempotent by id. (`worker.test.ts`, e2e)
-- **Kubernetes is read only**, through `kubectl get|describe|logs|top` with the configured context and namespace,
-  checked by `checkKubectlArgs`, for collection and for agents. (`mcp.test.ts`, `robustness.test.ts`)
-- **Citations are checked by code** against what that session was shown (`shown` table), the brief and its worktree's
-  files, before a finding is recorded. `query_telemetry` and `file_finding` refuse calls without the session id from
+- **Read-only is an allowlist, never a denylist.** `checkKubectlArgs` accepts only each verb's listed resources, flags
+  and value shapes. Agents get structured operations (`agentKubectl`, `src/service/history.ts`) whose fields are
+  checked before any argv is built; never pass an agent's string through as an argument. The investigator has no
+  shell. (`regressions.test.ts` A9, `mcp.test.ts`)
+- **Citations are checked by code, with provenance.** Everything a session is shown is recorded with what it is: a
+  source's own output under that source's name, other context-pack parts as `brief:<kind>`. A quote attributed to a
+  source verifies only against that source's rows; a file quote only against the file in the thread's worktree. The
+  finding records which code it read. `query_telemetry` and `file_finding` refuse calls without the session id from
   `_meta`, with another session's token, or for a finished run. (`mcp.test.ts`)
 - **The plugin has no Effect and no domain client at run time**; its imports from OpenCode's packages are types only.
   It holds no state and schedules nothing. Its `API_VERSION` equals the service's. (`plugin.test.ts`)
 - **The investigator is denied by default.** Add narrow rules through the plugin's `permissions` option, not by
   widening `investigatorPermissions`.
-- **The page holds no logic of its own.** `web/src/app.ts` is view logic with class names; styling is only in
-  `web/src/style.css`. It reads through the typed client and `watch`.
+- **The page holds no logic of its own.** State and pure selectors live in `web/src/app.ts` (tested in
+  `page.test.ts`), HTML builders in `web/src/views.ts`, glyphs in `web/src/icons.ts`, styling only in
+  `web/src/style.css`, following `docs/design.md`. It reads through the typed client and `watch`; `/status` is decoded
+  with `src/domain/status.ts`, the schema the service encodes with. Drafts belong to their incident and stay until a
+  send is acknowledged. `test/browser.test.ts` drives the built page in headless Chrome.
 - **Loopback only.** The service binds `127.0.0.1` and refuses other host names and other origins. (`service.test.ts`)
+- **One writer per database.** The host takes `src/host/lock.ts`'s lock before opening or repairing; restore and
+  search rebuild take it too, and restore validates a staged copy before an atomic rename. (`regressions.test.ts` A4, A5)
+- **Reports are an outbox.** The collector saves its reports with the checkpoint in one transaction and sends them
+  after; never report before the checkpoint is saved. (`regressions.test.ts` A2)
+- **Runs are strict.** requested → sent → completed | failed; only the run's own session completes it; time limits
+  count from `sentAt`. (`domain.test.ts`, `regressions.test.ts` A6)
+- **Unknown is never healthy.** A metric not sampled by the last poll is `unknown`; an environment not fully checked
+  within three intervals is stale; the page says so in words and with the unknown pattern. (`regressions.test.ts` B1, B4)
 - **No spend tracking or caps**; only timeouts and concurrency limits.
 - **Free text is redacted where it enters** (`src/domain/redact.ts`, by name and by how random it looks): the
   aggregates redact prompts, signal titles, samples and queries, findings, handoffs and reasons in `decide`, before

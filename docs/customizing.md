@@ -105,13 +105,17 @@ A list of module paths (relative to the config file) loaded at start. Each modul
 | --- | --- | --- |
 | `apps.<app>.checkout` | required | Path to the app's checkout (`~` and relative paths allowed). If it is not a git repository, investigations get an empty directory and work from telemetry alone. |
 | `apps.<app>.environments.<env>.sources.<name>` | at least one | A telemetry source (below). Its name is what agents pass to `query_telemetry` and cite. |
-| `apps.<app>.environments.<env>.deployedCommit` | none | `{ "source": "<kubernetes source>", "from": "image-tag" \| "label:<key>" \| "annotation:<key>" }`: how the Kubernetes collector reads the running revision. |
-| `apps.<app>.environments.<env>.metrics` | none | *Not used yet* (metric rules, phase 1B). |
+| `apps.<app>.environments.<env>.tier` | from the name | `production`, `staging` or `development`. Unset, names like `prod`, `production`, `*-prod` are production; `staging`, `stage`, `preprod`, `uat` are staging; anything else development. Orders the fleet strip and sets the default for `notify`. |
+| `apps.<app>.environments.<env>.notify` | `true` for production, else `false` | Notify (macOS) once when an incident opens here and once when its finding arrives. |
+| `apps.<app>.environments.<env>.deployedCommit` | none | `{ "source": "<kubernetes source>", "from": "image-tag" \| "label:<key>" \| "annotation:<key>", "command": [...] }`: how the running revision is read (from pod images by default, a label or annotation, or a command's output). Investigations read code at this commit; if it cannot be found in the checkout they say so. |
+| `apps.<app>.environments.<env>.metrics` | the defaults below | Rules for measured values: `[{ "metric": "memory_pct_of_limit", "operator": "gt", "threshold": 90, "hysteresis": 2 }]`. `operator` is `gt`, `gte`, `lt` or `ratio_gt` (against the median of the older half of the series); `hysteresis` is how many samples in a row must breach (and clear); `*` in `metric` matches any part of a name. Setting it replaces the defaults for that environment. |
 | `apps.<app>.baseBranch`, `verify`, `skills` | `main`, none, none | *Not used yet* (fixes and pull requests, phase 3; skills per watcher). |
 
 #### Source types
 
-`kubernetes` is the one source type wired end to end in phase 1A:
+`kubernetes` and the Datadog types are tested end to end through the service.
+
+**`kubernetes`**:
 
 | Option | Meaning |
 | --- | --- |
@@ -121,12 +125,39 @@ A list of module paths (relative to the config file) loaded at start. Each modul
 | `errorPattern` | Regular expression for error log lines (a sensible default matches error, fatal, panic, exception, traceback). |
 | `logs` | `false` to skip reading logs. |
 
-Only `kubectl get`, `describe`, `logs` and `top` run, and never with flags that change context, namespace or
-identity, or that read secrets. This is enforced in code (`checkKubectlArgs`) for collection and for agents.
+Only `kubectl get`, `describe`, `logs` and `top` run, checked against an allowlist (`checkKubectlArgs`): each verb's
+readable resources (never secrets or config maps), its permitted flags and the shape of each flag's value, and names
+that cannot be read as flags. The context and namespace are always the configured ones. Agents never pass `kubectl`
+arguments: they ask for a structured operation (`logs`, `get`, `describe`, `top`) and its fields are checked before
+the command is built (`agentKubectl`).
 
-The library in `src/collect/sources` also has `datadog-logs`, `datadog-monitors`, `datadog-metrics`, `github-ci` and
-`command` sources, with their tests. They are accepted by the configuration and run through the same collector, but
-phase 1A does not exercise them end to end; their failure handling and the `datadog` key options belong to phase 1B.
+Measured values the Kubernetes source reports, with the default rules (used unless the environment sets `metrics`):
+
+| Metric | Default rule |
+| --- | --- |
+| `memory_pct_of_limit`, `cpu_pct_of_limit` | over 90, 2 and 3 samples in a row |
+| `not_ready_pods`, `pending_pods` | over 0, 2 samples |
+| `unavailable_replicas` | over 0, 3 samples |
+| `hpa_pct_of_max_replicas` | at or over 100, 3 samples |
+| `node_memory_pct_of_allocatable` | over 90, 3 samples |
+| `quota_*_pct` | over 90, 2 samples |
+
+**Datadog** (`datadog-logs`, `datadog-monitors`, `datadog-metrics`) needs the top-level `datadog` option:
+
+```jsonc
+"datadog": { "apiKey": "keychain:overwatch/datadog-api-key", "appKey": "keychain:overwatch/datadog-app-key", "site": "datadoghq.eu" }
+```
+
+| Option | Meaning |
+| --- | --- |
+| `datadog.apiKey`, `datadog.appKey` | Secret references, `env:NAME` or `keychain:service/account`. Resolved at run time, sent as request headers, never stored. |
+| `datadog.site` / `datadog.apiUrl` | `datadoghq.com` by default; `apiUrl` overrides the whole base URL. |
+| `datadog-logs`: `query`, `indexes` | A log search, as in the Datadog UI (`service:shop-api status:error`). Lines are grouped by normalized message. |
+| `datadog-monitors`: `tags` or `name`, `states` | Monitors to follow; alerting ones (`Alert`, `Warn`, `No Data` by default) are incidents while they alert. |
+| `datadog-metrics`: `queries` | `{ "<metric name>": "<metric query>" }`. Each becomes a series checked against `metrics` rules like any measured value. |
+
+`github-ci` and `command` sources are in `src/collect/sources` with their tests but are not exercised through the
+service yet.
 
 ### `watchers`
 
@@ -156,7 +187,8 @@ phase 1A does not exercise them end to end; their failure handling and the `data
 | `redaction.entropy` | `true` | Redact values that look generated (tokens, keys), whatever they are called. |
 | `redaction.allow`, `redaction.patterns` | none | Regular expressions to keep, and extra ones to redact. |
 | `dataDir` | `~/.local/share/overwatch` | Database, worktrees and logs. |
-| `timeouts.investigation` / `fix` / `verify`, `concurrency.investigations` / `watchers`, `schedule`, `notify`, `model`, `permissions` | | *Not used yet* by the service. |
+| `notify` | `true` | The master switch for notifications; each environment's `notify` decides within it. Notifications are macOS only. |
+| `timeouts.investigation` / `fix` / `verify`, `concurrency.investigations` / `watchers`, `schedule`, `model`, `permissions` | | *Not used yet* by the service. |
 
 ## Adding an app, an environment, a watcher
 
@@ -221,6 +253,10 @@ shown are plain tables in `src/service/tables.ts`.
 | How long a stalled turn waits before Overwatch asks it to continue (15 s) | `STALL_MS` in `src/service/worker.ts` |
 | Alarm ticker (1 s) and batch (32) | `src/host/sqlite.ts` |
 | How long de-duplication state is kept (14 days) | `SEEN_KEEP_MS` in `src/service/collector.ts` |
+| Metric rules (defaults) and series length (120 points) | `DEFAULT_METRIC_RULES` in `src/collect/detection.ts` (or `metrics` per environment); `SERIES_POINTS` in `src/service/collector.ts` |
+| When an environment counts as stale (3 polling intervals) | `STALE_INTERVALS` in `web/src/app.ts` |
+| Which Kubernetes resources, flags and values agents and collection may use | `READABLE`, `FLAGS` in `src/collect/sources/kubernetes.ts` |
+| Which git history operations investigators may use | `src/service/history.ts` |
 
 ## Tests
 
@@ -241,6 +277,9 @@ pnpm run test:crash                               # kill the host at every commi
 | `test/mcp.test.ts` | Session-bound tools and their refusals; the MCP server over HTTP. |
 | `test/worker.test.ts` | The OpenCode outbox, nudges, stalls and time limits, with a fake OpenCode. |
 | `test/plugin.test.ts`, `test/launchd.test.ts`, `test/page.test.ts` | The plugin (no Effect at run time), launchd, configuration, the page's logic. |
+| `test/regressions.test.ts` | One test per defect found by review, each failing before its fix: redaction at entry, crash-safe counting, citation provenance, the writer lock, restore, run timeouts, extensions, drafts, read-only allowlists, the deployed code, metrics, notifications, the fleet strip, copying a summary. |
+| `test/datadog.test.ts` | Datadog logs and monitors through the service, with a fake Datadog. |
+| `test/browser.test.ts` | The real page in headless Chrome or Chromium (set `CHROME_BIN`; skipped, and says so, if none is found). |
 | `test/core.test.ts`, `sources.test.ts`, `robustness.test.ts`, `report.test.ts` | The collectors and redaction kept from the earlier plugin. |
 
 Tests use fakes for `kubectl`, Datadog, GitHub and the model, and never call a real cluster, Datadog or repository

@@ -12,6 +12,7 @@ access to environments. Every step ends with how to check it worked.
 | git | Worktrees for investigations. | `git --version` |
 | OpenCode 2 (2.4.1 tested) | Runs every agent session. | `opencode --version` prints `opencode v2.…` |
 | `kubectl`, logged in to each cluster you watch | The Kubernetes collector. Only `get`, `describe`, `logs` and `top` are ever run. | `kubectl --context <ctx> -n <ns> get pods` |
+| Datadog API and application keys, if you watch Datadog | The Datadog sources. Read-only scopes are enough. | see [Secrets](#secrets) |
 
 Bun is not used anywhere and must not be installed for Overwatch: no script, test or dependency needs it.
 
@@ -82,7 +83,37 @@ a reference:
 - `keychain:service/account`: a generic password in the macOS login keychain. Store it yourself:
   `security add-generic-password -s overwatch -a opencode-password -w` (it prompts for the value).
 
-The service resolves references when it starts and never logs or stores the values.
+The service resolves references when it needs them and never logs or stores the values (a test checks that Datadog
+keys reach Datadog's request headers and appear in nothing Overwatch stores).
+
+### Datadog
+
+Add the keys to the keychain yourself (each command prompts for the value):
+
+```sh
+security add-generic-password -s overwatch -a datadog-api-key -w
+security add-generic-password -s overwatch -a datadog-app-key -w
+```
+
+then reference them, and add Datadog sources to an environment:
+
+```jsonc
+"datadog": { "apiKey": "keychain:overwatch/datadog-api-key", "appKey": "keychain:overwatch/datadog-app-key", "site": "datadoghq.com" },
+"apps": { "shop-api": { "environments": { "production": { "sources": {
+  "errors": { "type": "datadog-logs", "query": "service:shop-api env:production status:error" },
+  "monitors": { "type": "datadog-monitors", "tags": ["service:shop-api"] }
+} } } } }
+```
+
+Check: `bin/overwatch check`, then after the next poll `bin/overwatch status` shows a checkpoint for each Datadog
+source, or its error under `last_error`. Under launchd the keychain must be unlocked (it is while you are logged in).
+
+### Notifications
+
+On macOS the service notifies once when an incident opens in a production-tier environment and once when its finding
+arrives. Which environments notify is configuration (`tier`, `notify`; see [customizing.md](customizing.md)); the
+global `"notify": false` turns all of it off. The first notification may ask macOS to allow notifications from
+`osascript` (Script Editor); allow it in System Settings, Notifications.
 
 ## 4. The plugin
 
@@ -128,7 +159,9 @@ source's checkpoint. The service answers only on loopback, and refuses requests 
 origins.
 
 Data lives in `dataDir` (default `~/.local/share/overwatch`): the database `overwatch.sqlite`, `worktrees/`, and
-`logs/` when run by launchd.
+`logs/` when run by launchd. Only one service may have a database open: a second one (a terminal and launchd both
+running it, say) refuses to start and names the process that has it. The lock is `overwatch.sqlite.lock`; one left
+by a process that died is taken over.
 
 ## 6. Keep it running with launchd
 
@@ -182,3 +215,9 @@ guarantee about every kind of work.
 | Runs stay `queued` | OpenCode is not connected (see above). |
 | A run failed with "finished twice without filing a finding" | The model ended its turn twice without calling `file_finding`. Prompt on the incident again; it starts from the handoff. |
 | launchd starts it but `kubectl` fails | The agent's `PATH` lacks `kubectl` or its login helper. Reinstall from a terminal where `which kubectl` works. |
+| The service will not start: "Another Overwatch service (pid …) has … open" | Another service already has the database: stop it (`launchctl bootout gui/$(id -u)/dev.overwatch.service`, or the other terminal). If that pid is not Overwatch, remove the `.lock` file the message names. |
+| `restore` refuses a file as "not an Overwatch backup" | It is not a whole Overwatch database (does not open, lacks Overwatch's tables, or fails SQLite's integrity check). The current database was not touched. |
+| The page says it has not been built | `pnpm install` could not load the bundler (often the native binding behind a proxy). See [The native binary](#the-native-binary). |
+| An environment on the strip says "Not checked for …" | Its last full check is older than three polling intervals: the service is not running, a source keeps failing, or the laptop slept; `bin/overwatch status` shows each watcher's last run and error. |
+| A finding says the code read is "NOT the deployed code" | Overwatch could not resolve the running revision in the app's checkout: `git fetch` in the checkout, or set `deployedCommit` for the environment. |
+| No notifications appear | Only production-tier environments notify by default; check `tier`/`notify`, the global `notify`, and macOS notification permission for Script Editor. |

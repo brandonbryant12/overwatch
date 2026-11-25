@@ -10,12 +10,31 @@ What exists in phase 1A, and what does not yet. Anything marked *planned* is des
   it runs once and covers the whole gap; it does not run once per missed interval. A stretch older than
   `lookback.max` is not read: it is recorded as a gap, both in the coverage table and as an event on the watcher.
 - **Opens one incident per breach.** A signal (for Kubernetes: a normalized error log line, a failing pod, a warning
-  event) is identified by its fingerprint in its app and environment. More of the same signal counts quietly against
-  the existing incident. A poll that finds nothing new writes nothing to the event log.
+  event; for Datadog: a group of error logs, an alerting monitor) is identified by its fingerprint in its app and
+  environment. More of the same signal counts quietly against the existing incident. A poll that finds nothing new
+  writes nothing to the event log. A run saves what it found together with its checkpoint before reporting it, so a
+  crash part way through never counts an occurrence twice.
+- **Watches measured values, not only logs.** Memory and CPU against the pods' own limits, pods not ready or pending,
+  replicas unavailable, an autoscaler at its maximum, node memory and namespace quotas (and any Datadog metric you
+  configure) are kept as series and checked against rules with hysteresis: a value must breach on several polls in
+  a row to open an incident, and clear on several to stop counting. A metric the last poll could not read is shown as
+  not measured, never as fine.
+- **Tells you about production.** A new incident in a production-tier environment, and a finding for one, each raise
+  one macOS notification per incident (the finding's notification is its plain product summary). Other tiers are
+  quiet unless you turn them on (see [customizing.md](customizing.md)).
 - **Records one triage intent per new incident**: a prompt on the incident's thread, asked by Overwatch. With
   `opencode.autoInvestigate` on (the default) it becomes an investigation; off, it waits as `held` until you prompt.
 - **Drives investigations into OpenCode** and follows them to a finding whose citations were checked by code.
 - **Keeps a search index** of incidents, findings, prompts and threads, built from the event log.
+
+## Environments at a glance
+
+Under the header, a strip shows every watched app and environment, production first, with its state in words and a
+glyph: `Checked, quiet`, `N open` (needs a look), `Over a limit`, `Check failing: …`, `Not checked yet`, or
+`Not checked for <time>` once three polling intervals have passed without a full check. Each shows how long ago it
+was checked and, for Kubernetes, the latest readiness (`all pods ready`, `2 not ready`) and memory against limit.
+Anything not measured says so; not checked and stale use the hatched unknown pattern, so an empty inbox with stale
+environments never looks like a healthy one.
 
 ## The inbox
 
@@ -48,10 +67,22 @@ incident timeline.
 Press `p` or `Enter` to jump into the docked prompt bar, type, and send. The prompt is recorded on the incident's
 thread and served by an OpenCode session with the `overwatch-investigator` agent, in a worktree of the app's
 checkout. The session receives a context pack built by code from the event log (the incident, recent findings, and
-the thread's last handoff) and a run token. The investigator reads telemetry through Overwatch's `query_telemetry` tool
-and the code in its worktree, and files a finding with `file_finding`. Overwatch checks every quote against what that
-session was shown and the files it names; a finding with a quote that is not there is refused with the reason, and
-the agent tries again.
+the thread's last handoff), what is deployed (the revisions running, when the rollout began, the revision it replaced
+and the commits it brought in), the latest capacity summary, and a run token. The worktree is at the deployed commit
+when Overwatch can tell which one that is; when it cannot, the brief says the code is the checkout's HEAD and not the
+deployed code, and the finding records which code it read (shown on the page under the finding).
+
+The investigator reads telemetry through Overwatch's `query_telemetry` tool (structured read operations, for
+Kubernetes `logs`, `get`, `describe` and `top`, never free-form `kubectl` arguments), code with read, glob and grep,
+and history with `git_history` (`log`, `show`, `blame`, `diff`); it has no shell. It files a finding with
+`file_finding`. A quote attributed to a telemetry source must be in what that source returned to the session (a
+query result, or a sample line the brief attributes to it); a quote from a file must be in that file. The owner's
+question and Overwatch's own description of the incident are shown to the session but are not evidence. A finding
+with a quote that is not where it says is refused with the reason, and the agent tries again.
+
+Each finding has a **Copy summary** button: impact, who is affected, since when and status as one paragraph, to paste
+to someone outside engineering. What you type in the prompt bar belongs to the incident it was typed on, and stays
+there until the service confirms the prompt; if a send fails, the text is still there to send again.
 
 Only incidents can be in focus in phase 1A. *Planned*: anything on screen (a pod, a metric window, a piece of
 evidence, a selection, a search result set) as the focus, and modes other than investigate.
