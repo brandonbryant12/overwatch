@@ -249,6 +249,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     incidentPage: domain.incidentPage,
     checkoutOf: (app) => options.apps[app]?.checkout,
     worktree: (threadId, checkout) => ensureWorktree(worktreePorts, threadId, checkout),
+    runStatus: domain.runStatus,
     markSent: (runId) => domain.runCommand(runId, new MarkRunSent({}), `sent_${runId}`),
     adopt: (input) =>
       run(

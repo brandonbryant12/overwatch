@@ -10,10 +10,9 @@
  *   overwatch rebuild-search [--config <file>]    rebuild the search index from the journal at next start
  *   overwatch launchd install|uninstall|print [--config <file>] [--agents-dir <dir>] [--no-load]
  */
-import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { backup, clearSearch, restore } from "./backup.ts";
 import { defaultConfigPath, loadConfig } from "./config.ts";
 import { install, plist, uninstall } from "./launchd.ts";
 import { startService } from "./service.ts";
@@ -73,28 +72,21 @@ async function main() {
     case "backup": {
       const target = positional[1];
       if (!target) throw new Error("overwatch backup <file>");
-      if (existsSync(target)) throw new Error(`${target} exists; choose a new file`);
-      const db = new DatabaseSync(dbFile(), { readOnly: true });
-      db.prepare("VACUUM INTO ?").run(target);
-      db.close();
+      backup(dbFile(), target);
       console.log(`backed up to ${target}`);
       return;
     }
     case "restore": {
       const source = positional[1];
-      if (!source || !existsSync(source)) throw new Error("overwatch restore <backup file>");
+      if (!source) throw new Error("overwatch restore <backup file>");
       if (await running()) throw new Error("Stop the service before restoring (overwatch launchd uninstall, or stop the terminal running it).");
-      const file = dbFile();
-      for (const suffix of ["-wal", "-shm"]) rmSync(file + suffix, { force: true });
-      copyFileSync(source, file);
-      console.log(`restored ${file} from ${source}`);
+      restore(source, dbFile());
+      console.log(`restored ${dbFile()} from ${source}`);
       return;
     }
     case "rebuild-search": {
       if (await running()) throw new Error("Stop the service first; the index is rebuilt when it starts.");
-      const db = new DatabaseSync(dbFile());
-      db.exec("DELETE FROM search_terms; DELETE FROM search_docs; DELETE FROM projections WHERE name = 'search';");
-      db.close();
+      clearSearch(dbFile());
       console.log("search index cleared; it is rebuilt from the journal when the service starts");
       return;
     }

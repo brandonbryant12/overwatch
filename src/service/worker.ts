@@ -27,6 +27,8 @@ export interface WorkerPorts {
   readonly incidentPage: (id: string) => Promise<IncidentPageState | null>;
   readonly checkoutOf: (app: string) => string | undefined;
   readonly worktree: (threadId: string, checkout: string | undefined) => Promise<string>;
+  /** The run's state on its aggregate, which the pending-runs view may lag. */
+  readonly runStatus: (runId: string) => Promise<string | undefined>;
   readonly markSent: (runId: string) => Promise<void>;
   /** Record a prompt the owner typed in an Overwatch session in OpenCode on that session's thread. */
   readonly adopt: (input: { readonly threadId: string; readonly subject: string; readonly sessionId: string; readonly messageId: string; readonly text: string }) => Promise<void>;
@@ -209,8 +211,10 @@ export function makeWorker(ports: WorkerPorts) {
       await adoptTyped().catch((error) => ports.log(`reading sessions for the owner's prompts: ${(error as Error).message}`));
       for (const run of runs) {
         try {
-          if (run.status === "requested") await dispatch(run);
-          else if (run.status === "sent") await follow(run);
+          // The view lists the work; the aggregate decides what state it is in.
+          const current = await ports.runStatus(run.runId);
+          if (current === "requested") await dispatch(run);
+          else if (current === "sent") await follow(run);
         } catch (error) {
           ports.log(`run ${run.runId}: ${(error as Error).message}`);
         }

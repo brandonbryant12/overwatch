@@ -39,7 +39,7 @@ export function testConfig(dataDir: string, extra: Record<string, unknown> = {})
     },
     watchers: [{ app: "shop-api", environment: "production", every: "10m" }],
     dataDir,
-    lookback: { initial: "1h", slice: "1h", overlap: "2m", max: "14d" },
+    lookback: { initial: "1h", slice: "1h", overlap: "2m", max: "14d", ...(extra.lookback as object) },
     notify: false,
     opencode: { autoInvestigate: false, ...(extra.opencode as object) },
   });
