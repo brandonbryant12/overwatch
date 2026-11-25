@@ -31,6 +31,9 @@ export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS worktrees (
     thread_id TEXT PRIMARY KEY, path TEXT NOT NULL, checkout TEXT, commit_sha TEXT, created_at INTEGER NOT NULL
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS pending_reports (
+    id INTEGER PRIMARY KEY, watcher TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS projections (name TEXT PRIMARY KEY, position INTEGER NOT NULL, version INTEGER NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS search_docs (
     doc TEXT PRIMARY KEY, kind TEXT NOT NULL, ref TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,

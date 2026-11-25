@@ -50,3 +50,53 @@ describe("A1. text is redacted where it enters, before it is stored, indexed or 
     }
   });
 });
+
+describe("A2. occurrence counts survive a crash between reporting and the checkpoint", () => {
+  test("three source lines are three occurrences, whatever the crash and whatever arrived meanwhile", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { createServiceTables } = await import("../src/service/tables.ts");
+    const { runWatcher } = await import("../src/service/collector.ts");
+    const { fakeCluster } = await import("./fixtures/cluster.ts");
+    const { testConfig } = await import("./fixtures/service.ts");
+    const { tempDir } = await import("./fixtures/support.ts");
+    const db = new DatabaseSync(":memory:");
+    createServiceTables(db);
+    const config = testConfig(tempDir("a2"));
+    const cluster = fakeCluster();
+    // The incident as the model keeps it: each command id counts once (a receipt), its count adds up.
+    const receipts = new Map<string, number>();
+    let crashAfterNextReport = true;
+    const ports = {
+      runtime: { options: config.options, exec: cluster.exec, fetch, now: Date.now, log: () => undefined, sleep: async () => undefined },
+      atomically: async <A,>(work: (d: typeof db) => A) => {
+        db.exec("BEGIN");
+        try {
+          const r = work(db);
+          db.exec("COMMIT");
+          return r;
+        } catch (e) {
+          db.exec("ROLLBACK");
+          throw e;
+        }
+      },
+      read: async <A,>(work: (d: typeof db) => A) => work(db),
+      report: async (r: { commandId: string; count: number }) => {
+        if (!receipts.has(r.commandId)) receipts.set(r.commandId, r.count);
+        if (crashAfterNextReport) {
+          crashAfterNextReport = false;
+          throw new Error("killed");
+        }
+      },
+      recordGap: async () => undefined,
+    };
+    const watcher = config.options.watchers[0]!;
+    const now = Date.now();
+    cluster.log(now - 10 * 60_000, "ERROR payment 42 timed out after 300ms");
+    cluster.log(now - 9 * 60_000, "ERROR payment 43 timed out after 300ms");
+    await runWatcher(ports as never, watcher).catch(() => undefined);
+    cluster.log(now - 1_000, "ERROR payment 44 timed out after 300ms");
+    await runWatcher(ports as never, watcher);
+    await runWatcher(ports as never, watcher);
+    expect([...receipts.values()].reduce((a, b) => a + b, 0)).toBe(3);
+  });
+});

@@ -61,6 +61,18 @@ export interface WatcherRunSummary {
 
 const SEEN_KEEP_MS = 14 * 86_400_000;
 
+/** Sends a watcher's saved reports in order, removing each once the model has it. */
+export async function flushReports(ports: CollectorPorts, watcher: string): Promise<void> {
+  const rows = await ports.read(
+    (db) => db.prepare("SELECT id, kind, payload FROM pending_reports WHERE watcher = ? ORDER BY id").all(watcher) as Array<{ id: number; kind: string; payload: string }>,
+  );
+  for (const row of rows) {
+    if (row.kind === "signal") await ports.report(JSON.parse(row.payload) as SignalReport);
+    else await ports.recordGap(watcher, JSON.parse(row.payload) as Gap);
+    await ports.atomically((db) => db.prepare("DELETE FROM pending_reports WHERE id = ?").run(row.id));
+  }
+}
+
 export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, signal: AbortSignal = new AbortController().signal): Promise<WatcherRunSummary> {
   const { runtime } = ports;
   const options = runtime.options;
@@ -72,6 +84,8 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
   const failed: string[] = [];
   let reported = 0;
 
+  // Reports a previous run saved and did not get to send (it crashed, or the model was busy) go first.
+  await flushReports(ports, watcher.id);
   for (const source of watcher.sources) {
     const config = env.sources[source]!;
     const type = sourceType(config.type);
@@ -109,9 +123,13 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       }
     }
 
-    // Report first; then move the checkpoint. Group what is new by fingerprint across slices.
+    // What is new, grouped by fingerprint across slices. Reports are an outbox: they are saved with their command ids
+    // in the same transaction as the checkpoint and the de-duplication state, then sent. A crash before the save
+    // repeats the whole run; a crash after it sends the same reports again, which their receipts absorb. Either way
+    // each occurrence counts once, whatever arrived upstream in between.
     const byFingerprint = new Map<string, Signal[]>();
     for (const s of fresh) byFingerprint.set(fingerprint(s), [...(byFingerprint.get(fingerprint(s)) ?? []), s]);
+    const reports: SignalReport[] = [];
     for (const [fp, group] of byFingerprint) {
       const total = group.reduce((sum, s) => sum + s.total, 0);
       const stateSignal = group.some((s) => s.state);
@@ -119,10 +137,9 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       const newest = Math.max(...group.flatMap((s) => s.occurrences.map((o) => o.at)), stateSignal ? now : 0);
       const first = group[0]!;
       const incidentId = incidentIdOf(watcher.app, watcher.environment, fp);
-      const ids = group.flatMap((s) => s.occurrences.map((o) => o.id ?? String(o.at))).sort().join(",");
-      await ports.report({
+      reports.push({
         incidentId,
-        commandId: `sig_${incidentId}_${newest}_${total}_${ids.length > 200 ? ids.slice(0, 200) : ids}`.slice(0, 400),
+        commandId: `sig_${incidentId}_${source}_${now}`,
         app: watcher.app,
         environment: watcher.environment,
         watcher: watcher.id,
@@ -136,28 +153,26 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         ...(first.sample ? { sample: first.sample } : {}),
         ...(first.query ? { query: first.query } : {}),
       });
-      reported += 1;
     }
-    for (const gap of gaps.filter((g) => g.source === source)) await ports.recordGap(watcher.id, gap);
-    if (checkpoint !== undefined) {
-      const keep = pruneSeen(seen, now - SEEN_KEEP_MS);
-      await ports.atomically((db) => {
+    const sourceGaps = gaps.filter((g) => g.source === source);
+    await ports.atomically((db) => {
+      if (checkpoint !== undefined) {
         db.prepare("INSERT INTO checkpoints (watcher, source, at, seen) VALUES (?, ?, ?, ?) ON CONFLICT (watcher, source) DO UPDATE SET at = excluded.at, seen = excluded.seen").run(
           watcher.id,
           source,
-          checkpoint!,
-          JSON.stringify(keep),
+          checkpoint,
+          JSON.stringify(pruneSeen(seen, now - SEEN_KEEP_MS)),
         );
-        const insert = db.prepare("INSERT INTO coverage (watcher, source, from_at, to_at, status, note, run_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        for (const w of covered) insert.run(watcher.id, w.source, w.from, w.to, w.status, w.note ?? null, now);
-        for (const gap of gaps.filter((g) => g.source === source)) insert.run(watcher.id, source, gap.from, gap.to, "gap", gap.reason, now);
-      });
-    } else if (covered.length) {
-      await ports.atomically((db) => {
-        const insert = db.prepare("INSERT INTO coverage (watcher, source, from_at, to_at, status, note, run_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        for (const w of covered) insert.run(watcher.id, w.source, w.from, w.to, w.status, w.note ?? null, now);
-      });
-    }
+      }
+      const insert = db.prepare("INSERT INTO coverage (watcher, source, from_at, to_at, status, note, run_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      for (const w of covered) insert.run(watcher.id, w.source, w.from, w.to, w.status, w.note ?? null, now);
+      for (const gap of sourceGaps) insert.run(watcher.id, source, gap.from, gap.to, "gap", gap.reason, now);
+      const pending = db.prepare("INSERT OR IGNORE INTO pending_reports (watcher, kind, command_id, payload) VALUES (?, ?, ?, ?)");
+      for (const report of reports) pending.run(watcher.id, "signal", report.commandId, JSON.stringify(report));
+      for (const gap of sourceGaps) pending.run(watcher.id, "gap", `gap_${watcher.id}_${gap.source}_${gap.from}_${gap.to}`, JSON.stringify(gap));
+    });
+    reported += reports.length;
+    await flushReports(ports, watcher.id);
     windows.push(...covered);
   }
   return { watcher: watcher.id, startedAt: now, reported, windows, gaps, failed };
