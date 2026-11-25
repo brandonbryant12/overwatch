@@ -12,7 +12,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { contextPack } from "../domain/brief.ts";
+import { contextPack, contextParts, shownLabel } from "../domain/brief.ts";
 import { messageIdOf } from "../domain/ids.ts";
 import type { IncidentPageState, PendingRun } from "../domain/views.ts";
 import type { OpenCodePort } from "./opencode.ts";
@@ -90,11 +90,14 @@ export function makeWorker(ports: WorkerPorts) {
     const page = await ports.incidentPage(run.subject);
     if (!page) ports.log(`run ${run.runId}: incident ${run.subject} has no page yet; sending without its context`);
     const directory = await ports.worktree(run.threadId, page ? ports.checkoutOf(page.app) : undefined);
-    const brief = contextPack({ page, handoff: run.handoff, ask: run.text, origin: run.origin });
+    const briefInput = { page, handoff: run.handoff, ask: run.text, origin: run.origin };
+    const brief = contextPack(briefInput);
     const token = await ports.atomically((db) => {
       const t = tokenFor(db, run, ports.now());
       // What this session is shown is what its citations are checked against.
-      recordShown(db, { sessionId: run.sessionId, threadId: run.threadId, runId: run.runId, source: "brief", text: brief, at: ports.now() });
+      for (const part of contextParts(briefInput)) {
+        if (part.text.trim()) recordShown(db, { sessionId: run.sessionId, threadId: run.threadId, runId: run.runId, source: shownLabel(part), text: part.text, at: ports.now() });
+      }
       return t;
     });
     if (run.origin === "opencode") {

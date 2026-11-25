@@ -8,8 +8,9 @@ import type { Finding } from "./report.ts";
  *
  * - `codeLocation` must name a file and line that exist in the code the investigation was given.
  * - A quote attributed to a file must be in that file.
- * - A quote attributed to a telemetry source must be in something that source returned to this investigation
- *   (an `overwatch_query` result) or in the brief the investigation was given.
+ * - A quote attributed to a telemetry source must be in something that source returned to this session: a
+ *   `query_telemetry` result, or an excerpt of that source in its context pack. Other parts of the context pack
+ *   (Overwatch's description, the owner's question, earlier conclusions) are recorded as shown but are not evidence.
  * - A quote attributed to anything else (a skill, a tool Overwatch cannot see) cannot be checked. It is kept and
  *   the report marks it "not verified".
  *
@@ -107,7 +108,8 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
       verified = quoted(item.quote, file);
       if (!verified) errors.push(`engineering.evidence[${index}]: the quote is not in ${path}. Copy the line exactly as it is in the file.`);
     } else if (fromSource) {
-      verified = input.shown.some((shown) => (shown.source === label || shown.source === "brief") && quoted(item.quote, shown.text));
+      // Only what that source returned counts: the owner's question or a conclusion in the brief is not evidence.
+      verified = input.shown.some((shown) => shown.source === label && quoted(item.quote, shown.text));
       if (!verified) {
         errors.push(
           `engineering.evidence[${index}]: the quote is not in anything source "${label}" returned to this investigation. Copy a line exactly from an overwatch_query result or from the report you were given, or name where it really came from.`,

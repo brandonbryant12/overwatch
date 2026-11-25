@@ -100,3 +100,49 @@ describe("A2. occurrence counts survive a crash between reporting and the checkp
     expect([...receipts.values()].reduce((a, b) => a + b, 0)).toBe(3);
   });
 });
+
+describe("A3. a quote attributed to a source verifies only against what that source returned", () => {
+  test("the owner's question, shown in the brief, cannot be cited as if the pods source had said it", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { createServiceTables, shownFor } = await import("../src/service/tables.ts");
+    const { makeWorker } = await import("../src/service/worker.ts");
+    const { verifyCitations } = await import("../src/collect/citations.ts");
+    const { messageIdOf } = await import("../src/domain/ids.ts");
+    const db = new DatabaseSync(":memory:");
+    createServiceTables(db);
+    const thread = ThreadId.make("thr_c");
+    const question = "Customers say checkout hangs for ninety seconds after the deploy";
+    const page = {
+      incidentId: IncidentId.make("inc_c"), threadId: thread, title: "ERROR payment timed out", app: "shop-api", environment: "production", source: "pods", fingerprint: "f",
+      severity: "error" as const, firstAt: 0, lastAt: 0, occurrences: 1, disposition: "inbox" as const, sample: "ERROR payment 42 timed out after 300ms", query: null, timeline: [], findings: [],
+    };
+    let status = "requested";
+    const worker = makeWorker({
+      opencode: { connect: async () => "x", createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, userMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => undefined, answer: async () => undefined } as never,
+      atomically: async (work) => work(db),
+      pendingRuns: async () => [{ runId: RunId.make("run_c"), threadId: thread, subject: page.incidentId, promptId: "p", mode: "investigate", sessionId: "ses_c", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: question, origin: "page", handoff: null, status: "requested" as const, nudges: [], at: 0 }] as never,
+      incidentPage: async () => page as never,
+      checkoutOf: () => undefined,
+      worktree: async () => "/nonexistent",
+      runStatus: async () => status,
+      markSent: async () => void (status = "sent"),
+      adopt: async () => undefined,
+      nudge: async () => undefined,
+      fail: async () => undefined,
+      now: () => 0,
+      runTimeoutMs: 60_000,
+      log: () => undefined,
+    } as never);
+    await worker.tick();
+    const shown = shownFor(db, "ses_c");
+    const finding = (quote: string) => ({
+      product: { impact: "x", affected: "x", since: "x", status: "x" },
+      engineering: { verdict: "real" as const, confidence: "high" as const, cause: "x", causeBasis: "observed" as const, evidence: [{ source: "pods", quote }], notChecked: [], nextCheck: "x" },
+    });
+    const fromQuestion = await verifyCitations(finding(question), { shown, sources: ["pods"] });
+    expect(fromQuestion.errors).toHaveLength(1);
+    expect(fromQuestion.finding.engineering.evidence[0]!.verified).toBe(false);
+    const fromSample = await verifyCitations(finding("ERROR payment 42 timed out after 300ms"), { shown, sources: ["pods"] });
+    expect(fromSample.errors).toEqual([]);
+  });
+});
