@@ -34,14 +34,15 @@ export interface CitationInput {
 
 const squash = (value: string) => value.replace(/\s+/g, " ").trim();
 
-/** The parts of a quote that must be found, in order: the quote split where the author elided text with "...". */
+/**
+ * The parts of a quote that must be found, in order: the quote split where the author elided text with "...". Every
+ * part the author did not elide must be there, however short: a dropped word can change what a quote says.
+ */
 export function quoteParts(quote: string): string[] {
-  const parts = squash(quote)
+  return squash(quote)
     .split(/\s*(?:\.{3,}|…)\s*/)
     .map((part) => part.replace(/^["'`]+|["'`]+$/g, "").trim())
     .filter(Boolean);
-  const solid = parts.filter((part) => part.length >= 6);
-  return solid.length ? solid : parts;
 }
 
 /** True when every part of the quote appears in the text, in order. Whitespace differences do not matter. */
@@ -101,11 +102,13 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
 
   const evidence: Array<Finding["engineering"]["evidence"][number]> = [];
   for (const [index, item] of e.evidence.entries()) {
+    // What a label names is decided by what it is, never by which lookup happens to succeed: a configured source's
+    // name is that source, git_history's labels are git, and anything else is a path in the working directory.
     const label = item.source.trim();
-    const path = label.replace(/:\d+(-\d+)?$/, "");
-    const file = input.directory ? await codeFile(input.directory, path) : undefined;
     const fromSource = input.sources.includes(label);
-    const fromGit = label === "git_history" || label.startsWith("git:");
+    const fromGit = !fromSource && (label === "git_history" || label.startsWith("git:"));
+    const path = label.replace(/:\d+(-\d+)?$/, "");
+    const file = !fromSource && !fromGit && input.directory ? await codeFile(input.directory, path) : undefined;
     let verified: boolean;
     if (file !== undefined) {
       verified = quoted(item.quote, file);
