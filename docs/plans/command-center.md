@@ -89,6 +89,11 @@ From the owner, and treated as fixed:
 12. Other people will fork it. This version sets the architecture, the guides and the foundation a fork can
     configure for itself.
 
+13. What it is for, in the owner's words: "auto fixing issues and detecting problems real time or before hand. As
+    well as keeping me up to date and non technical team up to date."
+14. Nothing is pushed to Slack or Teams. Email may come one day. Until then, updates for other people are written
+    by Overwatch and sent by the owner.
+
 The goal is the most robust system that can be built upon. No earlier choice (plugin, GUI, no daemon) is binding.
 
 This is a new project. Nothing has to stay compatible with today's plugin: its configuration format, stored
@@ -414,6 +419,26 @@ it, and rules, thresholds and prompts are versioned data, not constants.
 - **The timeline shows key moments**: opened, a deploy, a finding, a decision, a change of state. Everything else
   is one toggle away.
 
+### 5.7 Keeping other people up to date
+
+- Every finding already carries a plain summary: what users see, who is affected, since when, and whether it is
+  still happening. One key copies it.
+- A **brief** is the same thing for a period: what happened this week in each app, what was fixed, what is still
+  open and what to expect, in words for someone outside engineering. Overwatch drafts it from the event log; the
+  owner reads it, edits it and copies or exports it. Once edited by hand it is not rewritten underneath them.
+- Sending is a seam with one implementation today: copy, or export to a file. Email can be added there later.
+  Nothing is pushed to a chat tool.
+
+### 5.8 Before it happens
+
+Detection is not only for what has already broken.
+
+- **Trends towards a limit**: memory, quota or disk heading for its ceiling is raised with the time left at the
+  current rate, before it is hit.
+- **A change that looks risky** is flagged when it merges, before it is released: what it touches, and which past
+  incidents it resembles.
+- **A rollout is watched** from the moment it starts, against the baseline from before it.
+
 ## 6. Prompting on anything, and sessions
 
 ### 6.1 Everything is addressable
@@ -584,7 +609,7 @@ It is done when these pass:
 ### Build order from here
 
 Each increment is small, ends in something the owner uses, and is graded independently before the next is built
-on it. Nothing new is built on a grade below B.
+on it. The aim is an A. Nothing new is built while a high or medium defect from the last grading is open.
 
 0. **Before anything else**, the defects from the second grading (B-, below the bar): two services could still
    take the writer lock when started at the same instant; a quote could verify against a query's own arguments
@@ -599,7 +624,8 @@ on it. Nothing new is built on a grade below B.
    With it, design pass two: personality, the environment grid, the all-clear state.
 3. **Fix it.** The fixer and draft pull requests; a change followed to release; release grades and verified
    recovery (6, 6.6); Jenkins.
-4. **Look deeper.** Spans and regressions; insights with the never-twice rule; the digest.
+4. **Look ahead and look deeper.** Trends towards a limit, risky changes, the rollout watch (5.8); spans and
+   regressions; insights with the never-twice rule; the digest and briefs for other people (5.7).
 5. **Get better.** The rest of 5.4: goals, measurement, the interview, change proposals, replay.
 6. **Hand over.** Retention, 50 environments, upgrade paths, a real launchd install and the phase 0 checks on a
    downstream machine.
