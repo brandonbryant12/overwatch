@@ -627,3 +627,41 @@ describe("B1. what is measured becomes an incident, with hysteresis; a metric no
     }
   });
 });
+
+describe("B3. the owner is told when a production incident opens and when its finding arrives, once each", () => {
+  test("one notification per incident per kind, with the plain product summary; lower tiers are quiet by default", async () => {
+    const notes: Array<{ title: string; body: string }> = [];
+    const { service, cluster } = await testService({ deps: { notify: async (title: string, body: string) => void notes.push({ title, body }) } as never });
+    try {
+      cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await service.collect("shop-api/production");
+      cluster.log(Date.now() - 1_000, "ERROR payment 43 timed out after 300ms");
+      await service.collect("shop-api/production");
+      const incident = await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!);
+      const finding = {
+        product: { impact: "Some card payments fail at checkout", affected: "customers paying by card", since: "10:05 UTC", status: "ongoing" },
+        engineering: { verdict: "real" as const, confidence: "high" as const, cause: "timeouts", causeBasis: "observed" as const, evidence: [], notChecked: [], nextCheck: "x" },
+        ruledOut: [],
+      };
+      for (const runId of ["run_1", "run_2"]) {
+        await service.runtime.runPromise(
+          Effect.gen(function* () {
+            const incidents = yield* Incident;
+            yield* incidents.send(Incident.ref(IncidentId.make(incident)), new RecordFinding({ runId: RunId.make(runId), threadId: threadIdOf(IncidentId.make(incident)), sessionId: "ses", finding }));
+          }) as never,
+        );
+      }
+      for (let i = 0; i < 40 && notes.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 300));
+      expect(notes.map((n) => n.title)).toEqual(["New incident in shop-api/production", "Finding for shop-api/production"]);
+      expect(notes[0]!.body).toContain("ERROR payment 42 timed out after 300ms");
+      expect(notes[1]!.body).toBe("Some card payments fail at checkout. Affected: customers paying by card. Since: 10:05 UTC. Status: ongoing.");
+    } finally {
+      await service.stop();
+    }
+    const { parseConfig } = await import("../src/service/config.ts");
+    const config = parseConfig({ apps: { a: { checkout: "/x", environments: { staging: { sources: { s: { type: "kubernetes", context: "c", namespace: "n", selector: "a=b" } } }, prod: { sources: { s: { type: "kubernetes", context: "c", namespace: "n", selector: "a=b" } } } } } } });
+    expect(config.options.apps.a!.environments.staging!.notify).toBe(false);
+    expect(config.options.apps.a!.environments.prod!.notify).toBe(true);
+  });
+});

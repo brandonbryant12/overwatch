@@ -49,3 +49,12 @@ export const Finding = Schema.Struct({
   code: Schema.optionalKey(Schema.Struct({ commit: Schema.NullOr(Schema.String), deployed: Schema.Boolean, note: Schema.String })),
 });
 export type Finding = typeof Finding.Type;
+
+const sentence = (value: string) => {
+  const trimmed = value.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+};
+
+/** A finding's product summary as one paragraph someone outside engineering can read: impact, who, since, status. */
+export const productSummary = (product: { readonly impact: string; readonly affected: string; readonly since: string; readonly status: string }) =>
+  [sentence(product.impact), `Affected: ${sentence(product.affected)}`, `Since: ${sentence(product.since)}`, `Status: ${sentence(product.status)}`].join(" ");

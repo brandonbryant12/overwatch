@@ -37,6 +37,7 @@ import { layerSqlite, SqliteHost } from "../host/sqlite.ts";
 import { runWatcher, type WatcherRunSummary } from "./collector.ts";
 import type { ServiceConfig } from "./config.ts";
 import { mcpLayer, type McpPorts } from "./mcp.ts";
+import { dueNotifications, macNotifier, type Notifier } from "./notify.ts";
 import { openCodePort, type OpenCodePort } from "./opencode.ts";
 import { catchUp, search } from "./search.ts";
 import { createServiceTables } from "./tables.ts";
@@ -59,6 +60,8 @@ export interface ServiceDeps {
   readonly background?: boolean;
   /** Where the page's built files are. */
   readonly webDir?: string;
+  /** How the owner is told. Defaults to a macOS notification. */
+  readonly notify?: Notifier;
 }
 
 export interface ServiceHandle {
@@ -333,8 +336,13 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
   });
 
   // ------------------------------------------------------------ journal reactions: search and archived threads
+  const notifier = deps.notify ?? macNotifier(exec);
   const react = async () => {
     await read((db) => catchUp(db));
+    // Recorded as sent in one transaction with the projection's position, then sent: at most once per incident and kind.
+    for (const note of await atomically((db) => dueNotifications(db, options))) {
+      await notifier(note.title, note.body).catch((error) => log(`notification failed: ${(error as Error).message}`));
+    }
     const archived = await read((db) => {
       const state = db.prepare("SELECT position FROM projections WHERE name = 'cleanup'").get() as { position: number } | undefined;
       const rows = db.prepare("SELECT position, stream FROM journal WHERE position > ? AND type = 'ThreadArchived' ORDER BY position").all(state?.position ?? 0) as Array<{ position: number; stream: string }>;

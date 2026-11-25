@@ -47,6 +47,7 @@ export const SERVICE_SCHEMA = `
     state TEXT NOT NULL, observed REAL, limit_value REAL, sampled_at INTEGER, checked_at INTEGER NOT NULL,
     PRIMARY KEY (watcher, source, metric)
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS notified (incident TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (incident, kind)) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS session_reads (session_id TEXT PRIMARY KEY, last_message TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS projections (name TEXT PRIMARY KEY, position INTEGER NOT NULL, version INTEGER NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS search_docs (

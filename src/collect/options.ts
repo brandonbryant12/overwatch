@@ -27,8 +27,15 @@ export interface DeployedCommitConfig {
   readonly command?: ReadonlyArray<string>;
 }
 
+/** How much an environment matters. Notifications and the fleet strip use it. */
+export type Tier = "production" | "staging" | "development";
+
 export interface EnvironmentConfig {
   readonly sources: Readonly<Record<string, SourceConfig>>;
+  /** Set in the configuration, or inferred from the environment's name (`prod`, `production`, `*-prod` are production). */
+  readonly tier: Tier;
+  /** Notify about this environment's new incidents and findings. Defaults to on for the production tier only. */
+  readonly notify: boolean;
   readonly deployedCommit?: DeployedCommitConfig;
   readonly metrics?: ReadonlyArray<MetricRule>;
 }
@@ -192,11 +199,27 @@ function parseModel(value: unknown, errors: string[]): Options["model"] {
   return undefined;
 }
 
+/** The tier an environment's name suggests: production names are production, staging names staging, the rest development. */
+export function tierOfName(name: string): Tier {
+  const lower = name.toLowerCase();
+  if (lower === "prod" || lower === "production" || lower.startsWith("prod-") || lower.endsWith("-prod") || lower.endsWith("-production")) return "production";
+  if (/(^|-)(stag|staging|stage|preprod|pre-prod|uat)($|-)/.test(lower)) return "staging";
+  return "development";
+}
+
 function parseEnvironment(value: unknown, path: string, errors: string[]): EnvironmentConfig {
+  const name = path.slice(path.lastIndexOf(".") + 1);
   if (!isRecord(value)) {
     errors.push(`${path} must be an object with sources`);
-    return { sources: {} };
+    return { sources: {}, tier: tierOfName(name), notify: false };
   }
+  let tier: Tier = tierOfName(name);
+  if (value.tier !== undefined) {
+    if (value.tier === "production" || value.tier === "staging" || value.tier === "development") tier = value.tier;
+    else errors.push(`${path}.tier must be production, staging or development`);
+  }
+  if (value.notify !== undefined && typeof value.notify !== "boolean") errors.push(`${path}.notify must be true or false`);
+  const notify = typeof value.notify === "boolean" ? value.notify : tier === "production";
   const sources: Record<string, SourceConfig> = {};
   if (!isRecord(value.sources) || Object.keys(value.sources).length === 0) {
     errors.push(`${path}.sources must name at least one source`);
@@ -251,7 +274,7 @@ function parseEnvironment(value: unknown, path: string, errors: string[]): Envir
       };
     }
   }
-  return { sources, ...(metrics.length ? { metrics } : {}), ...(deployedCommit ? { deployedCommit } : {}) };
+  return { sources, tier, notify, ...(metrics.length ? { metrics } : {}), ...(deployedCommit ? { deployedCommit } : {}) };
 }
 
 /** Validates plugin options. Errors are collected rather than thrown so the status command can show them. */
@@ -372,7 +395,8 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
       patterns: patterns(redaction.patterns, "g", "redaction.patterns", errors),
     },
     schedule: input.schedule !== false,
-    notify: input.notify === undefined ? process.platform === "darwin" : input.notify === true,
+    // The master switch; each environment's own `notify` decides within it. The notifier itself does nothing off macOS.
+    notify: input.notify !== false,
     dataDir: typeof input.dataDir === "string" ? expandPath(input.dataDir, base) : defaultDataDir(),
     ...(input.model !== undefined ? { model: parseModel(input.model, errors) } : {}),
     permissions: {
