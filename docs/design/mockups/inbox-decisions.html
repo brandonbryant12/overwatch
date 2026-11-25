@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overwatch Mock-up: Inbox Decisions &amp; Rules (Planned)</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <style>
+      .decision-list { display: flex; flex-direction: column; gap: 12px; }
+      .decision {
+        background: var(--bg-deck);
+        border: 1px solid var(--border-hairline);
+        border-left: 3px solid var(--state-error);
+        border-radius: var(--radius-md);
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .decision.warn { border-left-color: var(--state-warn); }
+      .decision.ask { border-left-color: var(--accent); background: var(--bg-selected); }
+      .dec-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .dec-title { font-size: var(--text-md); font-weight: 600; color: var(--ink-primary); }
+      .dec-meta { font-size: var(--text-sm); color: var(--ink-muted); font-family: var(--font-mono); }
+      .dec-summary { margin: 0; font-size: var(--text-base); color: var(--ink-secondary); max-width: 72ch; }
+      .dec-grouped {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        font-size: var(--text-sm);
+        color: var(--ink-muted);
+        padding: 8px 12px;
+        background: var(--bg-well);
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-hairline);
+      }
+      .dec-grouped strong { color: var(--ink-primary); font-weight: 500; }
+      .exit-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid var(--border-hairline); }
+      .exit-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .exit-btn {
+        height: 30px;
+        padding: 0 11px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-strong);
+        background: var(--bg-elevated);
+        color: var(--ink-primary);
+        font-size: var(--text-sm);
+        font-weight: 500;
+      }
+      .exit-btn.primary { background: var(--accent); color: var(--ink-inverse); border-color: transparent; font-weight: 600; }
+      .rules-strip {
+        margin-top: 24px;
+        padding: 14px 18px;
+        background: var(--bg-deck);
+        border: 1px solid var(--border-hairline);
+        border-radius: var(--radius-md);
+      }
+      .rules-strip h2 { margin: 0 0 10px; font-size: var(--text-md); font-weight: 600; }
+      .rule-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--border-hairline); font-size: var(--text-sm); }
+      .rule-row:first-of-type { border-top: none; }
+    </style>
+  </head>
+  <body>
+    <div class="mockup-ribbon">
+      <span><strong>Planned mock-up (Phase 2)</strong> · Grouped decisions (one row per cause) with act, snooze, archive, suppress, delegate, and visible Rules.</span>
+      <nav>
+        <a href="./fleet.html">Fleet</a>
+        <a href="./environment.html">Environment</a>
+        <a href="./inbox-decisions.html">Inbox decisions</a>
+        <a href="./connections.html">Connections</a>
+        <a href="./command-palette.html">Command palette</a>
+      </nav>
+    </div>
+    <header class="topbar">
+      <div class="brand">
+        <img src="../logo-mark.svg" width="26" height="26" alt="Overwatch" />
+        <span>OVERWATCH</span>
+      </div>
+      <nav class="nav-tabs">
+        <a class="nav-tab active" href="./inbox-decisions.html">Inbox (3 decisions)</a>
+        <a class="nav-tab" href="./fleet.html">Fleet</a>
+        <a class="nav-tab" href="./connections.html">Connections</a>
+      </nav>
+      <div class="mono" style="font-size: 13px; color: var(--state-ok);">● OpenCode connected</div>
+    </header>
+    <main class="page-body">
+      <div class="page-head">
+        <div>
+          <h1>Inbox decisions</h1>
+          <p>6 underlying signals grouped into 3 decisions by shared release and root cause. Every item has a permanent exit.</p>
+        </div>
+        <div class="segmented">
+          <span class="seg-opt active">Needs decision (3)</span>
+          <span class="seg-opt">Snoozed (1)</span>
+          <span class="seg-opt">Rules (2)</span>
+        </div>
+      </div>
+
+      <section class="decision-list">
+        <article class="decision ask">
+          <div class="dec-top">
+            <div class="dec-title">◆ Deploy a4f91c2 caused /v2/authorize timeouts across 2 environments (Draft PR #1498 ready)</div>
+            <div class="dec-meta">checkout-api · prod + staging · 4m ago</div>
+          </div>
+          <p class="dec-summary">Grouped by release a4f91c2: verified finding points to STRIPE_AUTHORIZE_TIMEOUT_MS=300 in src/payments/stripe.ts:14. Fixer agent passed verify and drafted PR #1498 restoring 2500ms.</p>
+          <div class="dec-grouped">
+            <span><strong>Grouped:</strong> 1 prod incident (42×)</span>
+            <span><strong>+</strong> 1 Datadog monitor</span>
+            <span><strong>+</strong> 1 draft PR #1498 (verify passed)</span>
+          </div>
+          <div class="exit-bar">
+            <div class="exit-group">
+              <button class="exit-btn primary" type="button">Act: review draft PR #1498</button>
+              <button class="exit-btn" type="button">Open in OpenCode</button>
+            </div>
+            <div class="exit-group">
+              <button class="exit-btn" type="button">Snooze (until next deploy)</button>
+              <button class="exit-btn" type="button">Archive <span class="kbd">a</span></button>
+              <button class="exit-btn" type="button">Suppress as rule</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="decision">
+          <div class="dec-top">
+            <div class="dec-title">◆ auth-gateway-7b9d4 OOMKilled in production (investigation running)</div>
+            <div class="dec-meta">auth-gateway / production · 2m ago</div>
+          </div>
+          <p class="dec-summary">Rollout rev 48 is holding at 2/3 replicas while pod 9v2pl hits 512Mi limit. Investigator session ses_ow9a2c is comparing heap profiles against rev 47.</p>
+          <div class="exit-bar">
+            <div class="exit-group">
+              <button class="exit-btn" type="button">Delegate: draft rollback check</button>
+            </div>
+            <div class="exit-group">
+              <button class="exit-btn" type="button">Snooze (30m)</button>
+              <button class="exit-btn" type="button">Archive <span class="kbd">a</span></button>
+              <button class="exit-btn" type="button">Suppress</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="decision warn">
+          <div class="dec-top">
+            <div class="dec-title">▲ Connection suspended: staging-us-east cluster login expired</div>
+            <div class="dec-meta">1 cause · affects 3 staging watchers · 42m ago</div>
+          </div>
+          <p class="dec-summary">Stopped after 1 confirming attempt to avoid account lockout. One notice for all three watchers. Run <code class="mono">aws sso login --profile staging-us-east</code> and Overwatch will resume automatically.</p>
+          <div class="exit-bar">
+            <div class="exit-group">
+              <button class="exit-btn" type="button">Copy login command</button>
+              <button class="exit-btn" type="button">Retry now</button>
+            </div>
+            <div class="exit-group">
+              <button class="exit-btn" type="button">Snooze (2h)</button>
+              <button class="exit-btn" type="button">Archive <span class="kbd">a</span></button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="rules-strip">
+        <h2>Active suppression &amp; auto-archive rules</h2>
+        <div class="rule-row">
+          <span><strong>Auto-archive:</strong> <code class="mono">auth-gateway/staging</code> cold-boot JWKS cache misses (overridden if severity reaches error)</span>
+          <span class="num" style="color: var(--cyan);">Hid 14 items this week · Undo</span>
+        </div>
+        <div class="rule-row">
+          <span><strong>Suppress until Dec 15:</strong> <code class="mono">checkout-api/production</code> deprecated webhook v1 notices from partner-legacy</span>
+          <span class="num" style="color: var(--cyan);">Hid 9 items this week · Edit</span>
+        </div>
+      </section>
+    </main>
+    <div class="prompt-dock">
+      <div class="prompt-strip">
+        <div class="focus-chip">⌖ decision/a4f91c2 <span class="dim">· Deploy a4f91c2 /v2/authorize timeouts</span></div>
+        <div class="mono" style="color: var(--ink-secondary);">continues ses_ow1j63: idle investigation session</div>
+      </div>
+      <div class="prompt-row">
+        <div class="prompt-field">Archive everything like the QA batch latency warning and make it a rule...</div>
+        <div class="segmented"><span class="seg-opt active">Auto</span><span class="seg-opt">New</span><span class="seg-opt">Here</span></div>
+        <button class="send-btn" type="button">Send →</button>
+      </div>
+    </div>
+  </body>
+</html>

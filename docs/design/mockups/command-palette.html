@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overwatch Mock-up: Search &amp; Command Palette with Focus Chip (Planned)</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <style>
+      .backdrop-stage {
+        min-height: calc(100dvh - 88px);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding: 44px 20px 80px;
+        background:
+          radial-gradient(circle at 50% 10%, rgba(245, 166, 35, 0.08), transparent 50%),
+          var(--bg-canvas);
+      }
+      .palette {
+        width: 100%;
+        max-width: 700px;
+        background: var(--bg-deck);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-lg);
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.58);
+        overflow: hidden;
+      }
+      .focus-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 16px;
+        background: var(--accent-surface);
+        border-bottom: 1px solid var(--accent-border);
+        font-size: var(--text-sm);
+      }
+      .focus-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        background: var(--bg-deck);
+        border: 1px solid var(--accent);
+        border-radius: var(--radius-md);
+        color: var(--accent-bright);
+        font-family: var(--font-mono);
+        font-weight: 600;
+      }
+      .focus-action-label { color: var(--ink-primary); font-weight: 600; }
+      .search-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border-hairline);
+        font-size: var(--text-md);
+      }
+      .search-text { flex: 1; color: var(--ink-primary); }
+      .cursor { display: inline-block; width: 2px; height: 18px; background: var(--accent); vertical-align: -3px; margin-left: 2px; }
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 16px;
+        background: var(--bg-well);
+        border-bottom: 1px solid var(--border-hairline);
+        font-size: var(--text-sm);
+        color: var(--ink-muted);
+      }
+      .section-label {
+        padding: 10px 16px 4px;
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--ink-muted);
+      }
+      .hit-list { list-style: none; margin: 0; padding: 6px 8px 10px; display: flex; flex-direction: column; gap: 3px; }
+      .hit {
+        padding: 10px 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid transparent;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .hit.selected { background: var(--bg-selected); border-color: var(--accent-border); }
+      .hit-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .hit-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .hit-kind { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--cyan); }
+      .hit-title { font-size: var(--text-base); font-weight: 500; color: var(--ink-primary); }
+      .hit-cta { font-size: var(--text-sm); font-weight: 600; color: var(--accent-bright); white-space: nowrap; }
+      .hit-sub { font-size: var(--text-sm); color: var(--ink-secondary); }
+      .palette-foot {
+        padding: 10px 16px;
+        background: var(--bg-well);
+        border-top: 1px solid var(--border-hairline);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: var(--text-sm);
+        color: var(--ink-muted);
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="mockup-ribbon">
+      <span><strong>Planned mock-up (Phase 2)</strong> · Search &amp; command palette with arbitrary focus chip ("Prompt on this") and result-set prompting.</span>
+      <nav>
+        <a href="./fleet.html">Fleet</a>
+        <a href="./environment.html">Environment</a>
+        <a href="./inbox-decisions.html">Inbox decisions</a>
+        <a href="./connections.html">Connections</a>
+        <a href="./command-palette.html">Command palette</a>
+      </nav>
+    </div>
+    <header class="topbar">
+      <div class="brand">
+        <img src="../logo-mark.svg" width="26" height="26" alt="Overwatch" />
+        <span>OVERWATCH</span>
+      </div>
+      <nav class="nav-tabs">
+        <a class="nav-tab" href="./inbox-decisions.html">Inbox (3)</a>
+        <a class="nav-tab" href="./fleet.html">Fleet</a>
+        <a class="nav-tab" href="./connections.html">Connections</a>
+      </nav>
+      <div class="mono" style="font-size: 13px; color: var(--state-ok);">● OpenCode connected</div>
+    </header>
+    <main class="backdrop-stage">
+      <div class="palette" role="dialog" aria-label="Command palette">
+        <div class="focus-bar">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span class="focus-action-label">Prompt on this:</span>
+            <span class="focus-pill">⌖ pod/auth-gateway-7b9d4-9v2pl · mem 509/512Mi</span>
+          </div>
+          <span class="mono" style="color: var(--ink-secondary);">Clear focus <span class="kbd">⌫</span></span>
+        </div>
+
+        <div class="search-row">
+          <span style="color: var(--accent);">⌕</span>
+          <span class="search-text">jwks memory<span class="cursor"></span></span>
+          <span class="kbd">Esc</span>
+        </div>
+
+        <div class="filter-bar">
+          <div class="segmented">
+            <span class="seg-opt active">Everything</span>
+            <span class="seg-opt">Incidents</span>
+            <span class="seg-opt">Archived</span>
+            <span class="seg-opt">Changes</span>
+            <span class="seg-opt">Rules</span>
+          </div>
+          <span class="mono">4 matches · 1 focus action</span>
+        </div>
+
+        <div class="section-label">Prompt with current focus</div>
+        <ul class="hit-list">
+          <li class="hit selected">
+            <div class="hit-row">
+              <div class="hit-left">
+                <span class="hit-kind" style="color: var(--accent);">prompt</span>
+                <span class="hit-title">Ask agent about pod/auth-gateway-7b9d4-9v2pl: "jwks memory"</span>
+              </div>
+              <span class="hit-cta">Prompt on this → <span class="kbd">↵</span></span>
+            </div>
+            <div class="hit-sub mono">Route: continues ses_ow9a2c (investigate) · context pack pinned to rev 7b9d401</div>
+          </li>
+        </ul>
+
+        <div class="section-label">Matches across the event log (including archived)</div>
+        <ul class="hit-list">
+          <li class="hit">
+            <div class="hit-row">
+              <div class="hit-left">
+                <span class="hit-kind">incident</span>
+                <span class="hit-title">CrashLoopBackOff: auth-gateway-7b9d4 OOMKilled (exit 137)</span>
+              </div>
+              <span class="mono" style="color: var(--state-error);">inbox · prod</span>
+            </div>
+            <div class="hit-sub">auth-gateway / production · 6× · investigating in ses_ow9a2c</div>
+          </li>
+          <li class="hit">
+            <div class="hit-row">
+              <div class="hit-left">
+                <span class="hit-kind">change</span>
+                <span class="hit-title">PR #1492 Refactor JWKS key cache (merged to main, rev 7b9d401)</span>
+              </div>
+              <span class="mono" style="color: var(--cyan);">deployed 36m ago</span>
+            </div>
+            <div class="hit-sub">identity/auth-gateway · touched src/jwks/cache.ts (+142 / -38)</div>
+          </li>
+          <li class="hit">
+            <div class="hit-row">
+              <div class="hit-left">
+                <span class="hit-kind">incident</span>
+                <span class="hit-title">WARN jwks key rotation cache miss on cold pod startup</span>
+              </div>
+              <span class="mono" style="color: var(--ink-muted); font-style: italic;">archived · staging</span>
+            </div>
+            <div class="hit-sub">auth-gateway / staging · recurred quietly 2× after archive</div>
+          </li>
+          <li class="hit">
+            <div class="hit-row">
+              <div class="hit-left">
+                <span class="hit-kind" style="color: var(--accent);">selection</span>
+                <span class="hit-title">Prompt on all 4 search results as one focus set</span>
+              </div>
+              <span class="mono" style="color: var(--accent);">⌘↵</span>
+            </div>
+            <div class="hit-sub">Creates a scoped thread pinned to these 4 result IDs</div>
+          </li>
+        </ul>
+
+        <div class="palette-foot">
+          <div><span class="kbd">↑ / ↓</span> select &nbsp; <span class="kbd">↵</span> open or prompt &nbsp; <span class="kbd">Tab</span> switch mode (Ask / Investigate / Fix)</div>
+          <div class="mono">Indexed from SQLite journal</div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

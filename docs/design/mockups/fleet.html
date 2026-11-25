@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overwatch Mock-up: Fleet by Environment Tier (Planned)</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <style>
+      .fleet-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--bg-deck);
+        border: 1px solid var(--border-hairline);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+      }
+      .fleet-table th, .fleet-table td {
+        padding: 12px 14px;
+        text-align: left;
+        border-bottom: 1px solid var(--border-hairline);
+        font-size: var(--text-sm);
+        vertical-align: middle;
+      }
+      .fleet-table th {
+        background: var(--bg-well);
+        color: var(--ink-muted);
+        font-weight: 600;
+      }
+      .fleet-table tr:last-child td { border-bottom: none; }
+      .app-name { font-size: var(--text-base); font-weight: 600; color: var(--ink-primary); }
+      .app-repo { font-family: var(--font-mono); color: var(--ink-muted); font-size: var(--text-sm); margin-top: 2px; }
+      .env-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 9px 11px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--border-hairline);
+        background: var(--bg-well);
+      }
+      .env-cell.failing { border-color: var(--state-error-border); border-left: 3px solid var(--state-error); background: var(--state-error-surface); }
+      .env-cell.degraded { border-color: var(--state-warn-border); border-left: 3px solid var(--state-warn); background: var(--state-warn-surface); }
+      .env-cell.healthy { border-color: var(--state-ok-border); border-left: 3px solid var(--state-ok); }
+      .env-cell.unknown { border: 1px dashed var(--state-unknown-border); background-image: var(--hatch-unknown); }
+      .env-cell.suspended { border: 1px dashed var(--state-suspended-border); background: var(--state-suspended-surface); }
+      .env-cell.focused { box-shadow: 0 0 0 2px var(--accent); }
+      .cell-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
+      .cell-top.failing { color: var(--state-error); }
+      .cell-top.degraded { color: var(--state-warn); }
+      .cell-top.healthy { color: var(--state-ok); }
+      .cell-top.unknown { color: var(--state-unknown); }
+      .cell-top.suspended { color: var(--state-suspended); }
+      .cell-rev { font-family: var(--font-mono); color: var(--ink-secondary); }
+      .cell-sub { color: var(--ink-muted); }
+      .legend { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 16px; font-size: var(--text-sm); color: var(--ink-secondary); }
+      .legend span { display: inline-flex; align-items: center; gap: 6px; }
+      .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+      .swatch.ok { background: var(--state-ok); }
+      .swatch.err { background: var(--state-error); }
+      .swatch.warn { background: var(--state-warn); }
+      .swatch.unk { border: 1px dashed var(--state-unknown); background-image: var(--hatch-unknown); }
+      .swatch.sus { border: 1px dashed var(--state-suspended); background: var(--state-suspended-surface); }
+    </style>
+  </head>
+  <body>
+    <div class="mockup-ribbon">
+      <span><strong>Planned mock-up (Phase 2)</strong> · Static reference using Overwatch design tokens; not built into the app yet.</span>
+      <nav>
+        <a href="./fleet.html">Fleet</a>
+        <a href="./environment.html">Environment</a>
+        <a href="./inbox-decisions.html">Inbox decisions</a>
+        <a href="./connections.html">Connections</a>
+        <a href="./command-palette.html">Command palette</a>
+      </nav>
+    </div>
+    <header class="topbar">
+      <div class="brand">
+        <img src="../logo-mark.svg" width="26" height="26" alt="Overwatch" />
+        <span>OVERWATCH</span>
+      </div>
+      <nav class="nav-tabs">
+        <a class="nav-tab" href="./inbox-decisions.html">Inbox (4)</a>
+        <a class="nav-tab active" href="./fleet.html">Fleet</a>
+        <a class="nav-tab" href="./connections.html">Connections</a>
+      </nav>
+      <div class="mono" style="font-size: 13px; color: var(--state-suspended);">⊘ OpenCode offline · 3 queued</div>
+    </header>
+    <main class="page-body">
+      <div class="page-head">
+        <div>
+          <h1>Fleet by environment tier</h1>
+          <p>5 apps across 13 environments. Click any cell to inspect or lock it into the prompt bar.</p>
+        </div>
+        <div class="segmented">
+          <span class="seg-opt active">All apps (5)</span>
+          <span class="seg-opt">Needs attention (3)</span>
+          <span class="seg-opt">Unchecked (2)</span>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span><i class="swatch err"></i> ◆ Failing</span>
+        <span><i class="swatch warn"></i> ▲ Degraded / warning</span>
+        <span><i class="swatch ok"></i> ● Healthy</span>
+        <span><i class="swatch unk"></i> ◌ Unknown (never green)</span>
+        <span><i class="swatch sus"></i> ⊘ Connection suspended</span>
+      </div>
+
+      <table class="fleet-table">
+        <thead>
+          <tr>
+            <th style="width: 22%;">Application</th>
+            <th style="width: 26%;">Production</th>
+            <th style="width: 26%;">Staging</th>
+            <th style="width: 26%;">QA / Dev</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <div class="app-name">checkout-api</div>
+              <div class="app-repo">commerce/checkout-api</div>
+            </td>
+            <td>
+              <div class="env-cell failing focused">
+                <div class="cell-top failing"><span>◆ 1 real incident</span><span class="cell-rev">a4f91c2</span></div>
+                <div class="cell-sub num">3/3 pods · 42 errors/h · checked 2m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell failing">
+                <div class="cell-top failing"><span>◆ Pool exhausted</span><span class="cell-rev">a4f91c2</span></div>
+                <div class="cell-sub num">2/2 pods · triage failed · checked 4m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy</span><span class="cell-rev">a4f91c2</span></div>
+                <div class="cell-sub num">1/1 pod · 0 breaches · checked 6m ago</div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="app-name">auth-gateway</div>
+              <div class="app-repo">identity/auth-gateway</div>
+            </td>
+            <td>
+              <div class="env-cell failing">
+                <div class="cell-top failing"><span>◆ OOMKilled (investigating)</span><span class="cell-rev">7b9d401</span></div>
+                <div class="cell-sub num">2/3 ready · mem 98% limit · checked 1m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell suspended">
+                <div class="cell-top suspended"><span>⊘ Not checked (42m)</span><span class="cell-rev">?</span></div>
+                <div class="cell-sub">staging-us-east login expired · see Connections</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy</span><span class="cell-rev">7b9d401</span></div>
+                <div class="cell-sub num">1/1 pod · 0 breaches · checked 9m ago</div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="app-name">ledger-worker</div>
+              <div class="app-repo">finance/ledger-worker</div>
+            </td>
+            <td>
+              <div class="env-cell degraded">
+                <div class="cell-top degraded"><span>▲ Lag 148s (shard-04)</span><span class="cell-rev">c81e0b9</span></div>
+                <div class="cell-sub num">4/4 pods · queued for agent · checked 3m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy</span><span class="cell-rev">c81e0b9</span></div>
+                <div class="cell-sub num">2/2 pods · 0 breaches · checked 5m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell unknown">
+                <div class="cell-top unknown"><span>◌ Coverage gap (3h)</span><span class="cell-rev">c81e0b9</span></div>
+                <div class="cell-sub">Laptop slept past lookback window · gap logged</div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <div class="app-name">search-indexer</div>
+              <div class="app-repo">discovery/search-indexer</div>
+            </td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy</span><span class="cell-rev">551a8f0</span></div>
+                <div class="cell-sub num">6/6 pods · p95 44ms · checked 2m ago</div>
+              </div>
+            </td>
+            <td>
+              <div class="env-cell degraded">
+                <div class="cell-top degraded"><span>▲ Bulk 429 (held)</span><span class="cell-rev">559c2d1</span></div>
+                <div class="cell-sub num">2/2 pods · held triage · checked 8m ago</div>
+              </div>
+            </td>
+            <td style="color: var(--ink-muted);">Not deployed</td>
+          </tr>
+          <tr>
+            <td>
+              <div class="app-name">billing-cron</div>
+              <div class="app-repo">finance/billing-cron</div>
+            </td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy</span><span class="cell-rev">91b3e42</span></div>
+                <div class="cell-sub num">Last run 04:00Z ok · checked 5m ago</div>
+              </div>
+            </td>
+            <td style="color: var(--ink-muted);">Not deployed</td>
+            <td>
+              <div class="env-cell healthy">
+                <div class="cell-top healthy"><span>● Healthy (1 not real)</span><span class="cell-rev">91b3e42</span></div>
+                <div class="cell-sub num">Batch #410 cleared · checked 14m ago</div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+    <div class="prompt-dock">
+      <div class="prompt-strip">
+        <div class="focus-chip">⌖ checkout-api/production <span class="dim">· Focus locked on environment cell (rev a4f91c2)</span></div>
+        <div class="mono" style="color: var(--ink-secondary);">new session: scoped to checkout-api/production</div>
+      </div>
+      <div class="prompt-row">
+        <div class="prompt-field">Compare error rate and p95 latency in checkout-api/production before and after deploy a4f91c2...</div>
+        <div class="segmented"><span class="seg-opt">Ask</span><span class="seg-opt active">Investigate</span><span class="seg-opt">Analyse</span></div>
+        <button class="send-btn" type="button">Send →</button>
+      </div>
+    </div>
+  </body>
+</html>

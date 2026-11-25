@@ -1,0 +1,200 @@
+/* Shared Observatory Control Deck tokens for static planned mock-ups. Matches web/src/style.css verbatim. */
+:root {
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+
+  --text-lg: 1.125rem;
+  --text-md: 0.9375rem;
+  --text-base: 0.875rem;
+  --text-sm: 0.8125rem;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --topbar-height: 52px;
+
+  --bg-canvas: #0b0f14;
+  --bg-deck: #10161f;
+  --bg-elevated: #161f2b;
+  --bg-well: #0c1118;
+  --bg-hover: rgba(148, 175, 206, 0.07);
+  --bg-selected: rgba(245, 166, 35, 0.09);
+
+  --border-hairline: rgba(148, 175, 206, 0.14);
+  --border-strong: rgba(148, 175, 206, 0.26);
+
+  --ink-primary: #edf2f7;
+  --ink-secondary: #a8b7ca;
+  --ink-muted: #7f91a8;
+  --ink-inverse: #0b0f14;
+
+  --accent: #f5a623;
+  --accent-bright: #ffd166;
+  --accent-surface: rgba(245, 166, 35, 0.13);
+  --accent-border: rgba(245, 166, 35, 0.42);
+  --cyan: #38d9c0;
+  --cyan-surface: rgba(56, 217, 192, 0.11);
+
+  --state-error: #f26461;
+  --state-error-surface: rgba(242, 100, 97, 0.12);
+  --state-error-border: rgba(242, 100, 97, 0.36);
+
+  --state-warn: #f5a623;
+  --state-warn-surface: rgba(245, 166, 35, 0.12);
+  --state-warn-border: rgba(245, 166, 35, 0.36);
+
+  --state-ok: #2dd4a0;
+  --state-ok-surface: rgba(45, 212, 160, 0.11);
+  --state-ok-border: rgba(45, 212, 160, 0.34);
+
+  --state-active: #38bdf8;
+  --state-active-surface: rgba(56, 189, 248, 0.12);
+  --state-active-border: rgba(56, 189, 248, 0.36);
+
+  --state-unknown: #a2b0c3;
+  --state-unknown-border: rgba(162, 176, 195, 0.38);
+  --hatch-unknown: repeating-linear-gradient(
+    -45deg,
+    rgba(148, 163, 184, 0.08),
+    rgba(148, 163, 184, 0.08) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+
+  --state-suspended: #e0915c;
+  --state-suspended-surface: rgba(224, 145, 92, 0.11);
+  --state-suspended-border: rgba(224, 145, 92, 0.4);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-canvas);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+
+.mockup-ribbon {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 20px;
+  background: var(--accent-surface);
+  border-bottom: 1px solid var(--accent-border);
+  font-size: var(--text-sm);
+  color: var(--accent-bright);
+}
+.mockup-ribbon a { color: var(--ink-primary); text-decoration: none; margin-left: 12px; }
+.mockup-ribbon a:hover { text-decoration: underline; }
+
+.topbar {
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--bg-deck);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.08em; font-size: var(--text-md); }
+.nav-tabs { display: flex; align-items: center; gap: 4px; }
+.nav-tab {
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--ink-secondary);
+  text-decoration: none;
+}
+.nav-tab.active {
+  background: var(--bg-elevated);
+  color: var(--ink-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+.prompt-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg-deck);
+  border-top: 1px solid var(--accent-border);
+  padding: 10px 24px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.prompt-strip { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: var(--text-sm); color: var(--ink-secondary); }
+.focus-chip { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-primary); font-family: var(--font-mono); font-weight: 600; }
+.focus-chip span.dim { color: var(--ink-muted); font-family: var(--font-sans); font-weight: 400; }
+.prompt-row { display: flex; gap: 8px; }
+.prompt-field {
+  flex: 1;
+  height: 38px;
+  padding: 0 12px;
+  background: var(--bg-well);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--ink-primary);
+  font-size: var(--text-base);
+  display: flex;
+  align-items: center;
+}
+.segmented {
+  display: inline-flex;
+  background: var(--bg-well);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  gap: 2px;
+}
+.seg-opt {
+  padding: 4px 10px;
+  border-radius: 5px;
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+}
+.seg-opt.active { background: var(--bg-elevated); color: var(--ink-primary); box-shadow: inset 0 0 0 1px var(--border-strong); }
+.send-btn {
+  padding: 0 16px;
+  height: 38px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--ink-inverse);
+  font-size: var(--text-base);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  border: none;
+}
+.page-body { max-width: 1220px; margin: 0 auto; padding: 24px 24px 128px; }
+.page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.page-head h1 { margin: 0; font-size: var(--text-lg); font-weight: 650; letter-spacing: -0.02em; }
+.page-head p { margin: 0; font-size: var(--text-sm); color: var(--ink-secondary); }

@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Overwatch Mock-up: Connections &amp; Suspended State (Planned)</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <style>
+      .conn-list { display: flex; flex-direction: column; gap: 14px; }
+      .conn-row {
+        background: var(--bg-deck);
+        border: 1px solid var(--border-hairline);
+        border-radius: var(--radius-md);
+        padding: 16px 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .conn-row.healthy { border-left: 3px solid var(--state-ok); }
+      .conn-row.backoff { border-left: 3px solid var(--state-warn); }
+      .conn-row.suspended {
+        border: 1px dashed var(--state-suspended-border);
+        border-left: 3px dashed var(--state-suspended);
+        background-color: var(--bg-deck);
+        background-image: var(--hatch-unknown);
+      }
+      .conn-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .conn-title { display: flex; align-items: center; gap: 10px; font-size: var(--text-md); font-weight: 600; }
+      .conn-state { font-size: var(--text-sm); font-weight: 600; }
+      .conn-state.healthy { color: var(--state-ok); }
+      .conn-state.backoff { color: var(--state-warn); }
+      .conn-state.suspended { color: var(--state-suspended); }
+      .conn-facts {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        font-size: var(--text-sm);
+      }
+      .conn-facts dt { color: var(--ink-muted); margin-bottom: 2px; }
+      .conn-facts dd { margin: 0; color: var(--ink-primary); font-variant-numeric: tabular-nums; }
+      .fix-bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        background: var(--bg-well);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-sm);
+        flex-wrap: wrap;
+      }
+      .fix-cmd { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--accent-bright); }
+      .action-btn {
+        height: 30px;
+        padding: 0 12px;
+        border-radius: var(--radius-sm);
+        border: 1px solid var(--border-strong);
+        background: var(--bg-elevated);
+        color: var(--ink-primary);
+        font-size: var(--text-sm);
+        font-weight: 500;
+      }
+      .action-btn.primary { background: var(--accent); color: var(--ink-inverse); border-color: transparent; font-weight: 600; }
+      .refused-note { font-size: var(--text-sm); color: var(--ink-secondary); }
+    </style>
+  </head>
+  <body>
+    <div class="mockup-ribbon">
+      <span><strong>Planned mock-up (Phase 1B / 2)</strong> · Connections with healthy, backing-off, refused-read, and suspended states (unknown is never green).</span>
+      <nav>
+        <a href="./fleet.html">Fleet</a>
+        <a href="./environment.html">Environment</a>
+        <a href="./inbox-decisions.html">Inbox decisions</a>
+        <a href="./connections.html">Connections</a>
+        <a href="./command-palette.html">Command palette</a>
+      </nav>
+    </div>
+    <header class="topbar">
+      <div class="brand">
+        <img src="../logo-mark.svg" width="26" height="26" alt="Overwatch" />
+        <span>OVERWATCH</span>
+      </div>
+      <nav class="nav-tabs">
+        <a class="nav-tab" href="./inbox-decisions.html">Inbox (3)</a>
+        <a class="nav-tab" href="./fleet.html">Fleet</a>
+        <a class="nav-tab active" href="./connections.html">Connections</a>
+      </nav>
+      <div class="mono" style="font-size: 13px; color: var(--state-suspended);">⊘ 1 suspended · 1 backing off</div>
+    </header>
+    <main class="page-body">
+      <div class="page-head">
+        <div>
+          <h1>Connections</h1>
+          <p>Every outside system Overwatch reads. Failures are classified by code; bad sign-ins stop after one confirming attempt.</p>
+        </div>
+        <div class="segmented">
+          <span class="seg-opt active">All (4)</span>
+          <span class="seg-opt">Needs fix (1)</span>
+          <span class="seg-opt">Healthy (2)</span>
+        </div>
+      </div>
+
+      <section class="conn-list">
+        <article class="conn-row suspended">
+          <div class="conn-head">
+            <div class="conn-title">
+              <span class="conn-state suspended">⊘ Suspended</span>
+              <span class="mono">kubernetes / staging-us-east</span>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="action-btn primary" type="button">Retry now</button>
+              <button class="action-btn" type="button">Resume</button>
+            </div>
+          </div>
+          <dl class="conn-facts">
+            <div><dt>Failure class</dt><dd style="color: var(--state-suspended);">Sign-in expired (stopped after 1 retry)</dd></div>
+            <div><dt>Not checked since</dt><dd>42m ago (2026-11-25 19:05Z)</dd></div>
+            <div><dt>Affected watchers</dt><dd>3 (checkout, auth, search staging)</dd></div>
+            <div><dt>Next quiet probe</dt><dd>In 12m (or on wake / retry)</dd></div>
+          </dl>
+          <div class="fix-bar">
+            <span class="fix-cmd">$ aws sso login --profile staging-us-east</span>
+            <button class="action-btn" type="button">Copy command</button>
+          </div>
+          <div class="refused-note">Incidents on this connection neither resolve nor reopen while suspended. Coverage is marked unknown until a probe succeeds.</div>
+        </article>
+
+        <article class="conn-row backoff">
+          <div class="conn-head">
+            <div class="conn-title">
+              <span class="conn-state backoff">▲ Backing off</span>
+              <span class="mono">datadog / us1-commerce</span>
+            </div>
+            <button class="action-btn" type="button">Retry now</button>
+          </div>
+          <dl class="conn-facts">
+            <div><dt>Failure class</dt><dd style="color: var(--state-warn);">HTTP 429 rate limit (Retry-After: 45s)</dd></div>
+            <div><dt>Last success</dt><dd>7m ago</dd></div>
+            <div><dt>Failure streak</dt><dd>2 consecutive polls</dd></div>
+            <div><dt>Next attempt</dt><dd>In 38s (poll interval stretched to 15m)</dd></div>
+          </dl>
+        </article>
+
+        <article class="conn-row healthy">
+          <div class="conn-head">
+            <div class="conn-title">
+              <span class="conn-state healthy">● Healthy (1 read turned off)</span>
+              <span class="mono">kubernetes / prod-us-east</span>
+            </div>
+            <span class="mono" style="font-size: 13px; color: var(--ink-muted);">last ok 1m ago</span>
+          </div>
+          <dl class="conn-facts">
+            <div><dt>Failure class</dt><dd>None</dd></div>
+            <div><dt>Watchers served</dt><dd>3 production watchers</dd></div>
+            <div><dt>Refused read</dt><dd style="color: var(--state-unknown);">◌ kubectl get nodes (RBAC forbidden)</dd></div>
+            <div><dt>Coverage</dt><dd>100% for pods, logs, events, top</dd></div>
+          </dl>
+          <div class="refused-note">Node listing is turned off for this account; all pod, log, event, and deployment checks continue normally.</div>
+        </article>
+
+        <article class="conn-row healthy">
+          <div class="conn-head">
+            <div class="conn-title">
+              <span class="conn-state healthy">● Healthy</span>
+              <span class="mono">github / commerce-org</span>
+            </div>
+            <span class="mono" style="font-size: 13px; color: var(--ink-muted);">last ok 3m ago</span>
+          </div>
+          <dl class="conn-facts">
+            <div><dt>Failure class</dt><dd>None</dd></div>
+            <div><dt>Checks</dt><dd>Commits, PRs, CI status</dd></div>
+            <div><dt>Refused reads</dt><dd>None</dd></div>
+            <div><dt>Rate limit remaining</dt><dd>4,812 / 5,000</dd></div>
+          </dl>
+        </article>
+      </section>
+    </main>
+    <div class="prompt-dock">
+      <div class="prompt-strip">
+        <div class="focus-chip">⌖ connection/kubernetes:staging-us-east <span class="dim">· Suspended (42m)</span></div>
+        <div class="mono" style="color: var(--ink-secondary);">new session: scoped to connection/kubernetes:staging-us-east</div>
+      </div>
+      <div class="prompt-row">
+        <div class="prompt-field">What changed in staging-us-east right before the login expired?</div>
+        <div class="segmented"><span class="seg-opt active">Ask</span><span class="seg-opt">Investigate</span></div>
+        <button class="send-btn" type="button">Send →</button>
+      </div>
+    </div>
+  </body>
+</html>

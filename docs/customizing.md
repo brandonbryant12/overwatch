@@ -13,10 +13,11 @@ skills and the page's look live in clearly named files.
 | `~/.config/overwatch/config.json` (outside the repository) | Apps, environments, sources, watchers, thresholds, schedules, `extensions`. |
 | `~/.config/opencode/opencode.json` (outside the repository) | The plugin entry, its `url`, extra `permissions`, and `investigatorPrompt`. |
 | `local/` | Your extension modules (new source types), your prompt file, notes. Upstream never writes here. |
-| `web/src/style.css` | How the page looks. The view logic never depends on it beyond class names. |
+| `web/src/style.css` | How the page looks: `:root` (Night Watch dark) and `[data-theme="light"]` (Daylight Chart) CSS custom properties, typography, spacing, and component rules. See [design.md](design.md) for the full token reference. After editing, run `pnpm run build:web`. |
+| `web/src/favicon.svg`, `web/src/icons.ts` | The SVG Sentinel Reticle mark, wordmark, favicon, and inline UI icons. |
 
 **What is upstream's** (change it if you must, but expect merge work): `src/host` (the SQLite host; its tests are
-the safety net), `src/domain` (the model), `src/service`, `src/plugin`, `src/collect`, `web/src/app.ts`, `test/`.
+the safety net), `src/domain` (the model), `src/service`, `src/plugin`, `src/collect`, `web/src/app.ts`, `web/src/views.ts`, `test/`.
 `src/plugin/investigator.md` and `skills/overwatch/SKILL.md` are upstream's defaults: rather than editing the prompt,
 point the plugin's `investigatorPrompt` option at a copy in `local/`.
 
