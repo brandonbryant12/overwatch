@@ -49,6 +49,7 @@ git(app, "init", "-q", "-b", "main");
 writeFileSync(join(app, "payments.ts"), "export const TIMEOUT_MS = 300\n");
 git(app, "add", ".");
 git(app, "commit", "-q", "-m", "deployed");
+const deployedCommit = git(app, "rev-parse", "HEAD");
 
 // ------------------------------------------------------------------ the fake model
 type Message = { role: string; content: unknown; tool_calls?: Array<{ function: { name: string; arguments: string } }> };
@@ -162,7 +163,7 @@ await new Promise<void>((r) => provider.listen(0, "127.0.0.1", r));
 const providerPort = (provider.address() as { port: number }).port;
 
 // ------------------------------------------------------------------ the Overwatch service
-const cluster = fakeCluster();
+const cluster = fakeCluster({ image: `registry.example/shop-api:${deployedCommit.slice(0, 12)}` });
 const now = Date.now();
 cluster.log(now - 20 * 60_000, "ERROR payment 42 timed out after 300ms");
 cluster.log(now - 15 * 60_000, "ERROR payment 77 timed out after 300ms");
@@ -330,6 +331,8 @@ try {
   const recorded = (page as any).findings[0].finding;
   assert.equal(recorded.engineering.evidence.find((e: any) => e.source === "pods").verified, true, "the telemetry quote was verified");
   assert.equal(recorded.engineering.evidence.find((e: any) => e.source === "payments.ts").verified, true, "the code quote was verified");
+  assert.equal(recorded.code?.deployed, true, `the code read was the deployed commit: ${JSON.stringify(recorded.code)}`);
+  assert.equal(recorded.code?.commit, deployedCommit);
   const results = model.toolResults.join("\n---\n");
   assert.ok(results.includes("ERROR payment 42 timed out after 300ms"), "query_telemetry returned the fake cluster's logs");
   assert.match(results, /free-form kubectl arguments are not accepted/, "a kubectl operation outside the allowlist was refused");
@@ -340,7 +343,7 @@ try {
   const session = await client.session.get({ sessionID: sessionId });
   assert.equal((session as any).id, sessionId, "the session exists in OpenCode under the id Overwatch chose");
   step(`prompting on the focused incident created thread ${threadId} and session ${sessionId}; the investigator read evidence over MCP and filed a finding whose citations checked out`);
-  step("a made-up citation, a finding filed with another run's token, and kubectl delete were each refused");
+  step("a made-up citation, a finding filed with another run's token, and a kubectl delete operation were each refused");
 
   // ---------------------------------------------------------------- 6. continue and remember
   const findings = async () => ((await api((c) => c.IncidentPage.get(incidentId))) as any).findings.length as number;
@@ -433,7 +436,9 @@ try {
     `starting OpenCode drained the queue once; restarting it mid-turn ended with one session (${s4}), the prompt sent once and the finding recovered` +
       (resumed ? " (this unmanaged OpenCode server did not resume the turn itself, so Overwatch asked the session to continue, once)" : ""),
   );
-  step("the service never subscribes to OpenCode's event stream: it follows runs by the session's stored messages, so a dropped stream cannot lose an answer");
+  // Not a test: dropping OpenCode's event stream is not simulated here. The service never subscribes to that stream;
+  // it follows runs by the session's stored messages, which is what the restart above exercised.
+  console.log("· not tested: dropping the event stream (the service does not use it; see the comment in scripts/e2e.ts)");
 
   console.log("e2e passed");
   Effect.runFork(Fiber.interrupt(watchFiber));
