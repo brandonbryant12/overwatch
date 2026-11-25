@@ -16,9 +16,12 @@ things, and everything else works without being thought about.
 
 1. **The inbox**: what needs you, grouped by why. Nothing else is in it.
 2. **Three ways out**: Done, Later, Never.
-3. **Focus and the prompt bar**: put anything in focus and ask about it.
+3. **One bar**: put anything in focus, then find or ask. Search and prompting are the same place.
 4. **The environments strip**: is everything checked and quiet?
-5. **Search**: find anything, do anything, from the keyboard.
+5. **Briefs**: what changed while you were away, for you and in plain words for people outside engineering.
+
+Everything is one screen. Whatever is in focus (an incident, an environment, a failing connection, a brief) shows
+in the same pane; there are no separate pages to learn.
 
 Threads, sessions, routing, rules, tiers and the event log exist to make those five work. They are visible when
 wanted and never required.
@@ -373,6 +376,18 @@ Everything that has left the inbox stays reachable by search and counts in the d
 
 ### 5.4 Getting better over time
 
+**The smallest version comes first**, because one person produces little signal and will not sit through a weekly
+interview:
+
+- **"Was this right?"** on a finding. A correction is one dated line appended to `local/playbooks/<app>.md`, a
+  file the owner can read and edit, loaded into every investigation of that app. The page says when a playbook
+  line was used.
+- **Never shows what it would have hidden** before it is confirmed, and can be widened to the same pattern in
+  other environments in one step.
+- **A row that keeps coming back offers a better way out** (built).
+
+The fuller loop below is the direction, built only if the small version proves worth it.
+
 The event log already holds every decision the owner makes. What turns that into improvement is a loop, and every
 step of it produces something explicit that the owner approves. The system never rewrites itself silently.
 
@@ -431,13 +446,18 @@ it, and rules, thresholds and prompts are versioned data, not constants.
 
 ### 5.8 Before it happens
 
-Detection is not only for what has already broken.
+Detection is not only for what has already broken. It is also not fortune-telling: only what the inputs can
+honestly show is claimed.
 
-- **Trends towards a limit**: memory, quota or disk heading for its ceiling is raised with the time left at the
-  current rate, before it is hit.
-- **A change that looks risky** is flagged when it merges, before it is released: what it touches, and which past
-  incidents it resembles.
+- **Trends towards a limit**: memory, quota, disk, a connection pool or an autoscaler heading for its ceiling is
+  raised with the time left at the current rate, before it is hit.
+- **What is about to be promoted**: a commit that is in staging and not yet in production is checked there first.
+  New kinds of error, restarts, or settings that differ from production are raised against that commit before it
+  ships.
 - **A rollout is watched** from the moment it starts, against the baseline from before it.
+- An agent does not review every merged change: on the owner's model that would raise alarms constantly. A merge
+  is flagged by rules written in code (it touches a migration, a timeout or limit, or a file that past incidents
+  pointed at), and only then may an agent be asked to look.
 
 ## 6. Prompting on anything, and sessions
 
@@ -539,6 +559,9 @@ an unreliable peer.
 - When a problem follows a change, candidate changes are **ranked with their evidence**. Overwatch never names a
   single culprit.
 - A fix has two visible steps: the proposed change in the thread, then a draft pull request once verify passes.
+- Automatic fixes start narrow, where a weaker model is reliable and the test is unambiguous: a pull request that
+  reverts a deploy that regressed, and a setting or constant that a change broke, each with a test that fails
+  before and passes after. General bug fixing comes only once the trial command shows the owner's model earns it.
 
 ### 6.7 The page
 
@@ -616,27 +639,34 @@ It is done when these pass:
 
 ### Build order from here
 
-Each increment is small, ends in something the owner uses, and is graded independently before the next is built
-on it. The aim is an A. Nothing new is built while a high or medium defect from the last grading is open.
+Each increment is small and ends in something the owner uses. The aim is an A.
 
-0. **Before anything else**, the defects from the second grading (B-, below the bar): two services could still
-   take the writer lock when started at the same instant; a quote could verify against a query's own arguments
-   or under an unknown label; a thread kept its first deploy's commit across a later deploy; restore accepted a
-   database with the right table names and the wrong columns; a failed notification was never retried; the
-   strip could say "checked, quiet" with readings missing; a lost acknowledgement could send a prompt twice.
-1. **The daily loop.** The inbox grouped by why (5.1), three ways out, rows that stay put; Never with its preview
-   and undo, and one list of what is muted, but no general rule editor yet; and failure handling (4.1), because
-   an expired sign-in is the first thing a real laptop will hit.
-2. **Bring me in.** Asks, including `ask_owner` for any session (5.5); what a finding shows and "was this right?"
-   (5.6); prompting on a selection (6.1); the palette and links (6.7); the trial command for the owner's own model.
-   With it, design pass two: personality, the environment grid, the all-clear state.
-3. **Fix it.** The fixer and draft pull requests; a change followed to release; release grades and verified
-   recovery (6, 6.6); Jenkins.
-4. **Look ahead and look deeper.** Trends towards a limit, risky changes, the rollout watch (5.8); spans and
-   regressions; insights with the never-twice rule; the digest and briefs for other people (5.7).
-5. **Get better.** The rest of 5.4: goals, measurement, the interview, change proposals, replay.
-6. **Hand over.** Retention, 50 environments, upgrade paths, a real launchd install and the phase 0 checks on a
-   downstream machine.
+**The method.** Two gradings found the same weakness: a guarantee held in the case that was tested and could be
+got around another way. So the order within an increment is now: the independent assessor first writes the
+invariants as failing tests (properties over generated inputs, and the ways it would try to get around each
+guarantee); the builder makes them pass; the assessor then grades. Nothing new is built while a high or medium
+defect is open, and if two gradings in a row show no improvement the loop stops and the owner is told why.
+
+Increments 0 (the second grading's defects) and 1 (the daily loop) are built; see "Built so far".
+
+2. **Ready for the real thing.** Everything so far has run against fakes and a scripted model. Before more is
+   added: a `doctor` command that checks the laptop (the launchd agent, each cluster sign-in, the registry proxy
+   and the native binary, OpenCode found and connected, the model answering); the trial command, which replays
+   seeded incidents with known causes through the owner's own model and scores it; a pilot guide for one real
+   app with staging and production. With it: briefs (5.7) with a per-app glossary that turns service and route
+   names into words a customer would use; "was this right?" on a finding, kept in a playbook file per app that
+   investigations load (5.4); a second session that tries to disprove a finding that says "real" before the
+   owner sees it; and design pass two (the one bar, the environment grid, the all-clear state, more of the
+   owner's personality).
+3. **Fix it, narrowly.** Revert pull requests and broken settings (6.6); a change followed to release; release
+   grades and verified recovery; the promotion check (5.8).
+4. **Look ahead and look deeper.** Trends towards a limit; the rollout watch; spans and regressions; insights
+   with the never-twice rule.
+5. **Hand over.** Retention, 50 environments, upgrade paths, Jenkins.
+
+Postponed until the pilot shows the need, not dropped: prompting on a selection (6.1); `ask_owner` for any
+session and answering several asks at once (5.5); grouping one cause across environments; the rest of the
+learning loop in 5.4 (goals, weekly measurement, the interview, change proposals, replay).
 
 ## 8. Risks
 
