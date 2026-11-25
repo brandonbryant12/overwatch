@@ -199,3 +199,49 @@ describe("4. restore validates the schema it will be read with", () => {
     restore(good, db);
   });
 });
+
+describe("5. a notification that fails is retried, a bounded number of times", () => {
+  test("fail once, restart, poll again: it is delivered once; one that always fails stops after its limit", async () => {
+    const { testService } = await import("./fixtures/service.ts");
+    const dataDir = tempDir("notify");
+    let attempts = 0;
+    const failing = async () => {
+      attempts++;
+      throw new Error("notification centre unavailable");
+    };
+    const first = await testService({ dataDir, deps: { notify: failing } as never });
+    first.cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+    await first.service.collect("shop-api/production");
+    for (let i = 0; i < 40 && attempts === 0; i++) await new Promise((r) => setTimeout(r, 50));
+    await first.service.stop();
+    expect(attempts).toBe(1);
+    const delivered: string[] = [];
+    const second = await testService({ dataDir, deps: { notify: async (title: string) => void delivered.push(title) } as never });
+    try {
+      second.cluster.lines.push(...first.cluster.lines);
+      await second.service.collect("shop-api/production");
+      for (let i = 0; i < 60 && delivered.length === 0; i++) {
+        await (second.service as any).deliverNotifications({ now: Date.now() + 3_600_000 });
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(delivered).toEqual(["New incident in shop-api/production"]);
+      await (second.service as any).deliverNotifications({ now: Date.now() + 7_200_000 });
+      expect(delivered).toHaveLength(1);
+    } finally {
+      await second.service.stop();
+    }
+    // Always failing: tried a bounded number of times, then left as failed with its reason.
+    attempts = 0;
+    const third = await testService({ deps: { notify: failing } as never });
+    try {
+      third.cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await third.service.collect("shop-api/production");
+      for (let i = 0; i < 20; i++) await (third.service as any).deliverNotifications({ now: Date.now() + i * 3_600_000 });
+      expect(attempts).toBe(5);
+      const row = await third.service.read((db) => db.prepare("SELECT status, attempts, last_error FROM notified").get() as { status: string; attempts: number; last_error: string });
+      expect({ ...row }).toEqual({ status: "failed", attempts: 5, last_error: "notification centre unavailable" });
+    } finally {
+      await third.service.stop();
+    }
+  });
+});

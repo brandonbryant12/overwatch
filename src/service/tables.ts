@@ -59,6 +59,12 @@ export const SERVICE_SCHEMA = `
 
 /** Columns added after a table was first shipped: added to databases that predate them. */
 const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
+  ["notified", "title", "TEXT"],
+  ["notified", "body", "TEXT"],
+  ["notified", "status", "TEXT NOT NULL DEFAULT 'sent'"],
+  ["notified", "attempts", "INTEGER NOT NULL DEFAULT 1"],
+  ["notified", "last_error", "TEXT"],
+  ["notified", "next_at", "INTEGER NOT NULL DEFAULT 0"],
   ["run_tokens", "code_path", "TEXT"],
   ["run_tokens", "code_commit", "TEXT"],
   ["run_tokens", "code_deployed", "INTEGER NOT NULL DEFAULT 0"],
@@ -69,7 +75,7 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
  * The version of the database's layout, written by the service and checked by restore. Bump it whenever a table or
  * column the service reads changes, and say in the commit how an older database is brought forward.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function createServiceTables(db: DatabaseSync) {
   db.exec(SERVICE_SCHEMA);
