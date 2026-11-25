@@ -1,0 +1,35 @@
+{
+  "name": "overwatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first autonomous operations command center built on OpenCode 2, Alchemy Domain, and Anomaly Rune.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd packages/server dev",
+    "start": "bun run --cwd packages/server start",
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit",
+    "codegen:protocol": "bun run scripts/codegen-protocol.ts",
+    "evals:replay": "bun run scripts/run-evals.ts",
+    "emulator:start": "bun run --cwd packages/emulator start",
+    "loop:emulated": "bun run scripts/run-emulated-loop.ts",
+    "rune:build": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo build -p overwatch-app",
+    "rune:run": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo run -p overwatch-app",
+    "rune:test": "PATH=\"$HOME/.cargo/bin:$PATH\" cargo test --workspace"
+  },
+  "dependencies": {
+    "@alchemy.run/domain": "2.0.0-beta.87",
+    "@opencode/client": "2.4.1",
+    "@opencode/protocol": "2.4.1",
+    "@opencode/schema": "2.4.1",
+    "@overwatch/domain": "workspace:*",
+    "effect": "4.1.4"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "fast-check": "^3.23.2",
+    "typescript": "^5.8.2"
+  }
+}

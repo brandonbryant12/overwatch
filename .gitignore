@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build outputs
+dist/
+build/
+target/
+*.tsbuildinfo
+
+# Local runtime state & secrets
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+!.env.example
+.overwatch/
+
+# OS & editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Scratch / verification screenshots
+.verify-shots/

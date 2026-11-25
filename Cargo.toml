@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/overwatch-protocol",
+    "crates/overwatch-client",
+    "crates/overwatch-viz",
+    "crates/overwatch-app",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rune = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5", default-features = true }
+overwatch-protocol = { path = "crates/overwatch-protocol" }
+overwatch-client = { path = "crates/overwatch-client" }
+overwatch-viz = { path = "crates/overwatch-viz" }
+
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "09c3da7245afc39a562faa6baa7df470afebd2a5" }
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
