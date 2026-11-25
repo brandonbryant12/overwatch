@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "./harness.ts";
 import plugin, { fixerPermissions, investigatorPermissions, SHOW } from "../src/index.ts";
 import { memoryKV } from "../src/store.ts";
 
@@ -74,10 +74,10 @@ describe("plugin", () => {
   });
 
   test("fixers edit and run verify commands, but cannot commit, push, call gh or kubectl", () => {
-    const rules = fixerPermissions(["bun test"], []);
+    const rules = fixerPermissions(["pnpm test"], []);
     expect(decide(rules, "edit", "src/payments.ts")).toBe("allow");
-    expect(decide(rules, "shell", "bun test")).toBe("allow");
-    expect(decide(rules, "shell", "bun test payments")).toBe("allow");
+    expect(decide(rules, "shell", "pnpm test")).toBe("allow");
+    expect(decide(rules, "shell", "pnpm test payments")).toBe("allow");
     for (const command of ["git commit -am x", "git push origin HEAD", "gh pr create", "gh pr merge 1", "kubectl get pods", "rm -rf /"]) {
       expect(decide(rules, "shell", command)).toBe("deny");
     }

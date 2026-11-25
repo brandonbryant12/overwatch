@@ -3,7 +3,7 @@
  *
  * Nothing real is touched: OpenCode runs with its own temporary HOME, config, data, cache and state; the model is a
  * local fake that speaks the OpenAI chat API; `kubectl` and `gh` on PATH are fakes that log their arguments; there
- * are no credentials. Run with: OPENCODE_BIN=/path/to/opencode bun scripts/smoke.ts
+ * are no credentials. Run with: OPENCODE_BIN=/path/to/opencode pnpm run smoke
  */
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -70,7 +70,8 @@ fake(
   `echo "$*" >> "${kubectlLog}"
 case "$6 $7" in
   "get pods") cat "${join(root, "pods.json")}" ;;
-  "get events"|"get resourcequota") echo '{"items":[]}' ;;
+  "get events"|"get resourcequota"|"get nodes") echo '{"items":[]}' ;;
+  "get deployments.apps"*) echo '{"items":[]}' ;;
   "top pods") echo "shop-api-1 api 100m 100Mi" ;;
   "top nodes") echo "node-a 100m 5% 100Mi 5%" ;;
   logs*) cat "${join(root, "logs.txt")}" ;;
@@ -290,7 +291,7 @@ try {
   const kubectlCalls = readFileSync(kubectlLog, "utf8").trim().split("\n");
   assert.ok(kubectlCalls.length > 0);
   for (const line of kubectlCalls) {
-    assert.match(line, /^--context prod-cluster --namespace shop --request-timeout=20s (get|describe|logs|top) /, `read-only kubectl only: ${line}`);
+    assert.match(line, /^--context prod-cluster --namespace shop --request-timeout=\d+s (get|describe|logs|top) /, `read-only kubectl only: ${line}`);
   }
   console.log(`✓ ${kubectlCalls.length} kubectl calls, all read-only with the configured context and namespace`);
   console.log("smoke passed");

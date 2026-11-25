@@ -4,9 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "lib": [
-      "ESNext",
-      "DOM",
-      "DOM.Iterable"
+      "ESNext"
     ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -14,8 +12,9 @@
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
     "types": [
-      "bun"
+      "node"
     ]
   },
   "include": [

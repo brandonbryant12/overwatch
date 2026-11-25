@@ -1,8 +1,8 @@
-import { formatDuration, iso, parseDuration } from "./duration.ts";
+import { formatDuration, iso, parseWhen } from "./duration.ts";
 import type { Incident } from "./incidents.ts";
 import type { Options } from "./options.ts";
 import { renderProductSummary } from "./report.ts";
-import { loadWatcher, scanAll, type InvestigationRecord, type KV } from "./store.ts";
+import { loadWatcher, scanRecords, type InvestigationRecord, type KV, type WatcherState } from "./store.ts";
 
 /** Terse status: watchers and their coverage, open incidents, recent investigations. */
 export async function renderStatus(kv: KV, options: Options, errors: ReadonlyArray<string>, now: number): Promise<string> {
@@ -11,7 +11,13 @@ export async function renderStatus(kv: KV, options: Options, errors: ReadonlyArr
   if (!options.watchers.length) lines.push("", "No watchers configured. See docs/configuration.md.");
 
   for (const watcher of options.watchers) {
-    const state = await loadWatcher(kv, watcher.id);
+    let state: WatcherState;
+    try {
+      state = await loadWatcher(kv, watcher.id);
+    } catch (error) {
+      lines.push("", `**${watcher.id}** ⚠ ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
     const last = state.lastRun;
     const age = state.lastRunAt === undefined ? "never run" : `last run ${formatDuration(Math.max(60_000, Math.round((now - state.lastRunAt) / 60_000) * 60_000))} ago`;
     lines.push("", `**${watcher.id}** every ${formatDuration(watcher.everyMs)}, ${age}`);
@@ -22,19 +28,23 @@ export async function renderStatus(kv: KV, options: Options, errors: ReadonlyArr
     for (const note of last?.coverage ?? []) lines.push(`- ⚠ ${note}`);
   }
 
-  const incidents = (await scanAll<Incident>(kv, "incident/")).filter((i) => i.status === "open").sort((a, b) => b.lastAt - a.lastAt);
+  const allIncidents = await scanRecords<Incident>(kv, "incident/");
+  const incidents = allIncidents.records.filter((i) => i.status === "open").sort((a, b) => b.lastAt - a.lastAt);
   lines.push("", `**Open incidents:** ${incidents.length || "none"}`);
   for (const incident of incidents.slice(0, 20)) {
     lines.push(`- ${incident.id} ${incident.watcherId}: ${incident.title} (${incident.count}×, since ${iso(incident.firstAt)}, last ${iso(incident.lastAt)})`);
   }
 
-  const investigations = (await scanAll<InvestigationRecord>(kv, "investigation/")).sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
+  const allInvestigations = await scanRecords<InvestigationRecord>(kv, "investigation/");
+  const investigations = allInvestigations.records.sort((a, b) => b.createdAt - a.createdAt).slice(0, 5);
   if (investigations.length) lines.push("", "**Recent investigations:**");
   for (const inv of investigations) {
     const verdict = inv.finding ? ` ${inv.finding.engineering.verdict.replace("_", " ")}:` : "";
     const summary = inv.finding ? ` ${renderProductSummary(inv.finding)}` : inv.error ? ` ${inv.error}` : "";
     lines.push(`- ${inv.id} [${inv.status}] ${inv.app}${inv.environment ? `/${inv.environment}` : ""} ${inv.title} —${verdict}${summary}${inv.pullRequest ? ` Draft PR: ${inv.pullRequest}` : ""}`);
   }
+  const skipped = allIncidents.skipped + allInvestigations.skipped;
+  if (skipped) lines.push("", `⚠ ${skipped} record(s) were written by a newer Overwatch and are not shown. Update the plugin.`);
   return lines.join("\n");
 }
 
@@ -58,14 +68,13 @@ export function parseInvestigateArgs(input: string, now: number): InvestigateArg
     if (flag === "app") out.app = value!;
     else if (flag === "env" || flag === "environment") out.environment = value!;
     else {
-      const relative = parseDuration(value);
-      const absolute = Date.parse(value!);
-      const at = relative !== undefined ? now - relative : absolute;
-      if (!Number.isFinite(at)) return { error: `--${flag} must be a duration such as 6h or an ISO time` };
+      const at = parseWhen(value, now);
+      if (at === undefined) return { error: `--${flag} ${value} is not a time; use a duration such as 6h or an ISO time such as 2026-11-25T10:00:00Z` };
       if (flag === "since") out.since = at;
       else out.until = at;
     }
   }
+  if (out.since !== undefined && out.since >= (out.until ?? now)) return { error: "--since must be before --until (or before now)." };
   if (!rest) return { error: "Paste the bug report after /investigate." };
   return { ...out, text: rest };
 }

@@ -1,11 +1,18 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import type { Exec } from "./exec.ts";
 
 const GIT_TIMEOUT = 120_000;
 
 async function git(exec: Exec, cwd: string, args: string[], signal?: AbortSignal) {
   return exec("git", args, { cwd, timeoutMs: GIT_TIMEOUT, ...(signal ? { signal } : {}) });
+}
+
+/** True when `directory` is neither the checkout nor a directory the checkout lives inside. */
+export function isolated(directory: string, checkout: string): boolean {
+  const a = resolve(directory);
+  const b = resolve(checkout);
+  return a !== b && relative(a, b).startsWith("..");
 }
 
 /** Resolves a commit or ref to a full SHA in the checkout, fetching it once if it is not there yet. */
@@ -36,6 +43,8 @@ export async function addWorktree(exec: Exec, checkout: string, directory: strin
 
 /** Removes a worktree and, when given, the local branch it was on. Never fails: leftovers are swept later. */
 export async function removeWorktree(exec: Exec, checkout: string, directory: string, branch?: string): Promise<void> {
+  // The checkout is the operator's own working copy. Nothing here may ever delete it or a parent of it.
+  if (!isolated(directory, checkout)) return;
   const removed = await git(exec, checkout, ["worktree", "remove", "--force", directory]);
   if (removed.code !== 0) {
     await rm(directory, { recursive: true, force: true }).catch(() => undefined);

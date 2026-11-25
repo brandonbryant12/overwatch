@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "./harness.ts";
 import * as fc from "fast-check";
 import { evaluateRule, type MetricRule, type Verdict } from "../src/detection.ts";
 import { parseDuration } from "../src/duration.ts";

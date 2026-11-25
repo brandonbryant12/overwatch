@@ -78,12 +78,25 @@ export interface Options {
     readonly sliceMs: number;
   };
   readonly timeouts: {
+    /** One call to a source: one `kubectl` command, one HTTP request, one program. */
     readonly sourceMs: number;
+    /** One source collecting one slice, however many calls that takes. */
+    readonly sliceMs: number;
     readonly investigationMs: number;
     readonly fixMs: number;
     readonly verifyMs: number;
   };
-  readonly concurrency: { readonly investigations: number; readonly watchers: number };
+  readonly concurrency: {
+    readonly investigations: number;
+    readonly watchers: number;
+    /** Calls one source makes at once within a slice, such as `kubectl logs` across pods. */
+    readonly sourceCalls: number;
+  };
+  readonly redaction: {
+    readonly entropy: boolean;
+    readonly allow: ReadonlyArray<RegExp>;
+    readonly patterns: ReadonlyArray<RegExp>;
+  };
   readonly schedule: boolean;
   readonly notify: boolean;
   readonly dataDir: string;
@@ -150,6 +163,23 @@ function positiveInt(value: unknown, fallback: number, path: string, errors: str
   if (typeof value === "number" && Number.isInteger(value) && value >= 1) return value;
   errors.push(`${path} must be a positive integer`);
   return fallback;
+}
+
+function patterns(value: unknown, flags: string, path: string, errors: string[]): RegExp[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    errors.push(`${path} must be a list of regular expressions`);
+    return [];
+  }
+  return value.flatMap((source, index) => {
+    try {
+      if (typeof source !== "string" || !source) throw new Error("empty");
+      return [new RegExp(source, flags)];
+    } catch {
+      errors.push(`${path}[${index}] is not a valid regular expression`);
+      return [];
+    }
+  });
 }
 
 function parseModel(value: unknown, errors: string[]): Options["model"] {
@@ -312,6 +342,7 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
   const timeouts = isRecord(input.timeouts) ? input.timeouts : {};
   const concurrency = isRecord(input.concurrency) ? input.concurrency : {};
   const permissions = isRecord(input.permissions) ? input.permissions : {};
+  const redaction = isRecord(input.redaction) ? input.redaction : {};
   const options: Options = {
     apps,
     watchers,
@@ -324,6 +355,8 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
     },
     timeouts: {
       sourceMs: duration(timeouts.source, "60s", "timeouts.source", errors),
+      // Left unset, a slice gets at least as long as one call, so raising timeouts.source alone stays valid.
+      sliceMs: Math.max(duration(timeouts.slice, "10m", "timeouts.slice", errors), timeouts.slice === undefined ? duration(timeouts.source, "60s", "timeouts.source", []) : 0),
       investigationMs: duration(timeouts.investigation, "20m", "timeouts.investigation", errors),
       fixMs: duration(timeouts.fix, "30m", "timeouts.fix", errors),
       verifyMs: duration(timeouts.verify, "10m", "timeouts.verify", errors),
@@ -331,6 +364,12 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
     concurrency: {
       investigations: positiveInt(concurrency.investigations, 2, "concurrency.investigations", errors),
       watchers: positiveInt(concurrency.watchers, 2, "concurrency.watchers", errors),
+      sourceCalls: positiveInt(concurrency.sourceCalls, 4, "concurrency.sourceCalls", errors),
+    },
+    redaction: {
+      entropy: redaction.entropy !== false,
+      allow: patterns(redaction.allow, "", "redaction.allow", errors),
+      patterns: patterns(redaction.patterns, "g", "redaction.patterns", errors),
     },
     schedule: input.schedule !== false,
     notify: input.notify === undefined ? process.platform === "darwin" : input.notify === true,
@@ -342,5 +381,6 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
     },
   };
   if (options.lookback.initialMs > options.lookback.maxMs) errors.push("lookback.initial cannot exceed lookback.max");
+  if (options.timeouts.sliceMs < options.timeouts.sourceMs) errors.push("timeouts.slice cannot be shorter than timeouts.source");
   return { options, errors };
 }

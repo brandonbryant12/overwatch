@@ -13,7 +13,7 @@
             "checkout": "~/code/shop-api",
             "baseBranch": "main",
             // Must all pass before a draft pull request is opened. Leave empty to never open one.
-            "verify": ["bun test"],
+            "verify": ["pnpm test"],
             // Your own skills, by ID, for every investigation of this app.
             "skills": [],
             "environments": {
@@ -66,8 +66,8 @@
           "appKey": "keychain:overwatch/datadog-app-key"
         },
         "lookback": { "initial": "24h", "max": "14d", "overlap": "2m", "slice": "6h" },
-        "timeouts": { "source": "60s", "investigation": "20m", "fix": "30m", "verify": "10m" },
-        "concurrency": { "investigations": 2, "watchers": 2 }
+        "timeouts": { "source": "60s", "slice": "10m", "investigation": "20m", "fix": "30m", "verify": "10m" },
+        "concurrency": { "investigations": 2, "watchers": 2, "sourceCalls": 4 }
       }
     }
   ]

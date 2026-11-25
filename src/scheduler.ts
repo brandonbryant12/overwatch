@@ -1,7 +1,7 @@
 import { limiter } from "./exec.ts";
 import type { WatcherConfig } from "./options.ts";
 import type { Runtime } from "./runtime.ts";
-import { keys, loadWatcher } from "./store.ts";
+import { keys, loadWatcher, readRecord, writeRecord } from "./store.ts";
 
 /**
  * Overwatch schedules its own runs with a timer in the plugin, rather than OpenCode automations.
@@ -15,15 +15,15 @@ export const TICK_MS = 60_000;
 
 export async function acquireLease(runtime: Runtime, owner: string): Promise<boolean> {
   const now = runtime.now();
-  const current = (await runtime.kv.get(keys.lease)) as { owner: string; until: number } | undefined;
+  const current = await readRecord<{ owner: string; until: number }>(runtime.kv, keys.lease);
   if (current && current.owner !== owner && current.until > now) return false;
-  await runtime.kv.set(keys.lease, { owner, until: now + LEASE_MS });
-  const check = (await runtime.kv.get(keys.lease)) as { owner: string } | undefined;
+  await writeRecord(runtime.kv, keys.lease, { owner, until: now + LEASE_MS });
+  const check = await readRecord<{ owner: string }>(runtime.kv, keys.lease);
   return check?.owner === owner;
 }
 
 export async function releaseLease(runtime: Runtime, owner: string): Promise<void> {
-  const current = (await runtime.kv.get(keys.lease)) as { owner: string } | undefined;
+  const current = await readRecord<{ owner: string }>(runtime.kv, keys.lease);
   if (current?.owner === owner) await runtime.kv.remove(keys.lease);
 }
 

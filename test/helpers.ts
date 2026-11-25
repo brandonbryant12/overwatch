@@ -59,9 +59,9 @@ export const realFinding: Finding = {
     causeBasis: "observed",
     evidence: [
       { source: "errors", quote: "2026-11-25T10:05:00Z shop-api error payment 42 timed out after 300ms" },
-      { source: "src/payments.ts", quote: "const TIMEOUT_MS = 300" },
+      { source: "payments.ts", quote: "const TIMEOUT_MS = 300" },
     ],
-    codeLocation: "src/payments.ts:12",
+    codeLocation: "payments.ts:1",
     notChecked: ["payment provider status page"],
     nextCheck: "Compare p95 of the provider call before and after the deploy.",
   },

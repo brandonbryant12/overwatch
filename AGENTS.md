@@ -33,8 +33,12 @@ contexts, queries or credentials from anyone's environment.
 
 ## Working on the code
 
-- `bun install`, then `bun run typecheck` and `bun test` before every commit. Both must pass.
-- `OPENCODE_BIN=<opencode 2 binary> bun run smoke` loads the plugin into a real, isolated OpenCode server. Run it after
+- Node 22.6 or newer and pnpm. `pnpm install`, then `pnpm run check` (typecheck and tests) before every commit. Both must
+  pass. Bun is not a dependency of anything here: the plugin, the tests and the scripts use only Node's standard
+  library, and people who use this cannot install Bun. Do not add `bun:` imports, `Bun.*` calls or a `bun.lock`.
+- Tests run on Node's built-in runner; `test/harness.ts` supplies `describe`, `test` and `expect`. Source is TypeScript
+  that Node can run by stripping types, so no enums, namespaces or parameter properties (`erasableSyntaxOnly`).
+- `OPENCODE_BIN=<opencode 2 binary> pnpm run smoke` loads the plugin into a real, isolated OpenCode server. Run it after
   changing anything in `src/index.ts`, `src/investigate.ts`, the prompts, or how the plugin uses the OpenCode API.
   The npm package `@opencode/cli-<platform>` carries the binary.
 - Target the OpenCode 2 plugin API as documented for the release in `package.json` (`@opencode/plugin`). Import only
@@ -49,6 +53,14 @@ contexts, queries or credentials from anyone's environment.
   - One breach, one incident.
   - Report limits are enforced by `validateFinding`, not only described in the prompt.
   - Pull requests are drafts, opened by plugin code after verify passes; agents cannot push or call `gh`.
+  - An investigator's directory is a worktree of its own or an empty directory, never the app's checkout.
+  - A source that fans out (one call per pod) bounds its calls and its time and reports what it left unread; one
+    unreadable pod never fails a slice, and nothing a slice does can stop its checkpoint from ever moving.
+  - JSON from `kubectl` and Datadog is read through `src/tolerant.ts`; a missing or mistyped field costs that field.
+  - Stored records go through `readRecord` and `writeRecord` in `src/store.ts`, which carry the schema version.
+    Changing a record's shape means bumping `SCHEMA_VERSION` and adding a migration.
+  - Citations are checked by `src/citations.ts`, not by a model, before a finding is stored.
+  - Text that reaches an agent or a report is redacted, by name and by how random the value looks.
 - Tests use fakes for `kubectl`, `gh`, Datadog and the model. Never call a real cluster, Datadog or repository host
   from a test.
 - Sources are added by implementing `SourceType` in `src/sources/` and registering it in `src/sources/index.ts`.

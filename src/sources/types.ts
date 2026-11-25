@@ -13,6 +13,15 @@ export interface SourceContext {
   readonly exec: Exec;
   readonly fetch: typeof fetch;
   readonly signal: AbortSignal;
+  /**
+   * When this collection must be finished, as `Date.now()` milliseconds. A source that fans out stops starting new
+   * calls before it and reports what it left unread, rather than being cut off with nothing to show.
+   */
+  readonly deadline: number;
+  /** Scratch space shared by every slice of one run of this source, so a long catch-up does not repeat calls. */
+  readonly scratch: Map<string, unknown>;
+  /** Waits; a fake in tests so retries do not slow them down. */
+  readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 export interface CollectResult {

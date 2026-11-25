@@ -35,15 +35,92 @@ export function memoryKV(): KV & { readonly data: Map<string, unknown> } {
   };
 }
 
-export async function scanAll<T>(kv: KV, prefix: string): Promise<T[]> {
-  const out: T[] = [];
+/**
+ * Every record is stored as `{ v, data }`, where `v` is the schema version that wrote it.
+ *
+ * - A record without the envelope was written before versioning and is version 0.
+ * - An older record is brought forward through `MIGRATIONS`, one version at a time, when it is read. The stored
+ *   copy is rewritten the next time that record is saved.
+ * - A record from a newer version is never read or overwritten: reading one fails with `NewerSchemaError`, and
+ *   scans skip it. Downgrading the plugin therefore cannot corrupt what the newer version stored.
+ *
+ * To change a record's shape: bump `SCHEMA_VERSION` and add `MIGRATIONS[<previous version>]`.
+ */
+export const SCHEMA_VERSION = 1;
+
+/** The kind of a record, taken from its key: `watcher`, `seen`, `incident`, `investigation`, `session`, ... */
+export type RecordKind = string;
+
+/** `MIGRATIONS[n]` turns a version `n` record into version `n + 1`. */
+const MIGRATIONS: Readonly<Record<number, (kind: RecordKind, data: unknown) => unknown>> = {
+  // Version 1 added the envelope only; the records inside kept their shape.
+  0: (_kind, data) => data,
+};
+
+export class NewerSchemaError extends Error {
+  constructor(key: string, version: number) {
+    super(`${key} was written by a newer Overwatch (schema ${version}; this one reads up to ${SCHEMA_VERSION}). Update the plugin.`);
+    this.name = "NewerSchemaError";
+  }
+}
+
+const isEnvelope = (value: unknown): value is { v: number; data: unknown } =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  typeof (value as { v?: unknown }).v === "number" &&
+  "data" in value &&
+  Object.keys(value).length === 2;
+
+function unwrap<T>(key: string, raw: unknown): T | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  let version = isEnvelope(raw) ? raw.v : 0;
+  let data = isEnvelope(raw) ? raw.data : raw;
+  if (!Number.isInteger(version) || version < 0) return undefined;
+  if (version > SCHEMA_VERSION) throw new NewerSchemaError(key, version);
+  const kind = key.split("/")[0]!;
+  for (; version < SCHEMA_VERSION; version++) {
+    const migrate = MIGRATIONS[version];
+    if (!migrate) return undefined;
+    data = migrate(kind, data);
+  }
+  return data as T;
+}
+
+/** Reads one record, migrating it to the current schema. Throws `NewerSchemaError` for a newer one. */
+export async function readRecord<T>(kv: KV, key: string): Promise<T | undefined> {
+  return unwrap<T>(key, await kv.get(key));
+}
+
+/** Writes one record at the current schema version. Refuses to replace a record from a newer version. */
+export async function writeRecord(kv: KV, key: string, value: unknown): Promise<void> {
+  const existing = await kv.get(key);
+  if (isEnvelope(existing) && existing.v > SCHEMA_VERSION) throw new NewerSchemaError(key, existing.v);
+  await kv.set(key, { v: SCHEMA_VERSION, data: value as Json });
+}
+
+/** Reads every record under a prefix. Records from a newer schema are left out and counted in `skipped`. */
+export async function scanRecords<T>(kv: KV, prefix: string): Promise<{ records: T[]; skipped: number }> {
+  const records: T[] = [];
+  let skipped = 0;
   let after: string | undefined;
   do {
     const page = await kv.scan({ prefix, ...(after ? { after } : {}), limit: 200 });
-    out.push(...page.entries.map((entry) => entry.value as T));
+    for (const entry of page.entries) {
+      try {
+        const record = unwrap<T>(entry.key, entry.value);
+        if (record !== undefined) records.push(record);
+      } catch {
+        skipped++;
+      }
+    }
     after = page.next;
   } while (after);
-  return out;
+  return { records, skipped };
+}
+
+export async function scanAll<T>(kv: KV, prefix: string): Promise<T[]> {
+  return (await scanRecords<T>(kv, prefix)).records;
 }
 
 export interface RunRecord {
@@ -97,21 +174,22 @@ export const keys = {
   investigation: (id: string) => `investigation/${id}`,
   session: (sessionID: string) => `session/${sessionID}`,
   finding: (investigationId: string) => `finding/${investigationId}`,
+  /** Text an investigation was shown (its brief, each query result), kept to check citations against. */
+  evidence: (investigationId: string, name: string) => `evidence/${investigationId}/${name}`,
+  evidencePrefix: (investigationId: string) => `evidence/${investigationId}/`,
   lease: "lease",
 };
 
 export const emptyWatcherState: WatcherState = { checkpoints: {}, series: {} };
 
 export async function loadWatcher(kv: KV, id: string): Promise<WatcherState> {
-  return ((await kv.get(keys.watcher(id))) as WatcherState | undefined) ?? emptyWatcherState;
+  return (await readRecord<WatcherState>(kv, keys.watcher(id))) ?? emptyWatcherState;
 }
 
 export async function loadSeen(kv: KV, watcherId: string, source: string): Promise<Seen> {
-  return ((await kv.get(keys.seen(watcherId, source))) as Seen | undefined) ?? {};
+  return (await readRecord<Seen>(kv, keys.seen(watcherId, source))) ?? {};
 }
 
 export async function openIncidents(kv: KV, watcherId: string): Promise<Incident[]> {
   return (await scanAll<Incident>(kv, "incident/")).filter((i) => i.watcherId === watcherId && i.status === "open");
 }
-
-export const asJson = (value: unknown) => value as Json;

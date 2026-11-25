@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Plugin } from "@opencode/plugin";
-import { parseDuration } from "./duration.ts";
+import { iso, queryWindow } from "./duration.ts";
 import { exec } from "./exec.ts";
-import { createInvestigator, fileFinding, FIXER, INVESTIGATOR, type Host } from "./investigate.ts";
+import { createInvestigator, fileFinding, FIXER, INVESTIGATOR, recordEvidence, type Host } from "./investigate.ts";
 import { notify } from "./notify.ts";
 import { parseOptions, type PermissionRule, type WatcherConfig } from "./options.ts";
 import { findingJsonSchema } from "./report.ts";
-import { sourceContext, validateSources, type Runtime } from "./runtime.ts";
+import { configureRedaction } from "./redact.ts";
+import { sleep, sourceContext, validateSources, type Runtime } from "./runtime.ts";
+import { isRecord } from "./tolerant.ts";
 import { startScheduler } from "./scheduler.ts";
 import { sourceType } from "./sources/index.ts";
 import { parseInvestigateArgs, pickApp, renderStatus } from "./status.ts";
@@ -60,12 +62,6 @@ function storageKV(ctx: Context): KV {
   };
 }
 
-const sleep = (ms: number, signal?: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => (clearTimeout(timer), resolve()), { once: true });
-  });
-
 function host(ctx: Context, runtime: Runtime): Host {
   const prompted = new Map<string, number>();
   return {
@@ -109,20 +105,13 @@ function host(ctx: Context, runtime: Runtime): Host {
   };
 }
 
-const time = (value: unknown, now: number, fallback: number) => {
-  if (typeof value !== "string" || !value) return fallback;
-  const relative = parseDuration(value);
-  if (relative !== undefined) return now - relative;
-  const absolute = Date.parse(value);
-  return Number.isFinite(absolute) ? absolute : fallback;
-};
-
 export const OverwatchPlugin = {
   id: "overwatch",
   async setup(ctx: Context) {
     const parsed = parseOptions(ctx.options, ctx.location.directory);
     const options = parsed.options;
     const errors = [...parsed.errors, ...validateSources(options)];
+    configureRedaction(options.redaction);
     const runtime: Runtime = {
       kv: storageKV(ctx),
       options,
@@ -196,14 +185,18 @@ export const OverwatchPlugin = {
           const config = env?.sources[input.source];
           const type = config ? sourceType(config.type) : undefined;
           if (!config || !type) return { content: `Unknown source ${input.app}/${input.environment}/${input.source}. Configured:\n${sourceList}` };
-          const now = Date.now();
+          const window = queryWindow(input, Date.now());
+          if ("error" in window) return { content: `Query not run: ${window.error}` };
           try {
             const text = await type.query(
               config,
-              { since: time(input.since, now, now - 3_600_000), until: time(input.until, now, now), args: input.args ?? {} },
+              { ...window, args: isRecord(input.args) ? input.args : {} },
               sourceContext(runtime, input.app, input.environment, input.source, context.signal),
             );
-            return { content: text || "(no output)" };
+            const output = text || "(no output)";
+            // Kept so the finding's quotes can be checked against what this investigation was actually shown.
+            await recordEvidence(runtime, context.sessionID, String(input.source), `overwatch_query ${input.source} ${iso(window.since)} to ${iso(window.until)} ${JSON.stringify(input.args ?? {})}\n${output}`).catch(() => undefined);
+            return { content: output };
           } catch (error) {
             return { content: `Query failed: ${error instanceof Error ? error.message : String(error)}` };
           }
@@ -212,7 +205,7 @@ export const OverwatchPlugin = {
       editor.add({
         name: "overwatch_report",
         description:
-          "File the investigation's finding. Call once, at the end. Lead with the verdict, cite evidence for every claim, keep within the limits. Nothing found is a valid answer.",
+          "File the investigation's finding. Call once, at the end. Lead with the verdict, cite evidence for every claim, keep within the limits. Quotes are checked against what you were shown: copy them exactly from an overwatch_query result, the report you were given, or a file in the working directory. Nothing found is a valid answer.",
         input: findingJsonSchema as any,
         options: { codemode: false },
         execute: async (input: unknown, context) => ({ content: await fileFinding(runtime, context.sessionID, input) }),

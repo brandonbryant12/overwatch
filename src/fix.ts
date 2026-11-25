@@ -5,7 +5,7 @@ import type { Host } from "./investigate.ts";
 import type { AppConfig } from "./options.ts";
 import { renderEngineering, type Finding } from "./report.ts";
 import type { Runtime } from "./runtime.ts";
-import { asJson, keys, type InvestigationRecord } from "./store.ts";
+import { keys, writeRecord, type InvestigationRecord } from "./store.ts";
 
 /**
  * Tries a fix only when the investigation says one is possible: the fixer agent edits a fresh worktree branched
@@ -33,7 +33,7 @@ export async function runFix(
   let keepBranch = false;
   try {
     const sessionID = await host.createSession({ title: `Overwatch fix: ${record.title}`.slice(0, 120), agent: "overwatch-fixer", directory });
-    await runtime.kv.set(keys.session(sessionID), asJson({ investigationId: record.id, role: "fixer" }));
+    await writeRecord(runtime.kv, keys.session(sessionID), { investigationId: record.id, role: "fixer" });
     const prompt = [
       `Make the smallest change that fixes this in ${app.name}. The working directory is a fresh branch from ${base}.`,
       finding.fix?.plan ? `Planned change: ${finding.fix.plan}` : "",

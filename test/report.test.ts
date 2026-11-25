@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "./harness.ts";
 import { findingJsonSchema, renderProductSummary, renderReport, validateFinding } from "../src/report.ts";
 import { realFinding } from "./helpers.ts";
 
@@ -80,7 +80,7 @@ describe("rendering", () => {
     const engineering = report.slice(report.indexOf("```text") + 8);
     expect(engineering.startsWith("Verdict: Real (high confidence)")).toBe(true);
     expect(report).toContain("Cause (observed): The payments client timeout");
-    expect(report).toContain("Code: src/payments.ts:12 @ 9f8e7d6c5b4a");
+    expect(report).toContain("Code: payments.ts:1 @ 9f8e7d6c5b4a");
     expect(report).toContain("Not checked: errors: 2026-11-10T12:00:00Z to 2026-11-11T12:00:00Z not checked (lookback is capped at 14d); payment provider status page");
     expect(report).toContain("Next check: Compare p95");
   });

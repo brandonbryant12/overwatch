@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "./harness.ts";
 import type { Incident } from "../src/incidents.ts";
 import type { SourceConfig } from "../src/options.ts";
 import { acquireLease, dueWatchers, releaseLease } from "../src/scheduler.ts";

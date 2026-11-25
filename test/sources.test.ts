@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, parseJsonc, test } from "./harness.ts";
 import { readFileSync } from "node:fs";
 import { parseOptions } from "../src/options.ts";
 import { sourceContext, validateSources } from "../src/runtime.ts";
@@ -114,7 +114,7 @@ describe("kubernetes source", () => {
   test("collect reads pods, warning events, logs, top, nodes and quotas with the configured context and namespace", async () => {
     const exec = fakeExec(({ args }) => {
       const verb = args.slice(5).join(" ");
-      expect(args.slice(0, 5)).toEqual(["--context", "prod-cluster", "--namespace", "shop", "--request-timeout=20s"]);
+      expect(args.slice(0, 5)).toEqual(["--context", "prod-cluster", "--namespace", "shop", "--request-timeout=60s"]);
       if (verb.startsWith("get pods")) return { stdout: JSON.stringify({ items: [pod("shop-api-1")] }) };
       if (verb.startsWith("get events")) {
         return {
@@ -226,7 +226,7 @@ describe("datadog sources", () => {
 
 describe("options", () => {
   test("the shipped example config parses without errors", () => {
-    const raw = Bun.JSONC.parse(readFileSync(new URL("../examples/opencode.jsonc", import.meta.url), "utf8")) as any;
+    const raw = parseJsonc(readFileSync(new URL("../examples/opencode.jsonc", import.meta.url), "utf8")) as any;
     const parsed = parseOptions(raw.plugins[0].options);
     expect([...parsed.errors, ...validateSources(parsed.options)]).toEqual([]);
     expect(parsed.options.watchers.map((w) => [w.id, w.everyMs, w.fix])).toEqual([

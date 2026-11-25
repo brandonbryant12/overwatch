@@ -38,7 +38,15 @@ export interface Finding {
     readonly cause: string;
     readonly causeBasis: "observed" | "inferred";
     /** At most three, each a quoted line or a query that shows it. */
-    readonly evidence: ReadonlyArray<{ readonly source: string; readonly quote: string }>;
+    readonly evidence: ReadonlyArray<{
+      readonly source: string;
+      readonly quote: string;
+      /**
+       * Set by Overwatch, never by the agent: whether the quote was found in what the investigation was shown.
+       * `false` means it could not be checked (it came from a skill or tool Overwatch cannot see).
+       */
+      readonly verified?: boolean;
+    }>;
     /** `path:line` at the deployed commit, when the cause is in code. */
     readonly codeLocation?: string;
     readonly notChecked: ReadonlyArray<string>;
@@ -207,6 +215,8 @@ export interface ReportContext {
   readonly window: { readonly from: number; readonly to: number };
   /** Deployed commit the code was read at, if known. */
   readonly commit?: string;
+  /** When the current rollout began, if the cluster could tell. */
+  readonly rolledOutAt?: number;
   /** Coverage gaps the plugin knows about (failed sources, capped lookback); always shown. */
   readonly coverage: ReadonlyArray<string>;
   readonly pullRequest?: string;
@@ -229,7 +239,7 @@ export function renderEngineering(finding: Finding, context: ReportContext): str
   ];
   if (e.evidence.length) {
     lines.push("Evidence:");
-    e.evidence.forEach((item, index) => lines.push(`  ${index + 1}. [${item.source}] ${item.quote}`));
+    e.evidence.forEach((item, index) => lines.push(`  ${index + 1}. [${item.source}${item.verified === false ? ", not verified" : ""}] ${item.quote}`));
   }
   if (e.codeLocation) lines.push(`Code: ${e.codeLocation}${context.commit ? ` @ ${context.commit.slice(0, 12)}` : ""}`);
   const notChecked = [...context.coverage, ...e.notChecked];
@@ -244,7 +254,7 @@ export function renderReport(finding: Finding, context: ReportContext): string {
   const scope = context.environment ? `${context.app}/${context.environment}` : context.app;
   return [
     `## ${context.title}`,
-    `${scope} · ${iso(context.window.from)} to ${iso(context.window.to)}${context.commit ? ` · deployed ${context.commit.slice(0, 12)}` : ""}`,
+    `${scope} · ${iso(context.window.from)} to ${iso(context.window.to)}${context.commit ? ` · deployed ${context.commit.slice(0, 12)}` : ""}${context.rolledOutAt !== undefined ? ` · rolled out ${iso(context.rolledOutAt)}` : ""}`,
     "",
     "**Product summary**",
     "",
@@ -256,6 +266,27 @@ export function renderReport(finding: Finding, context: ReportContext): string {
     renderEngineering(finding, context),
     "```",
   ].join("\n");
+}
+
+/** A finding as Overwatch stored it. It was validated when it was filed, so only its shape is checked here. */
+export function storedFinding(raw: unknown): Finding | undefined {
+  return isRecord(raw) && isRecord(raw.product) && isRecord(raw.engineering) && Array.isArray(raw.engineering.evidence) ? (raw as unknown as Finding) : undefined;
+}
+
+/** Applies `fn` to every piece of text in a finding, such as redaction before it is stored and shown. */
+export function mapFindingText(finding: Finding, fn: (value: string) => string): Finding {
+  const e = finding.engineering;
+  return {
+    product: { impact: fn(finding.product.impact), affected: fn(finding.product.affected), since: fn(finding.product.since), status: fn(finding.product.status) },
+    engineering: {
+      ...e,
+      cause: fn(e.cause),
+      evidence: e.evidence.map((item) => ({ ...item, quote: fn(item.quote) })),
+      notChecked: e.notChecked.map(fn),
+      nextCheck: fn(e.nextCheck),
+    },
+    ...(finding.fix ? { fix: { ...finding.fix, ...(finding.fix.plan !== undefined ? { plan: fn(finding.fix.plan) } : {}) } } : {}),
+  };
 }
 
 /** What the report says when the agent never submitted a finding (timeout, failure). */

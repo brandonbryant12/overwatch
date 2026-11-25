@@ -6,7 +6,7 @@ import type { WatcherConfig } from "./options.ts";
 import { sourceContext, type Runtime } from "./runtime.ts";
 import { dedupe, mergeSignals, pruneSeen, type Sample, type Signal } from "./signals.ts";
 import { sourceType } from "./sources/index.ts";
-import { asJson, keys, loadSeen, loadWatcher, openIncidents, type RunRecord, type WatcherState } from "./store.ts";
+import { keys, loadSeen, loadWatcher, openIncidents, writeRecord, type RunRecord, type WatcherState } from "./store.ts";
 import { planWindows } from "./window.ts";
 
 /**
@@ -17,11 +17,15 @@ export const DEFAULT_METRIC_RULES: ReadonlyArray<MetricRule> = [
   { metric: "memory_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 2 },
   { metric: "cpu_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 3 },
   { metric: "not_ready_pods", operator: "gt", threshold: 0, hysteresis: 2 },
+  { metric: "pending_pods", operator: "gt", threshold: 0, hysteresis: 2 },
+  { metric: "unavailable_replicas", operator: "gt", threshold: 0, hysteresis: 3 },
+  { metric: "hpa_pct_of_max_replicas", operator: "gte", threshold: 100, hysteresis: 3 },
   { metric: "node_memory_pct_of_allocatable", operator: "gt", threshold: 90, hysteresis: 3 },
   { metric: "quota_*_pct", operator: "gt", threshold: 90, hysteresis: 2 },
 ];
 
 const SERIES_POINTS = 120;
+const SLICE_GRACE_MS = 15_000;
 
 const matches = (pattern: string, metric: string) =>
   new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(metric);
@@ -115,13 +119,18 @@ export async function runWatcher(runtime: Runtime, watcher: WatcherConfig, hooks
       );
     }
     const collected: Signal[] = [];
+    // Shared by this source's slices, so a long catch-up does not repeat the same calls for every slice.
+    const scratch = new Map<string, unknown>();
     for (const [index, window] of plan.windows.entries()) {
       const final = index === plan.windows.length - 1;
       try {
+        // The source is told its deadline and reports what it could not read in time. The timeout here is only
+        // the backstop for a source that does not come back at all.
+        const deadline = Date.now() + options.timeouts.sliceMs;
         const result = await withTimeout(
-          options.timeouts.sourceMs,
+          options.timeouts.sliceMs + SLICE_GRACE_MS,
           `${name} ${iso(window.from)}`,
-          (s) => type.collect(config, { window, final }, sourceContext(runtime, watcher.app, watcher.environment, name, s)),
+          (s) => type.collect(config, { window, final }, sourceContext(runtime, watcher.app, watcher.environment, name, s, { deadline, scratch })),
           signal,
         );
         const deduped = dedupe(result.signals, seen, options.lookback.overlapMs);
@@ -129,7 +138,7 @@ export async function runWatcher(runtime: Runtime, watcher: WatcherConfig, hooks
         collected.push(...deduped.fresh);
         series[name] = appendSeries({ ...state, series }, name, result.samples);
         for (const sample of result.samples) sampled.add(`${name}:metric:${sample.metric}`);
-        coverage.push(...result.notes);
+        for (const note of result.notes) if (!coverage.includes(note)) coverage.push(note);
         if (result.revisions) revisions.push(...result.revisions);
         if (result.capacity) capacity.push(result.capacity);
         checkpoints[name] = window.to;
@@ -192,11 +201,11 @@ export async function runWatcher(runtime: Runtime, watcher: WatcherConfig, hooks
     const current = action.type === "open" ? action.incident : open.find((i) => i.id === action.id);
     if (!current) continue;
     const next = applyIncidentAction(current, action);
-    await kv.set(keys.incident(next.id), asJson(next));
+    await writeRecord(kv, keys.incident(next.id), next);
     if (action.type === "open") opened.push(next);
     if (action.type === "resolve") resolved.push(next.id);
   }
-  for (const [key, value] of seenUpdates) await kv.set(key, asJson(value));
+  for (const [key, value] of seenUpdates) await writeRecord(kv, key, value);
 
   let investigationId: string | undefined;
   if (opened.length && watcher.investigate && hooks.investigate) {
@@ -214,7 +223,7 @@ export async function runWatcher(runtime: Runtime, watcher: WatcherConfig, hooks
       trigger: { type: "watcher", watcherId: watcher.id, incidentIds: opened.map((i) => i.id) },
     });
     for (const incident of opened) {
-      await kv.set(keys.incident(incident.id), asJson({ ...incident, investigationId }));
+      await writeRecord(kv, keys.incident(incident.id), { ...incident, investigationId });
     }
   } else if (opened.length && hooks.notify) {
     await hooks.notify(`Overwatch: ${watcher.id}`, opened.map((i) => i.title).join("; "));
@@ -230,7 +239,7 @@ export async function runWatcher(runtime: Runtime, watcher: WatcherConfig, hooks
     ...(investigationId ? { investigationId } : {}),
   };
   state = { lastRunAt: now, checkpoints, series, lastRun: record };
-  await kv.set(keys.watcher(watcher.id), asJson(state));
+  await writeRecord(kv, keys.watcher(watcher.id), state);
   runtime.log(
     `${watcher.id}: ${opened.length} opened, ${resolved.length} resolved${failed.size ? `, failed: ${[...failed].join(", ")}` : ""}`,
   );
