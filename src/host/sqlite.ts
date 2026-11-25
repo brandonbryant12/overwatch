@@ -27,6 +27,7 @@ import { alarmCallbacks, className, makePlatform, ObjectState, type ObjectStateS
 import type { Platform } from "@alchemy.run/domain/Platform";
 import { RuntimeContext } from "alchemy/RuntimeContext";
 import { makeInputGate, type InputGateShape } from "alchemy/Workers/InputGate";
+import { acquireWriterLock } from "./lock.ts";
 import { faultsFromEnv, openConnection, type Connection, type Faults } from "./connection.ts";
 
 export interface SqliteHostOptions {
@@ -111,7 +112,16 @@ interface Instance {
 export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | SqliteHost | SecureRandom.SecureRandom> =>
   Layer.unwrap(
     Effect.gen(function* () {
-      const connection = openConnection(options.file, options.faults ?? faultsFromEnv());
+      // Nothing is opened or repaired until this process is the only writer.
+      const lock = options.file === ":memory:" ? undefined : acquireWriterLock(options.file);
+      const connection = (() => {
+        try {
+          return openConnection(options.file, options.faults ?? faultsFromEnv());
+        } catch (error) {
+          lock?.release();
+          throw error;
+        }
+      })();
       const { use, transaction, faults } = connection;
       const log = options.log ?? (() => undefined);
       const tickMs = options.tickMs ?? 1_000;
@@ -411,6 +421,7 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
           yield* stop;
           yield* Scope.close(scope, Exit.void);
           connection.close();
+          lock?.release();
         }),
       );
 

@@ -146,3 +146,47 @@ describe("A3. a quote attributed to a source verifies only against what that sou
     expect(fromSample.errors).toEqual([]);
   });
 });
+
+describe("A4. one service per database", () => {
+  test("a second service on the same data directory refuses to start and says why; the first keeps working", async () => {
+    const { tempDir } = await import("./fixtures/support.ts");
+    const dataDir = tempDir("a4");
+    const first = await testService({ dataDir });
+    try {
+      let refused: unknown;
+      await testService({ dataDir }).then(
+        async (second) => {
+          await second.service.stop();
+        },
+        (error) => (refused = error),
+      );
+      expect(String((refused as Error)?.message)).toContain("Another Overwatch service");
+      expect((await fetch(`${first.service.url}/health`)).status).toBe(200);
+    } finally {
+      await first.service.stop();
+    }
+    // Once it stopped, the directory is free again.
+    const again = await testService({ dataDir });
+    await again.service.stop();
+  });
+});
+
+describe("A4. the writer lock", () => {
+  test("a lock left by a process that died is taken over; one held by a live process is refused", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { spawn } = await import("node:child_process");
+    const { acquireWriterLock } = await import("../src/host/lock.ts");
+    const { tempDir } = await import("./fixtures/support.ts");
+    const file = join(tempDir("lock"), "overwatch.sqlite");
+    writeFileSync(`${file}.lock`, JSON.stringify({ pid: 2_147_483_000, purpose: "service" }));
+    acquireWriterLock(file).release();
+    const other = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"]);
+    try {
+      writeFileSync(`${file}.lock`, JSON.stringify({ pid: other.pid, purpose: "service", since: "earlier" }));
+      expect(() => acquireWriterLock(file)).toThrow(`(pid ${other.pid}`);
+    } finally {
+      other.kill();
+    }
+  });
+});
