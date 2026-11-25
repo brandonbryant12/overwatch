@@ -8,7 +8,9 @@ import type { Finding } from "../../src/domain/finding.ts";
 import type { SearchHit } from "../../src/domain/search.ts";
 import type { IncidentPageState, InboxItem, ThreadPageState } from "../../src/domain/views.ts";
 import {
+  draftOf,
   isProdEnv,
+  isSending,
   Message,
   visibleInbox,
   type EnvFilter,
@@ -884,7 +886,7 @@ function promptBarView(model: Model, h: H, routePreview: string): Html {
                   ? "Ask about this incident (e.g. compare with staging, check recent deploys, draft next step)..."
                   : "Select an incident first to lock it in focus",
             ),
-            h.Value(model.draft),
+            h.Value(draftOf(model)),
             h.OnInput((text) => Message.ChangedDraft({ text })),
             h.Disabled(disabled),
             h.Autocomplete("off"),
@@ -898,7 +900,7 @@ function promptBarView(model: Model, h: H, routePreview: string): Html {
             ],
           ),
           h.button(
-            [h.Class("send-btn"), h.Type("submit"), h.Disabled(disabled || !model.draft.trim())],
+            [h.Class("send-btn"), h.Type("submit"), h.Disabled(disabled || isSending(model) || !draftOf(model).trim())],
             [h.span([], ["Send"]), iconSend(h)],
           ),
         ],

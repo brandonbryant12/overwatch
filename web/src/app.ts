@@ -75,7 +75,10 @@ export const Model = Schema.Struct({
   focus: Schema.NullOr(IncidentId),
   page: Schema.NullOr(IncidentPageState),
   thread: Schema.NullOr(ThreadPageState),
-  draft: Schema.String,
+  /** What the owner has typed, per incident: a draft stays with the incident it was typed on. */
+  drafts: Schema.Record(Schema.String, Schema.String),
+  /** Prompts sent and not yet acknowledged, by command id. The draft stays until its send is confirmed. */
+  sending: Schema.Record(Schema.String, Schema.Struct({ subject: Schema.String, text: Schema.String })),
   override: Override,
   notice: Schema.NullOr(Schema.String),
   status: Schema.NullOr(ServiceStatus),
@@ -134,6 +137,11 @@ export const Flags = Schema.Struct({
 });
 export type Flags = typeof Flags.Type;
 
+/** The draft for the incident in focus. */
+export const draftOf = (model: Model): string => (model.focus ? (model.drafts[model.focus] ?? "") : "");
+/** Whether a prompt on the incident in focus is on its way and not yet acknowledged. */
+export const isSending = (model: Model): boolean => Object.values(model.sending).some((s) => s.subject === model.focus);
+
 export const init = (flags: Flags): Return => ({
   model: {
     commandIds: { session: flags.session, sent: 0 },
@@ -145,7 +153,8 @@ export const init = (flags: Flags): Return => ({
     focus: null,
     page: null,
     thread: null,
-    draft: "",
+    drafts: {},
+    sending: {},
     override: "auto",
     notice: null,
     status: null,
@@ -344,14 +353,15 @@ export const update = (model: Model, message: Message): Return =>
     ClickedArchive: ({ incidentId }) => archiveIncident(model, incidentId),
     ChangedEnvFilter: ({ filter }) => ({ model: { ...model, envFilter: filter } }),
     ChangedSortOrder: ({ order }) => ({ model: { ...model, sortOrder: order } }),
-    ChangedDraft: ({ text }) => ({ model: { ...model, draft: text } }),
+    ChangedDraft: ({ text }) => (model.focus ? { model: { ...model, drafts: { ...model.drafts, [model.focus]: text } } } : { model }),
     ChangedOverride: ({ override }) => ({ model: { ...model, override } }),
     SubmittedPrompt: () => {
-      if (!model.focus || !model.draft.trim() || model.page?.disposition === "archived") return { model };
+      const draft = draftOf(model);
+      if (!model.focus || !draft.trim() || isSending(model) || model.page?.disposition === "archived") return { model };
       const { commandId, commandIds } = DomainFoldkit.next(model.commandIds);
       const title = model.page?.title ?? model.inbox.find((i) => i.incidentId === model.focus)?.title ?? model.focus;
       return {
-        model: { ...model, commandIds, draft: "", notice: null },
+        model: { ...model, commandIds, sending: { ...model.sending, [commandId]: { subject: model.focus, text: draft } }, notice: null },
         commands: [
           Command.mapMessage(
             Client.AskThread({
@@ -360,7 +370,7 @@ export const update = (model: Model, message: Message): Return =>
                 subject: model.focus,
                 title,
                 promptId: commandId,
-                text: model.draft.trim(),
+                text: draft.trim(),
                 mode: "investigate",
                 origin: "page",
                 override: model.override,
@@ -477,10 +487,19 @@ export const update = (model: Model, message: Message): Return =>
         FailedArchiveIncident: ({ failure }: { failure: { readonly _tag: string } }) => ({
           model: { ...model, notice: `Archive ${failureText(failure)}` },
         }),
-        SucceededAskThread: () => ({ model }),
-        FailedAskThread: ({ failure }: { failure: { readonly _tag: string } }) => ({
-          model: { ...model, notice: `Prompt ${failureText(failure)}` },
-        }),
+        SucceededAskThread: ({ commandId }: { commandId: string }) => {
+          const sent = model.sending[commandId];
+          const { [commandId]: _, ...sending } = model.sending;
+          if (!sent) return { model: { ...model, sending } };
+          // Clear the draft only if it is still what was sent; anything typed since stays.
+          const drafts = { ...model.drafts };
+          if (drafts[sent.subject] === sent.text) delete drafts[sent.subject];
+          return { model: { ...model, sending, drafts } };
+        },
+        FailedAskThread: ({ commandId, failure }: { commandId: string; failure: { readonly _tag: string } }) => {
+          const { [commandId]: _, ...sending } = model.sending;
+          return { model: { ...model, sending, notice: `Prompt ${failureText(failure)}; your text is still in the prompt bar` } };
+        },
         SucceededSearch: ({ requestId, result: hits }: { requestId: string; result: ReadonlyArray<SearchHit> }) => {
           if (requestId !== model.searchRequestId) return { model };
           return {

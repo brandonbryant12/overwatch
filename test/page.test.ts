@@ -136,19 +136,20 @@ describe("the page", () => {
   });
 
   test("the prompt bar sends nothing without focus, text, or on archived incidents, and previews routing", () => {
-    expect(update({ ...base, draft: "why?" }, Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
+    expect(update({ ...base, drafts: { none: "why?" } }, Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
     expect(preview(base)).toContain("Put an incident in focus");
     expect(preview({ ...base, focus: inc1 })).toBe("new session: a new session");
     expect(preview(withThread("idle"))).toBe("continues ses_a: continues the idle session");
     expect(preview(withThread("running"))).toBe("continues ses_a: queued behind the session's current turn");
     expect(preview({ ...withThread("idle"), override: "new" })).toBe("new session: a new session, as asked");
-    const sent = update({ ...withThread("idle"), draft: " why? " }, Message.SubmittedPrompt());
+    const sent = update({ ...withThread("idle"), drafts: { [inc1]: " why? " } }, Message.SubmittedPrompt());
     expect(sent.commands).toHaveLength(1);
-    expect(sent.model.draft).toBe("");
+    // Kept until the send is acknowledged.
+    expect(sent.model.drafts[inc1]).toBe(" why? ");
 
     const archivedModel: Model = {
       ...withThread("idle"),
-      draft: "retry?",
+      drafts: { [inc1]: "retry?" },
       page: {
         incidentId: inc1,
         threadId: ThreadId.make("thr_inc_1"),

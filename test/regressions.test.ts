@@ -305,3 +305,34 @@ describe("A7. every command loads, extends and validates the configuration the s
     }
   });
 });
+
+describe("A8. a prompt draft belongs to the incident it was typed on, and stays until the send is acknowledged", () => {
+  test("typing on A then focusing B sends nothing for B; A's draft survives until its send is confirmed or fails", async () => {
+    const app = (await import("../web/src/app.ts")) as Record<string, any>;
+    const draftOf = (m: any) => (typeof app.draftOf === "function" ? app.draftOf(m) : m.draft);
+    const a = IncidentId.make("inc_a");
+    const b = IncidentId.make("inc_b");
+    const item = (id: string) => ({ incidentId: id, title: id, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null });
+    let m = app.update(app.init({ session: "s" }).model, app.Message.ReceivedInbox({ items: [item(a), item(b)] })).model;
+    m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
+    m = app.update(m, app.Message.ChangedDraft({ text: "why is A failing?" })).model;
+    m = app.update(m, app.Message.ClickedItem({ incidentId: b })).model;
+    expect(draftOf(m)).toBe("");
+    expect(app.update(m, app.Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
+    m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
+    expect(draftOf(m)).toBe("why is A failing?");
+    const sent = app.update(m, app.Message.SubmittedPrompt());
+    expect(sent.commands).toHaveLength(1);
+    m = sent.model;
+    expect(draftOf(m)).toBe("why is A failing?");
+    // The send fails: the draft is still there to try again.
+    const commandId = `${m.commandIds.session}:${m.commandIds.sent - 1}`;
+    m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.FailedAskThread({ commandId, failure: { _tag: "Unknown" } }) })).model;
+    expect(draftOf(m)).toBe("why is A failing?");
+    const again = app.update(m, app.Message.SubmittedPrompt());
+    m = again.model;
+    const second = `${m.commandIds.session}:${m.commandIds.sent - 1}`;
+    m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.SucceededAskThread({ commandId: second, reply: undefined, receipt: { stream: "Thread/x", version: 1 } }) })).model;
+    expect(draftOf(m)).toBe("");
+  });
+});
