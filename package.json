@@ -26,11 +26,12 @@
     "node": ">=22.6"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "pnpm run typecheck && pnpm test",
     "build": "tsc -p tsconfig.build.json",
-    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+    "smoke": "node --experimental-strip-types scripts/smoke.ts",
+    "test:crash": "OVERWATCH_CRASH_SWEEP=full node --experimental-strip-types --no-warnings --test test/crash.test.ts"
   },
   "devDependencies": {
     "@opencode/client": "2.4.1",

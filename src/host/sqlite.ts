@@ -83,8 +83,15 @@ const clone = <T>(value: T): T => (value === undefined ? value : JSON.parse(JSON
 /** Upper bound of the keys starting with `prefix`. */
 const prefixEnd = (prefix: string) => prefix + "￿";
 
-/** Leases in Alchemy's storage that coordinate drains inside one running process (see `clearStaleLeases`). */
-const LEASE_KEYS = ["outbox-lease", "drain-lease", "bf:q-lease"];
+/**
+ * Methods that write several keys without a transaction of their own and call no other object. On Cloudflare, writes
+ * made without awaiting other I/O are coalesced into one atomic batch; here they would be separate commits, and a
+ * crash between them could leave a schedule armed with no job behind it. The host runs these in a transaction.
+ */
+const ATOMIC_METHODS = new Set(["Aggregate.schedule", "Aggregate.unschedule"]);
+
+/** `Aggregate`, `View`, `Policy`... from an object name like `Ledger.AccountAggregate/a-1`. */
+const kindOf = (name: string) => /(Aggregate|View|Policy|Projection|Stream)(V\d+)?(Run)?\//.exec(name)?.[1] ?? "";
 
 interface AlarmRow {
   readonly object: string;
@@ -137,6 +144,26 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
       const now = Clock.currentTimeMillis;
 
       yield* use(() => clearStaleLeases(db));
+
+      /**
+       * Every pending callback job must have an alarm at or before its due time. Alchemy stores the job and arms the
+       * alarm as two writes; a crash between them would leave a job nothing fires. Checked at start and on wake.
+       */
+      const repairAlarms = use(() => {
+        const pending = db
+          .prepare(
+            "SELECT object, MIN(json_extract(value, '$.due')) AS due FROM objects WHERE key >= 'cb:' AND key < 'cb;' GROUP BY object",
+          )
+          .all() as Array<{ object: string; due: number }>;
+        let repaired = 0;
+        for (const { object, due } of pending) {
+          const alarm = q.alarmGet.get(object) as { at: number } | undefined;
+          if (alarm !== undefined && alarm.at <= due) continue;
+          q.alarmSet.run(object, Math.floor(due));
+          repaired += 1;
+        }
+        return repaired;
+      });
 
       const storageOf = (object: string, gate: InputGateShape, aggregate: boolean): ObjectStorage => {
         const read = <A>(work: () => A) => gate.storage(use(work, object));
@@ -217,6 +244,8 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
         return storage as unknown as ObjectStorage;
       };
 
+      /** Objects whose alarm is firing now. */
+      const firing = new Set<string>();
       const classes = new Map<string, Parameters<Parameters<typeof makePlatform>[0]["declare"]>[2]>();
       const instances = new Map<string, Effect.Effect<Instance>>();
 
@@ -229,7 +258,11 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
           const storage = storageOf(name, gate, cls.endsWith("Aggregate"));
           const callbacks = alarmCallbacks(storage, {
             set: (at) => gate.storage(use(() => void q.alarmSet.run(name, Math.floor(at)), name)),
-            get: gate.storage(use(() => (q.alarmGet.get(name) as { at: number } | undefined)?.at ?? null, name)),
+            // While this object's alarm fires, report none: a job scheduled meanwhile then always re-arms (bumping the
+            // row's generation), so the clear after firing cannot remove the alarm that job needs.
+            get: gate.storage(
+              use(() => (firing.has(name) ? null : ((q.alarmGet.get(name) as { at: number } | undefined)?.at ?? null)), name),
+            ),
           });
           const state: ObjectStateShape = {
             storage,
@@ -268,9 +301,9 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
             .call(
               Effect.suspend(() => {
                 const fn = record[method];
-                return typeof fn === "function"
-                  ? (fn as (...a: ReadonlyArray<unknown>) => Effect.Effect<unknown, unknown>)(...clone(args))
-                  : Effect.die(new Error(`${name} has no method ${method}`));
+                if (typeof fn !== "function") return Effect.die(new Error(`${name} has no method ${method}`));
+                const effect = (fn as (...a: ReadonlyArray<unknown>) => Effect.Effect<unknown, unknown>)(...clone(args));
+                return ATOMIC_METHODS.has(`${kindOf(name)}.${method}`) ? gate.exclusive(transaction(name, effect)) : effect;
               }),
             )
             .pipe(
@@ -302,7 +335,6 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
 
       // ------------------------------------------------------------ alarms
 
-      const firing = new Set<string>();
       let stopped = false;
 
       /** Claim, fire, clear. A crash at any point leaves the row, so the alarm fires again after a restart. */
@@ -345,13 +377,24 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
       // The ticker. It notices a wake by the wall clock jumping, and drains whatever fell due meanwhile.
       let ticking = false;
       let last = Date.now();
+      let repairNext = true;
+      let ticks = 0;
       const tick = () => {
         const wall = Date.now();
-        if (wall - last > tickMs * 5) log(`clock jumped ${Math.round((wall - last) / 1000)}s (sleep or clock change); draining due work`);
+        ticks += 1;
+        if (ticks % Math.max(1, Math.round(60_000 / tickMs)) === 0) repairNext = true;
+        if (wall - last > tickMs * 5) {
+          log(`clock jumped ${Math.round((wall - last) / 1000)}s (sleep or clock change); draining due work`);
+          repairNext = true;
+        }
         last = wall;
         if (ticking || stopped) return;
         ticking = true;
-        Effect.runFork(drainDue.pipe(Effect.ensuring(Effect.sync(() => (ticking = false)))));
+        const repair = repairNext
+          ? repairAlarms.pipe(Effect.tap((n) => Effect.sync(() => n > 0 && log(`re-armed ${n} alarm(s) for pending jobs`))))
+          : Effect.void;
+        repairNext = false;
+        Effect.runFork(Effect.andThen(repair, drainDue).pipe(Effect.ensuring(Effect.sync(() => (ticking = false)))));
       };
       const timer = setInterval(tick, tickMs);
       timer.unref?.();
@@ -382,6 +425,5 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
  * finds the queue leased returns as done, and the staged rows wait for the next commit. Leases are cleared at start.
  */
 function clearStaleLeases(db: import("node:sqlite").DatabaseSync) {
-  const placeholders = LEASE_KEYS.map(() => "?").join(", ");
-  db.prepare(`DELETE FROM objects WHERE key IN (${placeholders})`).run(...LEASE_KEYS);
+  db.prepare("DELETE FROM objects WHERE key GLOB '*-lease' OR key = 'bf:q-lease'").run();
 }
