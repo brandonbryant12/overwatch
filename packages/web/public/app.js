@@ -73,7 +73,7 @@ async function sendIntent(intent, payload = {}, successMsg = "Updated") {
     showToast(data.error ?? `Action ${intent} rejected`);
     return null;
   }
-  showToast(successMsg);
+  showToast(data.notice ?? successMsg);
   await fetchState();
   return data;
 }
@@ -87,7 +87,9 @@ function connectStream() {
     try {
       const data = JSON.parse(ev.data);
       $("#status-message").textContent = `Connected to Overwatch daemon (${data.mode} mode)`;
-      $("#status-meta").textContent = `Cursor ${data.cursor}`;
+      // Always reload after (re)connecting: a restart or a long gap can outrun the replay buffer.
+      ui.cursor = Math.max(ui.cursor, Number(data.cursor || 0));
+      void fetchState();
     } catch {
       // ignore
     }
@@ -97,9 +99,10 @@ function connectStream() {
     try {
       const data = JSON.parse(ev.data);
       ui.cursor = Math.max(ui.cursor, Number(data.cursor || 0));
-      $("#status-message").textContent = `Latest event: ${data.kind} (${data.detail})`;
-      $("#status-meta").textContent = `Cursor ${ui.cursor}`;
-      void fetchState();
+      if (data.kind !== "telemetry.collected") {
+        $("#status-message").textContent = `Latest event: ${data.kind} (${data.detail})`;
+      }
+      void fetchState().then(() => announce(data));
     } catch {
       // ignore
     }
@@ -108,6 +111,50 @@ function connectStream() {
   es.onerror = () => {
     $("#status-message").textContent = "Reconnecting to Overwatch stream...";
   };
+}
+
+// Tell the operator about the two events worth interrupting for.
+function announce(event) {
+  if (event.kind !== "incident.opened" && event.kind !== "incident.resolved") return;
+  const incident = ui.state?.now?.incidents?.[event.detail];
+  const headline = incident?.headline ?? event.detail;
+  const text = event.kind === "incident.opened" ? `New incident: ${headline}` : `Recovered: ${headline}`;
+  showToast(text);
+  if (event.kind === "incident.opened") ui.selectedIncident = event.detail;
+  if (document.hidden && typeof Notification !== "undefined" && Notification.permission === "granted") {
+    new Notification("Overwatch", { body: text });
+  }
+}
+
+// One line on what the monitor is doing, so quiet reads as "covered" rather than "idle".
+function monitorSummary(s) {
+  const envs = Object.values(s.monitor?.environments ?? {});
+  if (!s.monitor?.running) return envs.length ? "Monitor paused" : "Monitor not started";
+  const frozen = envs.filter((e) => e.frozen).length;
+  const next = Math.min(...envs.map((e) => e.nextSweepAtMs ?? Infinity));
+  const wait = Number.isFinite(next) ? Math.max(0, Math.round((next - Date.now()) / 1000)) : null;
+  return [
+    `Watching ${envs.length} environments`,
+    frozen ? `${frozen} without coverage` : null,
+    wait === null ? null : `next check in ${wait}s`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+// The tightest absolute p95 limit watching an environment, for the chart's threshold line.
+function p95Limit(s, env) {
+  const limits = (s.insights?.watchRules ?? [])
+    .filter(
+      (r) =>
+        r.enabled &&
+        r.appId === env.appId &&
+        r.envId === env.envId &&
+        r.metric === "p95_latency_ms" &&
+        r.operator !== "ratio_gt",
+    )
+    .map((r) => r.threshold);
+  return limits.length ? Math.min(...limits) : "";
 }
 
 // Theme management
@@ -436,7 +483,7 @@ function renderNowView() {
         : hasInc
           ? "tone-critical"
           : "tone-healthy";
-      const thresh = env.appId === "checkout-api" && env.envId === "prod" ? 1200 : "";
+      const thresh = p95Limit(s, env);
 
       return `
         <article class="env-tile ${degraded ? "degraded" : hasInc ? "incident-active" : ""}" data-open-env="${esc(env.envKey)}">
@@ -577,15 +624,28 @@ function renderEnvironmentsView() {
           )
           .join("");
 
-  const thresh = env.appId === "checkout-api" && env.envId === "prod" ? 1200 : "";
+  const thresh = p95Limit(s, env);
+  const mon = s.monitor?.environments?.[env.envKey];
+  const monitorLine = mon
+    ? `${esc(mon.lastOutcome)} · checked every ${mon.cadenceSeconds}s`
+    : "Not checked yet";
+  const demoControls =
+    s.mode === "demo" && tel.coverage === "healthy"
+      ? `<button type="button" class="control-subtle" data-simulate="regression" data-env="${esc(env.envKey)}">Simulate regression</button>
+         <button type="button" class="control-subtle" data-simulate="recovery" data-env="${esc(env.envKey)}">Simulate recovery</button>`
+      : "";
 
   return `
     <div class="view-header">
       <div>
         <h1 class="view-title">${esc(env.displayName)}</h1>
         <p class="view-subtitle">${esc(tel.coverageDetail)} · Sampled ${fmtAgo(tel.sampledAtMs)}</p>
+        <p class="row-meta">Monitor: ${monitorLine}</p>
       </div>
-      <button type="button" class="btn-primary" data-collect-env="${esc(env.envKey)}">Collect environment</button>
+      <div class="action-row">
+        ${demoControls}
+        <button type="button" class="btn-primary" data-collect-env="${esc(env.envKey)}">Collect environment</button>
+      </div>
     </div>
 
     <div class="section">${envSelector}</div>
@@ -1041,7 +1101,7 @@ function renderScorecardView() {
               }
             </div>
           </div>
-          <textarea class="text-area" style="margin-top:10px" data-brief-editor="${esc(b.briefId)}">${esc(b.body)}</textarea>
+          <textarea class="text-area" style="margin-top:10px" id="brief-editor-${esc(b.briefId)}" data-brief-editor="${esc(b.briefId)}">${esc(b.body)}</textarea>
           <div style="margin-top:8px">
             <button type="button" class="control-subtle" data-save-brief-edit="${esc(b.briefId)}">Save edit diff</button>
           </div>
@@ -1145,15 +1205,36 @@ function render() {
   const activeIns = (s.insights?.insights ?? []).filter((i) => i.status === "active").length;
   $("#nav-insight-count").textContent = activeIns > 0 ? `(${activeIns})` : "";
   $("#spend-readout").textContent = `$${(s.now?.dailySpendUsd ?? 0).toFixed(2)} / $${s.dailyUsdCap ?? 15} daily`;
-  $("#status-meta").textContent = `Cursor ${ui.cursor} · ${s.mode} mode`;
+  $("#status-meta").textContent = `${monitorSummary(s)} · ${s.mode} mode`;
 
   const workspace = $("#workspace");
+  // Telemetry refreshes re-render in the background; a half-typed message must survive that.
+  const active = document.activeElement;
+  const typing =
+    active && workspace.contains(active) && active.id && "value" in active
+      ? { id: active.id, value: active.value, start: active.selectionStart, end: active.selectionEnd }
+      : null;
+  const scrollY = window.scrollY;
   if (ui.view === "now") workspace.innerHTML = renderNowView();
   else if (ui.view === "environments") workspace.innerHTML = renderEnvironmentsView();
   else if (ui.view === "incidents") workspace.innerHTML = renderIncidentsView();
   else if (ui.view === "insights") workspace.innerHTML = renderInsightsView();
   else if (ui.view === "runs") workspace.innerHTML = renderRunsView();
   else workspace.innerHTML = renderScorecardView();
+
+  if (typing) {
+    const restored = document.getElementById(typing.id);
+    if (restored && "value" in restored) {
+      restored.value = typing.value;
+      restored.focus({ preventScroll: true });
+      try {
+        restored.setSelectionRange(typing.start, typing.end);
+      } catch {
+        // not a text control
+      }
+    }
+  }
+  window.scrollTo({ top: scrollY });
 
   requestAnimationFrame(drawAllCharts);
 }
@@ -1270,6 +1351,17 @@ document.addEventListener("click", (e) => {
   }
   if (target.id === "btn-collect-all") {
     void sendIntent("collect", {}, "Collected fresh telemetry across fleet");
+    return;
+  }
+  if (target.dataset.simulate) {
+    const regression = target.dataset.simulate === "regression";
+    void sendIntent(
+      regression ? "simulate-regression" : "simulate-recovery",
+      { envKey: target.dataset.env },
+      regression
+        ? "Regression injected. The monitor opens an incident after two bad samples."
+        : "Recovery injected. Open incidents resolve after consecutive clean windows.",
+    );
     return;
   }
   if (target.id === "btn-trace-walk") {
@@ -1436,7 +1528,7 @@ document.addEventListener("submit", (e) => {
     if (!text) return;
     const incidentId = e.target.dataset.incidentId;
     input.value = "";
-    void sendIntent("incident-chat", { incidentId, text }, "Steered active investigation session");
+    void sendIntent("incident-chat", { incidentId, text }, "Sent to the investigation");
   }
 });
 
