@@ -10,7 +10,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { WatcherConfig } from "../collect/options.ts";
 import { sourceContext, type Runtime } from "../collect/runtime.ts";
-import { DEFAULT_METRIC_RULES, describeBreach, evaluateRule, ruleFor, type MetricRule } from "../collect/detection.ts";
+import { DEFAULT_METRIC_RULES, describeBreach, evaluateRule, ruleFor, SERIES_POINTS, type MetricRule } from "../collect/detection.ts";
 import { dedupe, fingerprint, pruneSeen, type Sample, type Seen, type Signal } from "../collect/signals.ts";
 import { sourceType } from "../collect/sources/index.ts";
 import { planWindows } from "../collect/window.ts";
@@ -62,7 +62,6 @@ export interface WatcherRunSummary {
 
 const SEEN_KEEP_MS = 14 * 86_400_000;
 
-const SERIES_POINTS = 120;
 
 interface MetricBreach {
   readonly metric: string;
@@ -86,14 +85,20 @@ export function evaluateMetrics(
   const known = db.prepare("SELECT metric FROM metric_state WHERE watcher = ? AND source = ?").all(input.watcher, input.source).map((r) => String(r.metric));
   const states: Array<{ metric: string; state: string; observed: number | null; limit: number | null; sampledAt: number | null }> = [];
   const breaches: MetricBreach[] = [];
+  const missing: string[] = [];
   for (const metric of new Set([...known, ...sampled.keys()])) {
     const fresh = sampled.get(metric);
     if (!fresh) {
+      // Not measured by this poll: unknown now, and a gap in the series, so it breaks any run of breaching samples.
       states.push({ metric, state: "unknown", observed: null, limit: null, sampledAt: null });
+      missing.push(metric);
       continue;
     }
-    const stored = db.prepare("SELECT at, value FROM series WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?").all(input.watcher, input.source, metric, SERIES_POINTS) as Array<{ at: number; value: number }>;
-    const points = [...stored.reverse(), ...fresh.filter((f) => !stored.some((s) => s.at === f.at)).map((f) => ({ at: f.at, value: f.value }))].sort((a, b) => a.at - b.at).slice(-SERIES_POINTS);
+    const stored = db.prepare("SELECT at, value FROM metric_points WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?").all(input.watcher, input.source, metric, SERIES_POINTS) as Array<{ at: number; value: number | null }>;
+    const all = [...stored.reverse(), ...fresh.filter((f) => !stored.some((s) => s.at === f.at)).map((f) => ({ at: f.at, value: f.value as number | null }))].sort((a, b) => a.at - b.at).slice(-SERIES_POINTS);
+    // Consecutive means consecutive measurements: only the samples since the last gap count.
+    const lastGap = all.findLastIndex((p) => p.value === null);
+    const points = all.slice(lastGap + 1).map((p) => ({ at: p.at, value: p.value as number }));
     const rule = ruleFor(input.rules, metric);
     const last = points.at(-1)!;
     if (!rule) {
@@ -119,11 +124,12 @@ export function evaluateMetrics(
     }
   }
   const save = (tx: DatabaseSync) => {
-    const insert = tx.prepare("INSERT OR IGNORE INTO series (watcher, source, metric, at, value) VALUES (?, ?, ?, ?, ?)");
+    const insert = tx.prepare("INSERT OR IGNORE INTO metric_points (watcher, source, metric, at, value) VALUES (?, ?, ?, ?, ?)");
     for (const sample of input.samples) insert.run(input.watcher, input.source, sample.metric, sample.at, sample.value);
-    for (const metric of sampled.keys()) {
+    for (const metric of missing) insert.run(input.watcher, input.source, metric, input.now, null);
+    for (const metric of [...sampled.keys(), ...missing]) {
       tx.prepare(
-        "DELETE FROM series WHERE watcher = ? AND source = ? AND metric = ? AND at < (SELECT min(at) FROM (SELECT at FROM series WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?))",
+        "DELETE FROM metric_points WHERE watcher = ? AND source = ? AND metric = ? AND at < (SELECT min(at) FROM (SELECT at FROM metric_points WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?))",
       ).run(input.watcher, input.source, metric, input.watcher, input.source, metric, SERIES_POINTS);
     }
     const upsert = tx.prepare(

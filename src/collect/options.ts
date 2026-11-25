@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseDuration } from "./duration.ts";
-import type { MetricRule } from "./detection.ts";
+import { SERIES_POINTS, type MetricRule } from "./detection.ts";
 
 /**
  * Overwatch configuration: the apps, environments, sources and watchers in the service's config file.
@@ -248,12 +248,14 @@ function parseEnvironment(value: unknown, path: string, errors: string[]): Envir
           errors.push(`${where} needs metric, threshold and an operator of gt, gte, lt or ratio_gt`);
           return;
         }
-        metrics.push({
-          metric: rule.metric,
-          operator: (rule.operator ?? "gt") as MetricRule["operator"],
-          threshold: rule.threshold,
-          hysteresis: positiveInt(rule.hysteresis, 2, `${where}.hysteresis`, errors),
-        });
+        const hysteresis = positiveInt(rule.hysteresis, 2, `${where}.hysteresis`, errors);
+        const operator = (rule.operator ?? "gt") as MetricRule["operator"];
+        // ratio_gt compares the newer half of the kept samples with the older half.
+        const most = operator === "ratio_gt" ? Math.floor(SERIES_POINTS / 2) : SERIES_POINTS;
+        if (hysteresis > most) {
+          errors.push(`${where}: hysteresis ${hysteresis} can never be met; Overwatch keeps ${SERIES_POINTS} samples per metric, so use at most ${most}`);
+        }
+        metrics.push({ metric: rule.metric, operator, threshold: rule.threshold, hysteresis });
       });
   }
   let deployedCommit: DeployedCommitConfig | undefined;

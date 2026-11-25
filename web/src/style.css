@@ -2106,9 +2106,11 @@ button:disabled, input:disabled {
 .env-chip.state-quiet { border-color: var(--state-ok-border); border-left: 3px solid var(--state-ok); }
 .env-chip.state-quiet .env-chip-state { color: var(--state-ok); }
 .env-chip.state-unchecked,
-.env-chip.state-stale { border: 1px dashed var(--state-unknown-border); background-image: var(--hatch-unknown); }
+.env-chip.state-stale,
+.env-chip.state-unmeasured { border: 1px dashed var(--state-unknown-border); background-image: var(--hatch-unknown); }
 .env-chip.state-unchecked .env-chip-state,
-.env-chip.state-stale .env-chip-state { color: var(--state-unknown); }
+.env-chip.state-stale .env-chip-state,
+.env-chip.state-unmeasured .env-chip-state { color: var(--state-unknown); }
 
 
 /* ---------- Finding: copy the product summary, and which code it read ---------- */

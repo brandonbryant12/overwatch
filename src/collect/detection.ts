@@ -105,6 +105,9 @@ export function describeBreach(rule: MetricRule, verdict: Extract<Verdict, { kin
  * cluster itself reports (limits, desired replicas, autoscaler maximums, quotas), so none is specific to one app.
  * A `*` in a metric name matches any part of it.
  */
+/** How many samples of each metric are kept. A rule can never need more in a row than this. */
+export const SERIES_POINTS = 120;
+
 export const DEFAULT_METRIC_RULES: ReadonlyArray<MetricRule> = [
   { metric: "memory_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 2 },
   { metric: "cpu_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 3 },

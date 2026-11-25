@@ -33,6 +33,8 @@ export const EnvironmentStatus = Schema.Struct({
   /** The oldest of its sources' checkpoints: until when every source has been read. Null until all have been. */
   checkedThrough: Schema.NullOr(Schema.Number),
   lastError: Schema.NullOr(Schema.String),
+  /** It has a source that measures readiness and memory (Kubernetes): a missing reading then means not measured. */
+  expectsReadings: Schema.Boolean,
   notReadyPods: Schema.NullOr(MetricReading),
   memoryPctOfLimit: Schema.NullOr(MetricReading),
 });

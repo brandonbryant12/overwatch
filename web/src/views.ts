@@ -113,7 +113,7 @@ export function renderDocument(model: Model, h: H, routePreview: string): Docume
   };
 }
 
-const ENV_GLYPH: Record<EnvState, string> = { failing: "◆", attention: "▲", unchecked: "?", stale: "?", quiet: "●" };
+const ENV_GLYPH: Record<EnvState, string> = { failing: "◆", attention: "▲", unchecked: "?", stale: "?", unmeasured: "?", quiet: "●" };
 
 /** Each watched environment, compact: its state in words and a glyph, how fresh its last check is, readiness and memory. */
 function fleetStripView(model: Model, h: H): Html {

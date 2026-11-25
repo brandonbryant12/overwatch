@@ -226,7 +226,7 @@ const SEVERITY_RANK: Record<string, number> = { error: 3, warn: 2, info: 1 };
 
 /** Returns inbox items filtered and sorted according to the current view controls. */
 /** How an environment reads on the fleet strip. Unknown and stale are their own states, never shown as quiet. */
-export type EnvState = "failing" | "attention" | "unchecked" | "stale" | "quiet";
+export type EnvState = "failing" | "attention" | "unchecked" | "stale" | "unmeasured" | "quiet";
 
 export interface EnvChip {
   readonly key: string;
@@ -261,6 +261,10 @@ export function environmentChips(model: Pick<Model, "status" | "inbox">): Readon
       const open = model.inbox.filter((i) => i.app === env.app && i.environment === env.environment).length;
       const since = env.checkedThrough === null ? null : status.at - env.checkedThrough;
       const breaching = [env.notReadyPods, env.memoryPctOfLimit].some((m) => m?.state === "breach");
+      const notMeasured = (m: typeof env.notReadyPods) => m === null || m.state === "unknown" || m.value === null;
+      const missingReadings = env.expectsReadings
+        ? [...(notMeasured(env.notReadyPods) ? ["readiness"] : []), ...(notMeasured(env.memoryPctOfLimit) ? ["memory"] : [])]
+        : [];
       let state: EnvState;
       let label: string;
       if (env.lastError) {
@@ -275,6 +279,10 @@ export function environmentChips(model: Pick<Model, "status" | "inbox">): Readon
       } else if (open > 0 || breaching) {
         state = "attention";
         label = open > 0 ? `${open} open` : "Over a limit";
+      } else if (missingReadings.length > 0) {
+        // Checked, but not everything was measured: never headlined as quiet.
+        state = "unmeasured";
+        label = `Checked, ${missingReadings.join(" and ")} not measured`;
       } else {
         state = "quiet";
         label = "Checked, quiet";

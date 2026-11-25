@@ -457,6 +457,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
             everyMs: w.everyMs,
             checkedThrough: at.every((x) => x !== undefined) && at.length ? Math.min(...(at as number[])) : null,
             lastError: runRow?.last_error ?? null,
+            expectsReadings: w.sources.some((source) => env.sources[source]?.type === "kubernetes"),
             notReadyPods: reading("not_ready_pods"),
             memoryPctOfLimit: reading("memory_pct_of_limit"),
           };

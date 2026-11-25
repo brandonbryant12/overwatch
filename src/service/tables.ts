@@ -38,8 +38,9 @@ export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS pending_reports (
     id INTEGER PRIMARY KEY, watcher TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
   );
-  CREATE TABLE IF NOT EXISTS series (
-    watcher TEXT NOT NULL, source TEXT NOT NULL, metric TEXT NOT NULL, at INTEGER NOT NULL, value REAL NOT NULL,
+  CREATE TABLE IF NOT EXISTS metric_points (
+    watcher TEXT NOT NULL, source TEXT NOT NULL, metric TEXT NOT NULL, at INTEGER NOT NULL,
+    value REAL, -- null: a poll that did not measure it, which breaks a run of consecutive samples
     PRIMARY KEY (watcher, source, metric, at)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS metric_state (
@@ -75,7 +76,7 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
  * The version of the database's layout, written by the service and checked by restore. Bump it whenever a table or
  * column the service reads changes, and say in the commit how an older database is brought forward.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export function createServiceTables(db: DatabaseSync) {
   db.exec(SERVICE_SCHEMA);

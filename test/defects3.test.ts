@@ -245,3 +245,54 @@ describe("5. a notification that fails is retried, a bounded number of times", (
     }
   });
 });
+
+describe("6. measured state never misleads", () => {
+  test("high, missing, high is not two high samples in a row", async () => {
+    const { testService } = await import("./fixtures/service.ts");
+    const { service, cluster } = await testService();
+    try {
+      const memoryIncidents = async () =>
+        (await service.read((db) => db.prepare("SELECT data FROM journal WHERE type = 'IncidentOpened'").all() as Array<{ data: string }>)).filter((r) => r.data.includes("memory_pct_of_limit")).length;
+      cluster.state.memoryMi = 500; // about 98% of the 512Mi limit
+      await service.collect("shop-api/production");
+      cluster.state.top = false; // not measured this time
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      cluster.state.top = true;
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      expect(await memoryIncidents()).toBe(0);
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      expect(await memoryIncidents()).toBe(1);
+    } finally {
+      await service.stop();
+    }
+  });
+
+  test("a rule that needs more samples than are kept is a configuration error at check", async () => {
+    const { parseConfig } = await import("../src/service/config.ts");
+    const config = parseConfig({
+      apps: { a: { checkout: "/x", environments: { prod: { sources: { s: { type: "kubernetes", context: "c", namespace: "n", selector: "a=b" } }, metrics: [{ metric: "memory_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 121 }] } } } },
+    });
+    expect(config.errors.join("\n")).toContain("hysteresis 121");
+  });
+
+  test("an environment with a reading missing is never headlined as quiet", async () => {
+    const { environmentChips } = await import("../web/src/app.ts");
+    const { testService } = await import("./fixtures/service.ts");
+    const { service, cluster } = await testService();
+    try {
+      await service.collect("shop-api/production");
+      expect(environmentChips({ status: (await service.status()) as any, inbox: [] })[0]!.state).toBe("quiet");
+      cluster.state.top = false;
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      const chip = environmentChips({ status: (await service.status()) as any, inbox: [] })[0]!;
+      expect(chip.state).not.toBe("quiet");
+      expect(chip.label).toContain("not measured");
+    } finally {
+      await service.stop();
+    }
+  });
+});
