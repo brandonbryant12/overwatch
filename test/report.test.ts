@@ -1,5 +1,5 @@
 import { describe, expect, test } from "./harness.ts";
-import { findingJsonSchema, renderProductSummary, renderReport, validateFinding } from "../src/collect/report.ts";
+import { renderProductSummary, renderReport, validateFinding } from "../src/collect/report.ts";
 import { realFinding } from "./helpers.ts";
 
 
@@ -49,13 +49,6 @@ describe("finding schema", () => {
     const result = validateFinding(unsupported);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors).toContain("a real verdict needs at least one piece of evidence");
-  });
-
-  test("the JSON schema the agent sees carries the same limits", () => {
-    const e = findingJsonSchema.properties.engineering.properties;
-    expect(e.evidence.maxItems).toBe(3);
-    expect(e.cause.maxLength).toBe(240);
-    expect(findingJsonSchema.properties.product.description).toContain("80 words");
   });
 });
 

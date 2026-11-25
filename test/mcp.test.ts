@@ -165,6 +165,14 @@ describe("the MCP server over HTTP", () => {
       const list = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, init.session ?? undefined);
       const names = (list.json.result.tools as Array<{ name: string }>).map((t) => t.name).sort();
       expect(names).toEqual(["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_Search_ask", "OverwatchApi_ThreadPage_get", "file_finding", "git_history", "query_telemetry"]);
+      // The schema the agent is shown for a finding is the one the server decodes with, limits included.
+      const fileFindingTool = (list.json.result.tools as Array<{ name: string; inputSchema: any }>).find((t) => t.name === "file_finding")!;
+      const shownFinding = JSON.stringify(fileFindingTool.inputSchema);
+      expect(shownFinding).toContain('"verdict"');
+      expect(shownFinding).toContain('"not_real"');
+      expect(shownFinding).toContain('"maxLength":240');
+      expect(shownFinding).toContain('"maxItems":3');
+      expect(shownFinding).toContain('"ruledOut"');
       const call = (meta: Record<string, unknown> | undefined) =>
         rpc(
           { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "query_telemetry", arguments: { token: "tok-a", source: "other" }, ...(meta ? { _meta: meta } : {}) } },
