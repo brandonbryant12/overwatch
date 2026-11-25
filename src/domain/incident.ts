@@ -39,7 +39,12 @@ export class SignalRecurred extends Domain.Event("SignalRecurred", {
   occurrences: Schema.Number,
   sample: Schema.optionalKey(Schema.String),
 }) {}
-export class IncidentArchived extends Domain.Event("IncidentArchived", { reason: Schema.String, at: Schema.Number }) {}
+export class IncidentArchived extends Domain.Event("IncidentArchived", {
+  reason: Schema.String,
+  at: Schema.Number,
+  /** Who or what archived it, as the caller names itself: `owner (page)`, a rule, an agent. */
+  actor: Schema.optionalKey(Schema.String),
+}) {}
 export class FindingRecorded extends Domain.Event("FindingRecorded", {
   runId: RunId,
   threadId: ThreadId,
@@ -57,7 +62,7 @@ export class ReportSignal extends Domain.Command("ReportSignal", {
 
 export class ArchiveIncident extends Domain.Command("ArchiveIncident", {
   target: IncidentId,
-  input: { reason: Schema.optionalKey(Schema.String) },
+  input: { reason: Schema.optionalKey(Schema.String), actor: Schema.optionalKey(Schema.String) },
   events: [IncidentArchived],
   rejects: [NotOpened],
 }, { description: "Archive an incident: it leaves the inbox and more of the same signal does not bring it back." }) {}
@@ -105,7 +110,7 @@ export class Incident extends Domain.Aggregate("Incident", {
     ArchiveIncident: (s, cmd, ctx) => {
       if (s._tag === "Unopened") return new NotOpened();
       if (s.disposition === "archived") return [];
-      return [new IncidentArchived({ reason: cmd.reason ?? "archived by the owner", at: nowMs(ctx) })];
+      return [new IncidentArchived({ reason: cmd.reason ?? "archived by the owner", at: nowMs(ctx), ...(cmd.actor ? { actor: cmd.actor } : {}) })];
     },
     RecordFinding: (s, cmd, ctx) => {
       if (s._tag === "Unopened") return new NotOpened();

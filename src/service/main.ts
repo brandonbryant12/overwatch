@@ -13,7 +13,8 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { backup, clearSearch, restore } from "./backup.ts";
-import { defaultConfigPath, loadConfig } from "./config.ts";
+import { registerSourceType } from "../collect/sources/index.ts";
+import { defaultConfigPath, loadConfig, loadExtensions } from "./config.ts";
 import { install, plist, uninstall } from "./launchd.ts";
 import { startService } from "./service.ts";
 
@@ -41,6 +42,7 @@ async function main() {
   switch (command) {
     case "serve": {
       const config = loadConfig(configPath);
+      await loadExtensions(config.extensions, { registerSourceType });
       const service = await startService(config);
       const stop = async () => {
         await service.stop();
@@ -51,6 +53,8 @@ async function main() {
       return;
     }
     case "check": {
+      const loaded = loadConfig(configPath);
+      await loadExtensions(loaded.extensions, { registerSourceType });
       const config = loadConfig(configPath);
       if (config.errors.length) {
         console.error(`${configPath} has problems:\n- ${config.errors.join("\n- ")}`);

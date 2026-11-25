@@ -91,7 +91,7 @@ export const update = (model: Model, message: Message): Return =>
       const { commandId, commandIds } = DomainFoldkit.next(model.commandIds);
       return {
         model: { ...model, commandIds, focus: model.focus === incidentId ? null : model.focus, notice: null },
-        commands: [Command.mapMessage(Client.ArchiveIncident({ target: incidentId, input: {}, commandId }), (result) => Message.ReceivedResult({ result }))],
+        commands: [Command.mapMessage(Client.ArchiveIncident({ target: incidentId, input: { actor: "owner (page)" }, commandId }), (result) => Message.ReceivedResult({ result }))],
       };
     },
     ChangedDraft: ({ text }) => ({ model: { ...model, draft: text } }),

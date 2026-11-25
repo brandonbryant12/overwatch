@@ -68,7 +68,7 @@ export async function checkService(url: string, fetcher: typeof fetch = fetch): 
 export const OverwatchPlugin = {
   id: "overwatch",
   async setup(ctx: Plugin.Context) {
-    const options = (ctx.options ?? {}) as { url?: string; permissions?: PermissionRule[] };
+    const options = (ctx.options ?? {}) as { url?: string; permissions?: PermissionRule[]; investigatorPrompt?: string };
     const url = (options.url ?? DEFAULT_URL).replace(/\/+$/, "");
     const health = await checkService(url);
     if (!health.ok) console.warn(`[overwatch] ${health.detail}. Agents and tools are registered anyway and work once it is up.`);
@@ -81,7 +81,8 @@ export const OverwatchPlugin = {
         agent.name = "Overwatch investigator" as typeof agent.name;
         agent.description = "Investigates a production problem read-only and files a finding whose citations Overwatch checks.";
         agent.mode = "primary";
-        agent.system = read("./investigator.md");
+        // A fork can point at its own prompt file instead of editing this one.
+        agent.system = options.investigatorPrompt ? readFileSync(options.investigatorPrompt, "utf8") : read("./investigator.md");
         agent.permissions = investigatorPermissions(options.permissions ?? []) as typeof agent.permissions;
       });
     });

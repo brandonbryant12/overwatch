@@ -2,7 +2,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { install, LABEL, plist, uninstall } from "../src/service/launchd.ts";
-import { loadConfig } from "../src/service/config.ts";
+import { writeFileSync } from "node:fs";
+import { loadConfig, loadExtensions, parseConfig } from "../src/service/config.ts";
+import { registerSourceType, sourceType } from "../src/collect/sources/index.ts";
 import { tempDir } from "./fixtures/support.ts";
 import { describe, expect, test } from "./harness.ts";
 
@@ -40,5 +42,18 @@ describe("configuration", () => {
     expect(config.errors).toEqual([]);
     expect(config.options.watchers.map((w) => [w.id, w.everyMs])).toEqual([["shop-api/production", 600_000]]);
     expect(config.port).toBe(7450);
+  });
+
+  test("an extension module listed in the config registers a source type without touching upstream files", async () => {
+    const dir = tempDir("ext");
+    const module = join(dir, "my-source.ts");
+    writeFileSync(
+      module,
+      `export default ({ registerSourceType }) => registerSourceType({ type: "fork-source", queryHelp: "", validate: () => [], collect: async () => ({ signals: [], samples: [], notes: [] }), query: async () => "" });\n`,
+    );
+    const config = parseConfig({ extensions: ["my-source.ts"] }, join(dir, "config.json"));
+    expect(config.extensions).toEqual([module]);
+    await loadExtensions(config.extensions, { registerSourceType });
+    expect(sourceType("fork-source")?.type).toBe("fork-source");
   });
 });

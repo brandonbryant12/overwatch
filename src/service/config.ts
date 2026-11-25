@@ -4,8 +4,9 @@
  * Nothing has an environment-specific default.
  */
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseOptions, type Options } from "../collect/options.ts";
 import { validateSources } from "../collect/runtime.ts";
 
@@ -14,6 +15,8 @@ export interface ServiceConfig {
   readonly options: Options;
   readonly errors: ReadonlyArray<string>;
   readonly port: number;
+  /** Modules loaded at start that extend Overwatch (new source types), relative to the config file. */
+  readonly extensions: ReadonlyArray<string>;
   /** Where the database, backups, worktrees and logs live. */
   readonly dataDir: string;
   readonly opencode: {
@@ -60,7 +63,7 @@ export const defaultConfigPath = () => join(process.env.XDG_CONFIG_HOME || join(
 
 export function parseConfig(raw: unknown, file?: string): ServiceConfig {
   const input = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-  const { service, opencode, ...rest } = input as { service?: Record<string, unknown>; opencode?: Record<string, unknown> };
+  const { service, opencode, extensions, ...rest } = input as { service?: Record<string, unknown>; opencode?: Record<string, unknown>; extensions?: unknown };
   const parsed = parseOptions(rest, file ? dirname(file) : undefined);
   const errors = [...parsed.errors, ...validateSources(parsed.options)];
   const port = service?.port === undefined ? DEFAULT_PORT : Number(service.port);
@@ -70,11 +73,14 @@ export function parseConfig(raw: unknown, file?: string): ServiceConfig {
   const password = str("password");
   if (password !== undefined && !/^(env|keychain):.+/.test(password)) errors.push('opencode.password must be "env:NAME" or "keychain:service/account"');
   const runTimeout = typeof oc.runTimeoutMinutes === "number" ? oc.runTimeoutMinutes : 20;
+  const modules = Array.isArray(extensions) ? extensions.filter((e): e is string => typeof e === "string") : [];
+  if (extensions !== undefined && !Array.isArray(extensions)) errors.push("extensions must be a list of module paths");
   return {
     file,
     options: parsed.options,
     errors,
     port,
+    extensions: modules.map((m) => (isAbsolute(m) ? m : resolve(file ? dirname(file) : process.cwd(), m))),
     dataDir: parsed.options.dataDir,
     opencode: {
       ...(str("url") ? { url: str("url")!.replace(/\/+$/, "") } : {}),
@@ -84,6 +90,18 @@ export function parseConfig(raw: unknown, file?: string): ServiceConfig {
       runTimeoutMs: runTimeout * 60_000,
     },
   };
+}
+
+/**
+ * Loads each extension module. A module's default export is called with the registries it may add to; it must not
+ * reach into anything else. This is the seam a fork uses to add a source type without editing upstream files.
+ */
+export async function loadExtensions(paths: ReadonlyArray<string>, registries: Readonly<Record<string, unknown>>) {
+  for (const path of paths) {
+    const module = (await import(pathToFileURL(path).href)) as { default?: (r: typeof registries) => unknown };
+    if (typeof module.default !== "function") throw new Error(`Extension ${path} must export a default function`);
+    await module.default(registries);
+  }
 }
 
 export function loadConfig(file = defaultConfigPath()): ServiceConfig {

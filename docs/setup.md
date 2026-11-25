@@ -1,0 +1,179 @@
+# Setting up Overwatch
+
+This covers a locked-down macOS laptop: Node and pnpm only, packages through a registry proxy, no Bun, read-only
+access to environments. Every step ends with how to check it worked.
+
+## 1. Prerequisites
+
+| Tool | Why | Check |
+| --- | --- | --- |
+| Node 22.13 or newer | Runs the service and the tests. Overwatch is TypeScript that Node runs by stripping types; no build step. 22.13 is the first Node 22 with `node:sqlite` unflagged. | `node --version` |
+| pnpm | Installs dependencies. | `pnpm --version` |
+| git | Worktrees for investigations. | `git --version` |
+| OpenCode 2 (2.4.1 tested) | Runs every agent session. | `opencode --version` prints `opencode v2.…` |
+| `kubectl`, logged in to each cluster you watch | The Kubernetes collector. Only `get`, `describe`, `logs` and `top` are ever run. | `kubectl --context <ctx> -n <ns> get pods` |
+
+Bun is not used anywhere and must not be installed for Overwatch: no script, test or dependency needs it.
+
+On Node 22, type stripping is behind a flag; every Overwatch command (`bin/overwatch`, the `pnpm` scripts, the launchd
+agent) passes `--experimental-strip-types` for you. Node 23.6 and later do not need it but accept it.
+
+## 2. Install
+
+```sh
+git clone <this repository> overwatch
+cd overwatch
+pnpm install
+pnpm run check
+```
+
+`pnpm install` also builds the page into `web/dist` (the `prepare` script). `pnpm run check` must end with all tests
+passing; it touches no cluster, no Datadog and no repository host.
+
+### Behind a registry proxy
+
+pnpm reads the npm configuration. Point it at the proxy in `~/.npmrc` (not in the repository):
+
+```ini
+registry=https://npm-proxy.example.internal/
+strict-ssl=true
+cafile=/path/to/corporate-ca.pem
+```
+
+If outbound HTTPS needs a proxy too, set `https-proxy=` in the same file, or `HTTPS_PROXY` in the shell.
+
+### The native binary
+
+The `alchemy` package (a required peer of Alchemy Domain) brings `rolldown`, which has a platform binary package
+(`@rolldown/binding-darwin-arm64` on Apple silicon). pnpm installs it as an ordinary optional dependency; no install
+script runs. Overwatch uses rolldown only to bundle the page (`pnpm run build:web`). If your proxy blocks the binding
+package, the install still succeeds, but the page cannot be built on that machine: build `web/dist` elsewhere and
+copy it in. Whether the binding installs behind your proxy is one of the plan's phase 0 checks and has not been
+verified on a corporate machine.
+
+Check: `ls node_modules/.pnpm | grep rolldown` lists the binding, and `pnpm run build:web` prints `built …/web/dist`.
+
+## 3. Configure
+
+The service reads one JSON file (comments allowed), by default `~/.config/overwatch/config.json`
+(`$XDG_CONFIG_HOME/overwatch/config.json` when set). Start from the example:
+
+```sh
+mkdir -p ~/.config/overwatch
+cp examples/config.json ~/.config/overwatch/config.json
+```
+
+Edit apps, environments, sources and watchers; every option is in [customizing.md](customizing.md). Then:
+
+```sh
+bin/overwatch check
+```
+
+It prints `… is valid` or the list of problems. Nothing environment-specific goes into this repository: names,
+contexts, paths and queries live only in your config file.
+
+### Secrets
+
+Secrets are never written into the config. Where an option takes a secret (`opencode.password`, Datadog keys), give
+a reference:
+
+- `env:NAME`: the environment variable `NAME`.
+- `keychain:service/account`: a generic password in the macOS login keychain. Store it yourself:
+  `security add-generic-password -s overwatch -a opencode-password -w` (it prompts for the value).
+
+The service resolves references when it starts and never logs or stores the values.
+
+## 4. The plugin
+
+The plugin must be in the **global** OpenCode configuration: Overwatch's sessions run in worktrees, and a plugin
+configured for one project does not load there. Edit `~/.config/opencode/opencode.json` (show the change to yourself
+before saving; keep everything else as it is) and add:
+
+```json
+{
+  "plugins": [
+    { "package": "/absolute/path/to/overwatch", "options": { "url": "http://127.0.0.1:7450" } }
+  ]
+}
+```
+
+`url` defaults to `http://127.0.0.1:7450`. The plugin registers:
+
+- the agent `overwatch-investigator`, denied everything by default and allowed to read code, run read-only `git`,
+  load skills, and use Overwatch's MCP tools;
+- the skill `overwatch`, which tells any session how to read the inbox, an incident, a thread and search;
+- the MCP server `overwatch` at `<url>/mcp`, with Code Mode off.
+
+It checks the service's health and Api version when it loads. If the service is not up it logs a warning and
+registers everything anyway; the tools work once the service starts.
+
+Check: start OpenCode in any directory and list agents (`overwatch-investigator` is there) and MCP servers
+(`overwatch` connected). From a script: `client.agent.list(...)` and `client.mcp.list(...)`, as `scripts/e2e.ts` does.
+
+## 5. Start the service by hand
+
+```sh
+bin/overwatch serve                       # or: bin/overwatch serve --config /path/to/config.json
+```
+
+It prints `listening on http://127.0.0.1:7450 (database …)`. Open that address for the page. In another terminal:
+
+```sh
+bin/overwatch status
+```
+
+shows whether OpenCode is connected, each watcher's last run and next run, any configuration errors, and each
+source's checkpoint. The service answers only on loopback, and refuses requests from other host names and other
+origins.
+
+Data lives in `dataDir` (default `~/.local/share/overwatch`): the database `overwatch.sqlite`, `worktrees/`, and
+`logs/` when run by launchd.
+
+## 6. Keep it running with launchd
+
+```sh
+bin/overwatch launchd print        # shows the agent it would install
+bin/overwatch launchd install      # writes ~/Library/LaunchAgents/dev.overwatch.service.plist and loads it
+bin/overwatch launchd uninstall    # unloads and removes it
+```
+
+`--no-load` writes or removes the file without calling `launchctl`; `--agents-dir <dir>` writes elsewhere (the
+tests use a temporary directory).
+
+launchd starts programs with a bare environment: no shell `PATH`, none of your terminal's variables, no interactive
+login. So install from the terminal where `kubectl`, its login helper (for example a cloud CLI it calls), `git` and
+`security` all work: install records that `PATH` in the agent and prints where it found each tool, and `NOT FOUND`
+for any it did not. A `kubectl` login that opens a browser cannot complete under launchd; log in from a terminal
+first, and Overwatch keeps using the cached credentials. Secrets come from the keychain at run time.
+
+Check: `launchctl print gui/$(id -u)/dev.overwatch.service` shows it running, `bin/overwatch status` answers, and
+`~/.local/share/overwatch/logs/service.log` has the `listening on` line.
+
+The plist generation and install are tested against a temporary directory with a fake `launchctl`; installing for
+real, surviving sleep and restart after a kill are phase 0 checks that have not been run on a real machine yet.
+
+## 7. Backup and restore
+
+```sh
+bin/overwatch backup ~/overwatch-2026-11-25.sqlite   # safe while the service runs
+bin/overwatch restore ~/overwatch-2026-11-25.sqlite  # with the service stopped
+bin/overwatch rebuild-search                          # with the service stopped; rebuilt from the journal at start
+```
+
+A backup is one consistent SQLite copy: incidents, threads, unfinished runs, schedules, checkpoints and the journal
+travel together, so after a restore nothing is reported or started twice.
+
+## Troubleshooting by symptom
+
+| Symptom | What to check |
+| --- | --- |
+| `bin/overwatch check` lists problems | Each line names the option path and what is wrong. Fix the file; nothing runs until it is valid. |
+| `status` says `The service is not answering` | Is it running (`launchctl print …`, or the terminal)? Is `service.port` taken by something else? The log says `listening on` once up. |
+| The page says `connecting` and never `live` | The page reads the service on the same address it was loaded from. Open it from `http://127.0.0.1:<port>`, not another host name: other host names are refused on purpose. |
+| `status` shows `opencode.connected: false` | OpenCode is not running, or not where the service looks. Without `opencode.url` it finds the managed OpenCode server the way the OpenCode client does; with a fixed `url`, check it and `opencode.password`. Runs wait meanwhile and nothing is lost. |
+| OpenCode logs `[overwatch] the service is not answering` | Start the service; the plugin does not need a restart. If it says the Api versions differ, update the plugin and the service together (they are one repository). |
+| The investigator says it has no token, or tools are refused | Tools need the run token Overwatch puts in the prompt and must be called from that run's session. A session you started yourself can read and search, not query telemetry or file findings. |
+| A watcher's `last_error` names a source | The source failed for that run; its checkpoint did not move, so the next run covers the same time. For Kubernetes, run the same `kubectl` command from the error in a terminal. |
+| Runs stay `queued` | OpenCode is not connected (see above). |
+| A run failed with "finished twice without filing a finding" | The model ended its turn twice without calling `file_finding`. Prompt on the incident again; it starts from the handoff. |
+| launchd starts it but `kubectl` fails | The agent's `PATH` lacks `kubectl` or its login helper. Reinstall from a terminal where `which kubectl` works. |

@@ -28,10 +28,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm test
-      - run: pnpm run build
+      - run: pnpm run build:web
 
-  smoke:
-    # Loads the plugin into a real, isolated OpenCode server with a fake model, kubectl and gh.
+  e2e:
+    # The service and the plugin against a real, isolated OpenCode server with a fake model and kubectl.
     needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -54,4 +54,4 @@ jobs:
           npm pack "@opencode/cli-linux-x64@${OPENCODE_VERSION}"
           tar xzf opencode-cli-linux-x64-*.tgz
           echo "OPENCODE_BIN=$RUNNER_TEMP/opencode/package/bin/opencode" >> "$GITHUB_ENV"
-      - run: pnpm run smoke
+      - run: pnpm run e2e

@@ -1,66 +1,68 @@
 # Agent guide
 
-Overwatch is an OpenCode 2 plugin (one package, server part only). Read `README.md` for what it does and
-`docs/configuration.md` for every option.
+Overwatch is two programs: a Node service (`src/service`, `src/host`, `src/domain`, `src/collect`, the page in `web/`)
+and a thin OpenCode 2 plugin (`src/plugin`). Read `README.md`, then `docs/` (setup, using, customizing, design
+philosophy). The plan, and what is not built yet, is `docs/plans/command-center.md`.
 
 ## Setting Overwatch up for someone
 
-Configuration lives only in the user's own OpenCode config, never in this repository. Do not commit names, paths,
-contexts, queries or credentials from anyone's environment.
+Configuration lives only in the user's own files, never in this repository: the service's `~/.config/overwatch/config.json`
+and the global OpenCode config. Do not commit names, paths, contexts, queries or credentials from anyone's environment.
 
-1. Find the user's global OpenCode config (`~/.config/opencode/opencode.json` or `.jsonc`). Show them the change before
-   writing it, and keep everything else in the file as it is.
-2. Ask which apps to watch. For each, get the local checkout path (`git -C <path> remote -v` confirms it), the base
-   branch, and the commands that prove a change is safe (`verify`). Leave `verify` empty if they do not want draft
-   pull requests.
-3. For each environment, find the sources:
-   - Kubernetes: `kubectl config get-contexts` and `kubectl --context <c> get deploy -n <ns> --show-labels` to pick the
-     context, namespace and pod selector. Read-only commands only; never apply, delete, scale or exec.
-   - Datadog: the log query and indexes the user already searches with, and monitor tags. Monitor definitions often
-     live in the app's repository; read them to pick tags. Ask the user to store the API and application keys in the
-     keychain themselves (`security add-generic-password -s overwatch -a datadog-api-key -w`) and reference them as
-     `keychain:overwatch/datadog-api-key`. Never ask for, print or write a key.
-   - CI: `gh run list` inside the checkout shows whether `gh` is logged in and which workflows exist.
-   - How the deployed commit can be read: an image tag that is a commit, a pod label, or a version endpoint
-     (`deployedCommit`).
-4. Add one watcher per app and environment they care about, with `every` and any skills they use for debugging (list
-   skills with the OpenCode skill picker or look in `~/.config/opencode/skills`, `~/.claude/skills`,
-   `~/.agents/skills`).
-5. Validate: in a session run `/overwatch`. Configuration errors are listed there. Then `/overwatch-run <app/env>` and
-   read the coverage lines; a source that cannot connect says why.
-6. If a skill needs a shell command the investigator is not allowed to run, add a narrow rule under
-   `permissions.investigator` rather than widening anything else.
+1. Follow `docs/setup.md`. Show the user every change to their OpenCode config before writing it, and keep the rest
+   of the file as it is.
+2. Ask which apps to watch and where their checkouts are (`git -C <path> remote -v` confirms one).
+3. Find Kubernetes sources read-only: `kubectl config get-contexts`, `kubectl --context <c> get deploy -n <ns>
+   --show-labels`. Never apply, delete, scale, exec or read secrets.
+4. Secrets are references (`env:NAME`, `keychain:service/account`). Ask the user to store keychain values themselves;
+   never ask for, print or write a secret.
+5. `bin/overwatch check`, start the service, `bin/overwatch status`.
 
 ## Working on the code
 
-- Node 22.6 or newer and pnpm. `pnpm install`, then `pnpm run check` (typecheck and tests) before every commit. Both must
-  pass. Bun is not a dependency of anything here: the plugin, the tests and the scripts use only Node's standard
-  library, and people who use this cannot install Bun. Do not add `bun:` imports, `Bun.*` calls or a `bun.lock`.
-- Tests run on Node's built-in runner; `test/harness.ts` supplies `describe`, `test` and `expect`. Source is TypeScript
-  that Node can run by stripping types, so no enums, namespaces or parameter properties (`erasableSyntaxOnly`).
-- `OPENCODE_BIN=<opencode 2 binary> pnpm run smoke` loads the plugin into a real, isolated OpenCode server. Run it after
-  changing anything in `src/index.ts`, `src/investigate.ts`, the prompts, or how the plugin uses the OpenCode API.
-  The npm package `@opencode/cli-<platform>` carries the binary.
-- Target the OpenCode 2 plugin API as documented for the release in `package.json` (`@opencode/plugin`). Import only
-  types from it; the plugin has no runtime dependencies.
-- Keep the design small: no daemon, no database of its own (use plugin storage), no UI, no framework.
-- Rules that must hold, with tests that pin them:
-  - Kubernetes is reached only through `kubectl get|describe|logs|top` with the configured context and namespace.
-  - Limits and capacity are read from the cluster, never assumed.
-  - No spend tracking or caps; only timeouts and concurrency limits.
-  - Watchers query since their checkpoint, never a fixed window; checkpoints advance only past successful slices; the
-    lookback cap is reported when it truncates.
-  - One breach, one incident.
-  - Report limits are enforced by `validateFinding`, not only described in the prompt.
-  - Pull requests are drafts, opened by plugin code after verify passes; agents cannot push or call `gh`.
-  - An investigator's directory is a worktree of its own or an empty directory, never the app's checkout.
-  - A source that fans out (one call per pod) bounds its calls and its time and reports what it left unread; one
-    unreadable pod never fails a slice, and nothing a slice does can stop its checkpoint from ever moving.
-  - JSON from `kubectl` and Datadog is read through `src/tolerant.ts`; a missing or mistyped field costs that field.
-  - Stored records go through `readRecord` and `writeRecord` in `src/store.ts`, which carry the schema version.
-    Changing a record's shape means bumping `SCHEMA_VERSION` and adding a migration.
-  - Citations are checked by `src/citations.ts`, not by a model, before a finding is stored.
-  - Text that reaches an agent or a report is redacted, by name and by how random the value looks.
-- Tests use fakes for `kubectl`, `gh`, Datadog and the model. Never call a real cluster, Datadog or repository host
-  from a test.
-- Sources are added by implementing `SourceType` in `src/sources/` and registering it in `src/sources/index.ts`.
+- Node 22.13 or newer and pnpm. `pnpm install`, then `pnpm run check` (typecheck of the service and the page, and every
+  test) before every commit. Both must pass. Never Bun: no `bun:` imports, no `Bun.*`, no `bun.lock`, no script that
+  needs it.
+- TypeScript that Node runs by stripping types: no enums, namespaces or parameter properties (`erasableSyntaxOnly`).
+  Tests run on Node's runner; `test/harness.ts` supplies `describe`, `test` and `expect`.
+- `@alchemy.run/domain` and `alchemy` are pinned to exactly `2.0.0-beta.87`, `effect` to `4.1.5`. Upgrade one beta at
+  a time, with `test/conformance.test.ts` and `pnpm run test:crash` as the gate. Never import the Rivet or Effect
+  Cluster hosts (they load `alchemy/Runtime/Bootstrap`, a `.ts` file Node refuses under `node_modules`). Do not use
+  Alchemy sagas: this single-process host has no durable workflow engine; use policies, scheduled commands and the
+  run outbox.
+- After changing anything in `src/plugin`, `src/service/worker.ts`, `src/service/opencode.ts`, `src/service/mcp.ts`
+  or how the service uses the OpenCode API, run `OPENCODE_BIN=<opencode 2 binary> pnpm run e2e`. The npm package
+  `@opencode/cli-<platform>` carries the binary. It runs OpenCode with its own temporary HOME, config and data; never
+  point it at a real OpenCode data directory, and never install or load the launchd agent from a test.
+
+## Rules that must hold, with tests that pin them
+
+- **The host.** Every read and write on the one SQLite connection goes through `src/host/connection.ts`; a
+  transaction is owned by one object and nested ones are savepoints. Alarms are claimed, fired, then cleared only if
+  not re-armed, driven by the ticker. The journal row is written in the aggregate's commit transaction. Do not add a
+  second connection or a timer per alarm. (`host.test.ts`, `crash.test.ts`)
+- **Only things that happened are events.** Polling bookkeeping goes in plain tables (`src/service/tables.ts`). A poll
+  that finds nothing writes no event. (`service.test.ts`)
+- **Events are additive only.** New fields are optional; a change of meaning is a new event. Bump a view's `version`
+  when you change what it computes.
+- **`decide` and `evolve` are pure**: no I/O, no `Date.now()`, time from `ctx.now`. Keep `Domain.verify(Overwatch)`
+  empty and every behaviour covered by a story. (`domain.test.ts`)
+- **Views lag their aggregates.** Act on an aggregate's state (`runs.get`), or read a view with `atLeast`; never assume
+  a view already shows a write you just made.
+- **Ids before actions.** Session, message and run ids are chosen by the model and recorded before anything is sent to
+  OpenCode; every OpenCode call the service makes is idempotent by id. (`worker.test.ts`, e2e)
+- **Kubernetes is read only**, through `kubectl get|describe|logs|top` with the configured context and namespace,
+  checked by `checkKubectlArgs`, for collection and for agents. (`mcp.test.ts`, `robustness.test.ts`)
+- **Citations are checked by code** against what that session was shown (`shown` table), the brief and its worktree's
+  files, before a finding is recorded. `query_telemetry` and `file_finding` refuse calls without the session id from
+  `_meta`, with another session's token, or for a finished run. (`mcp.test.ts`)
+- **The plugin has no Effect and no domain client at run time**; its imports from OpenCode's packages are types only.
+  It holds no state and schedules nothing. Its `API_VERSION` equals the service's. (`plugin.test.ts`)
+- **The investigator is denied by default.** Add narrow rules through the plugin's `permissions` option, not by
+  widening `investigatorPermissions`.
+- **The page holds no logic of its own.** `web/src/app.ts` is view logic with class names; styling is only in
+  `web/src/style.css`. It reads through the typed client and `watch`.
+- **Loopback only.** The service binds `127.0.0.1` and refuses other host names and other origins. (`service.test.ts`)
+- **No spend tracking or caps**; only timeouts and concurrency limits.
+- **Text that reaches an agent or a store is redacted** (`src/collect/redact.ts`), by name and by how random it looks.
+- Tests use fakes for `kubectl`, `gh`, Datadog and the model. Never call a real cluster, Datadog or repository host.
