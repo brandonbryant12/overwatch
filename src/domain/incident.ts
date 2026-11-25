@@ -5,6 +5,7 @@
  */
 import * as Domain from "@alchemy.run/domain";
 import * as Schema from "effect/Schema";
+import { redactText, redactValue } from "./redact.ts";
 import { fieldsOf, nowMs } from "./time.ts";
 import { Finding } from "./finding.ts";
 import { IncidentId, RunId, Severity, ThreadId, WatcherId } from "./ids.ts";
@@ -96,8 +97,10 @@ export class Incident extends Domain.Aggregate("Incident", {
   initial: { _tag: "Unopened" as const },
   commands: [ReportSignal, ArchiveIncident, RecordFinding],
   decide: {
-    ReportSignal: (s, cmd) =>
-      s._tag === "Unopened"
+    ReportSignal: (s, raw) => {
+      // Text from outside is redacted here, before the event that records it exists.
+      const cmd = { ...raw, title: redactText(raw.title, { maxBytes: 400 }), ...(raw.sample === undefined ? {} : { sample: redactText(raw.sample, { maxBytes: 2_000 }) }), ...(raw.query === undefined ? {} : { query: redactText(raw.query, { maxBytes: 2_000 }) }) };
+      return s._tag === "Unopened"
         ? [new IncidentOpened({ ...fieldsOf(cmd), firstAt: cmd.firstAt ?? cmd.at })]
         : [
             new SignalRecurred({
@@ -106,16 +109,17 @@ export class Incident extends Domain.Aggregate("Incident", {
               occurrences: s.occurrences + cmd.count,
               ...(cmd.sample === undefined ? {} : { sample: cmd.sample }),
             }),
-          ],
+          ];
+    },
     ArchiveIncident: (s, cmd, ctx) => {
       if (s._tag === "Unopened") return new NotOpened();
       if (s.disposition === "archived") return [];
-      return [new IncidentArchived({ reason: cmd.reason ?? "archived by the owner", at: nowMs(ctx), ...(cmd.actor ? { actor: cmd.actor } : {}) })];
+      return [new IncidentArchived({ reason: redactText(cmd.reason ?? "archived by the owner", { maxBytes: 500 }), at: nowMs(ctx), ...(cmd.actor ? { actor: cmd.actor } : {}) })];
     },
     RecordFinding: (s, cmd, ctx) => {
       if (s._tag === "Unopened") return new NotOpened();
       if (s.findings.includes(cmd.runId)) return [];
-      return [new FindingRecorded({ ...fieldsOf(cmd), at: nowMs(ctx) })];
+      return [new FindingRecorded({ ...fieldsOf(cmd), finding: redactValue(cmd.finding), at: nowMs(ctx) })];
     },
   },
   evolve: {

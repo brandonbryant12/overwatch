@@ -13,6 +13,7 @@ import { sourceContext, type Runtime } from "../collect/runtime.ts";
 import { dedupe, fingerprint, pruneSeen, type Seen, type Signal } from "../collect/signals.ts";
 import { sourceType } from "../collect/sources/index.ts";
 import { planWindows } from "../collect/window.ts";
+import { redactText } from "../domain/redact.ts";
 import { incidentIdOf, type IncidentId, type Severity } from "../domain/ids.ts";
 
 export interface SignalReport {
@@ -99,10 +100,10 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         seen = deduped.seen;
         fresh.push(...deduped.fresh);
         checkpoint = window.to;
-        covered.push({ source, from: window.from, to: window.to, status: "ok", ...(result.notes.length ? { note: result.notes.join("; ").slice(0, 1000) } : {}) });
+        covered.push({ source, from: window.from, to: window.to, status: "ok", ...(result.notes.length ? { note: redactText(result.notes.join("; "), { maxBytes: 1000 }) } : {}) });
       } catch (error) {
         // The checkpoint stays at the end of the last slice that worked; the next run starts there.
-        covered.push({ source, from: window.from, to: window.to, status: "failed", note: (error as Error).message.slice(0, 500) });
+        covered.push({ source, from: window.from, to: window.to, status: "failed", note: redactText((error as Error).message, { maxBytes: 500 }) });
         failed.push(source);
         break;
       }

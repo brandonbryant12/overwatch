@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { Finding } from "./finding.ts";
 import { IncidentId, Mode, Origin, RunId, ThreadId } from "./ids.ts";
 import { Handoff } from "./thread.ts";
+import { redactText, redactValue } from "./redact.ts";
 import { fieldsOf, nowMs } from "./time.ts";
 
 export class RunUnknown extends Domain.Rejection("RunUnknown", {}, { description: "There is no run with this id." }) {}
@@ -73,7 +74,7 @@ export class Run extends Domain.Aggregate("Run", {
   initial: { _tag: "Unrequested" as const },
   commands: [RequestRun, MarkRunSent, NudgeRun, CompleteRun, FailRun],
   decide: {
-    RequestRun: (s, cmd, ctx) => (s._tag === "Run" ? [] : [new RunRequested({ ...fieldsOf(cmd), at: nowMs(ctx) })]),
+    RequestRun: (s, cmd, ctx) => (s._tag === "Run" ? [] : [new RunRequested({ ...fieldsOf(cmd), text: redactText(cmd.text, { maxBytes: 8_000 }), at: nowMs(ctx) })]),
     MarkRunSent: (s, _cmd, ctx) => {
       if (s._tag !== "Run") return new RunUnknown();
       return s.status === "requested" ? [new RunSent({ threadId: s.threadId, sessionId: s.sessionId, messageId: s.messageId, at: nowMs(ctx) })] : [];
@@ -86,12 +87,12 @@ export class Run extends Domain.Aggregate("Run", {
     CompleteRun: (s, cmd, ctx) => {
       if (s._tag !== "Run") return new RunUnknown();
       if (s.status === "completed") return [];
-      return [new RunCompleted({ threadId: s.threadId, subject: s.subject, sessionId: cmd.sessionId, finding: cmd.finding, at: nowMs(ctx) })];
+      return [new RunCompleted({ threadId: s.threadId, subject: s.subject, sessionId: cmd.sessionId, finding: redactValue(cmd.finding), at: nowMs(ctx) })];
     },
     FailRun: (s, cmd, ctx) => {
       if (s._tag !== "Run") return new RunUnknown();
       if (s.status === "completed" || s.status === "failed") return [];
-      return [new RunFailed({ threadId: s.threadId, sessionId: s.sessionId, reason: cmd.reason, at: nowMs(ctx) })];
+      return [new RunFailed({ threadId: s.threadId, sessionId: s.sessionId, reason: redactText(cmd.reason, { maxBytes: 1_000 }), at: nowMs(ctx) })];
     },
   },
   evolve: {

@@ -4,6 +4,7 @@
  * worktrees, and the search projection. Every access goes through the connection's lock.
  */
 import type { DatabaseSync } from "node:sqlite";
+import { redactText } from "../domain/redact.ts";
 
 export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS checkpoints (
@@ -53,7 +54,7 @@ export const shownFor = (db: DatabaseSync, sessionId: string): ShownRow[] =>
 export const recordShown = (db: DatabaseSync, row: { sessionId: string; threadId: string; runId?: string; source: string; text: string; at: number }) =>
   db
     .prepare("INSERT OR IGNORE INTO shown (session_id, thread_id, run_id, source, text, at) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(row.sessionId, row.threadId, row.runId ?? null, row.source, row.text, row.at);
+    .run(row.sessionId, row.threadId, row.runId ?? null, row.source, redactText(row.text, { maxBytes: 64_000 }), row.at);
 
 export interface TokenRow {
   readonly token: string;

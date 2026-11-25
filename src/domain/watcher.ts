@@ -6,6 +6,7 @@
 import * as Domain from "@alchemy.run/domain";
 import * as Schema from "effect/Schema";
 import { WatcherId } from "./ids.ts";
+import { redactText } from "./redact.ts";
 import { fieldsOf, nowMs } from "./time.ts";
 
 export class WatcherConfigured extends Domain.Event("WatcherConfigured", {
@@ -44,7 +45,7 @@ export class Watcher extends Domain.Aggregate("Watcher", {
       const config = JSON.stringify([cmd.app, cmd.environment, [...cmd.sources].sort(), cmd.everyMs]);
       return s.config === config ? [] : [new WatcherConfigured({ ...fieldsOf(cmd), at: nowMs(ctx) })];
     },
-    RecordGap: (_s, cmd) => [new CoverageGapRecorded(fieldsOf(cmd))],
+    RecordGap: (_s, cmd) => [new CoverageGapRecorded({ ...fieldsOf(cmd), reason: redactText(cmd.reason, { maxBytes: 500 }) })],
   },
   evolve: {
     WatcherConfigured: (s, e) => ({ ...s, config: JSON.stringify([e.app, e.environment, [...e.sources].sort(), e.everyMs]) }),

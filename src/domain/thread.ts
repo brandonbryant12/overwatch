@@ -7,6 +7,7 @@ import * as Domain from "@alchemy.run/domain";
 import * as Schema from "effect/Schema";
 import { IncidentId, messageIdOf, Mode, Origin, Override, RunId, runIdOf, sessionIdOf, ThreadId } from "./ids.ts";
 import { routePrompt, type SessionStatus } from "./route.ts";
+import { redactText, redactValue } from "./redact.ts";
 import { fieldsOf, nowMs } from "./time.ts";
 
 export class ThreadClosed extends Domain.Rejection("ThreadClosed", {}, { description: "The thread is archived." }) {}
@@ -120,9 +121,10 @@ export class Thread extends Domain.Aggregate("Thread", {
       return [
         new PromptAsked({
           subject: cmd.subject,
-          title: cmd.title,
+          title: redactText(cmd.title, { maxBytes: 400 }),
           promptId: cmd.promptId,
-          text: cmd.text,
+          // What the owner typed is redacted before it is recorded, indexed, or sent to a session.
+          text: redactText(cmd.text, { maxBytes: 8_000 }),
           mode: cmd.mode,
           origin: cmd.origin,
           runId: runIdOf(ctx.id, cmd.promptId),
@@ -142,7 +144,17 @@ export class Thread extends Domain.Aggregate("Thread", {
       const known = s.sessions.find((x) => x.sessionId === cmd.sessionId);
       return known?.status === cmd.status ? [] : [new SessionStatusNoted(fieldsOf(cmd))];
     },
-    RecordHandoff: (s, cmd) => (s._tag === "Active" && s.handoff?.runId === cmd.handoff.runId ? [] : [new HandoffRecorded(fieldsOf(cmd))]),
+    RecordHandoff: (s, cmd) => (s._tag === "Active" && s.handoff?.runId === cmd.handoff.runId ? [] : [
+            new HandoffRecorded({
+              handoff: {
+                ...cmd.handoff,
+                concluded: redactText(cmd.handoff.concluded),
+                verified: redactValue(cmd.handoff.verified),
+                ruledOut: redactValue(cmd.handoff.ruledOut),
+                open: redactValue(cmd.handoff.open),
+              },
+            }),
+          ]),
     ArchiveThread: (s, _cmd, ctx) => (s._tag === "Active" && !s.archived ? [new ThreadArchived({ at: nowMs(ctx) })] : []),
   },
   evolve: {
