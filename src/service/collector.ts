@@ -10,7 +10,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { WatcherConfig } from "../collect/options.ts";
 import { sourceContext, type Runtime } from "../collect/runtime.ts";
-import { dedupe, fingerprint, pruneSeen, type Seen, type Signal } from "../collect/signals.ts";
+import { DEFAULT_METRIC_RULES, describeBreach, evaluateRule, ruleFor, type MetricRule } from "../collect/detection.ts";
+import { dedupe, fingerprint, pruneSeen, type Sample, type Seen, type Signal } from "../collect/signals.ts";
 import { sourceType } from "../collect/sources/index.ts";
 import { planWindows } from "../collect/window.ts";
 import { redactText } from "../domain/redact.ts";
@@ -61,6 +62,78 @@ export interface WatcherRunSummary {
 
 const SEEN_KEEP_MS = 14 * 86_400_000;
 
+const SERIES_POINTS = 120;
+
+interface MetricBreach {
+  readonly metric: string;
+  readonly title: string;
+  readonly sample: string;
+  readonly firstAt: number;
+  readonly lastAt: number;
+}
+
+/**
+ * Evaluates every metric the source has ever reported against its rule: this run's samples are added to the stored
+ * series (not events: series are operational state). Returns the breaches, and a function that saves the series and
+ * each metric's state in the caller's transaction.
+ */
+export function evaluateMetrics(
+  db: DatabaseSync,
+  input: { readonly watcher: string; readonly source: string; readonly samples: ReadonlyArray<Sample>; readonly rules: ReadonlyArray<MetricRule>; readonly now: number },
+) {
+  const sampled = new Map<string, Sample[]>();
+  for (const sample of input.samples) sampled.set(sample.metric, [...(sampled.get(sample.metric) ?? []), sample]);
+  const known = db.prepare("SELECT metric FROM metric_state WHERE watcher = ? AND source = ?").all(input.watcher, input.source).map((r) => String(r.metric));
+  const states: Array<{ metric: string; state: string; observed: number | null; limit: number | null; sampledAt: number | null }> = [];
+  const breaches: MetricBreach[] = [];
+  for (const metric of new Set([...known, ...sampled.keys()])) {
+    const fresh = sampled.get(metric);
+    if (!fresh) {
+      states.push({ metric, state: "unknown", observed: null, limit: null, sampledAt: null });
+      continue;
+    }
+    const stored = db.prepare("SELECT at, value FROM series WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?").all(input.watcher, input.source, metric, SERIES_POINTS) as Array<{ at: number; value: number }>;
+    const points = [...stored.reverse(), ...fresh.filter((f) => !stored.some((s) => s.at === f.at)).map((f) => ({ at: f.at, value: f.value }))].sort((a, b) => a.at - b.at).slice(-SERIES_POINTS);
+    const rule = ruleFor(input.rules, metric);
+    const last = points.at(-1)!;
+    if (!rule) {
+      states.push({ metric, state: "measured", observed: last.value, limit: null, sampledAt: last.at });
+      continue;
+    }
+    const verdict = evaluateRule(rule, points);
+    states.push({
+      metric,
+      state: verdict.kind,
+      observed: verdict.kind === "no_data" ? last.value : verdict.observed,
+      limit: verdict.kind === "no_data" ? null : verdict.limit,
+      sampledAt: last.at,
+    });
+    if (verdict.kind === "breach") {
+      breaches.push({
+        metric,
+        title: describeBreach(rule, verdict),
+        sample: `${metric} = ${verdict.observed} at ${new Date(verdict.lastAt).toISOString()} (limit ${verdict.limit})`,
+        firstAt: verdict.firstBreachAt,
+        lastAt: verdict.lastAt,
+      });
+    }
+  }
+  const save = (tx: DatabaseSync) => {
+    const insert = tx.prepare("INSERT OR IGNORE INTO series (watcher, source, metric, at, value) VALUES (?, ?, ?, ?, ?)");
+    for (const sample of input.samples) insert.run(input.watcher, input.source, sample.metric, sample.at, sample.value);
+    for (const metric of sampled.keys()) {
+      tx.prepare(
+        "DELETE FROM series WHERE watcher = ? AND source = ? AND metric = ? AND at < (SELECT min(at) FROM (SELECT at FROM series WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?))",
+      ).run(input.watcher, input.source, metric, input.watcher, input.source, metric, SERIES_POINTS);
+    }
+    const upsert = tx.prepare(
+      "INSERT INTO metric_state (watcher, source, metric, state, observed, limit_value, sampled_at, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (watcher, source, metric) DO UPDATE SET state = excluded.state, observed = coalesce(excluded.observed, metric_state.observed), limit_value = coalesce(excluded.limit_value, metric_state.limit_value), sampled_at = coalesce(excluded.sampled_at, metric_state.sampled_at), checked_at = excluded.checked_at",
+    );
+    for (const s of states) upsert.run(input.watcher, input.source, s.metric, s.state, s.observed, s.limit, s.sampledAt, input.now);
+  };
+  return { breaches, save };
+}
+
 /** Sends a watcher's saved reports in order, removing each once the model has it. */
 export async function flushReports(ports: CollectorPorts, watcher: string): Promise<void> {
   const rows = await ports.read(
@@ -105,6 +178,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
     const fresh: Signal[] = [];
     let checkpoint = stored?.at;
     let capacity: string | undefined;
+    const samples: Sample[] = [];
     const covered: Array<WatcherRunSummary["windows"][number]> = [];
     for (const [index, window] of plan.windows.entries()) {
       const deadline = Date.now() + options.timeouts.sliceMs;
@@ -124,6 +198,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         seen = deduped.seen;
         fresh.push(...deduped.fresh);
         if (result.capacity) capacity = redactText(result.capacity, { maxBytes: 2_000 });
+        samples.push(...result.samples);
         checkpoint = window.to;
         covered.push({ source, from: window.from, to: window.to, status: "ok", ...(result.notes.length ? { note: redactText(result.notes.join("; "), { maxBytes: 1000 }) } : {}) });
       } catch (error) {
@@ -165,6 +240,29 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         ...(first.query ? { query: first.query } : {}),
       });
     }
+    // Metrics: this run's samples join the stored series, each rule is evaluated with hysteresis, and a breach is
+    // reported like any other signal. A metric this run did not sample is unknown, never healthy.
+    const rules = env.metrics ?? DEFAULT_METRIC_RULES;
+    const metricsNow = await ports.read((db) => evaluateMetrics(db, { watcher: watcher.id, source, samples, rules, now }));
+    for (const breach of metricsNow.breaches) {
+      const fp = `${source}:metric:${breach.metric}`;
+      const incidentId = incidentIdOf(watcher.app, watcher.environment, fp);
+      reports.push({
+        incidentId,
+        commandId: `sig_${incidentId}_${source}_${now}`,
+        app: watcher.app,
+        environment: watcher.environment,
+        watcher: watcher.id,
+        source,
+        fingerprint: fp,
+        title: breach.title,
+        severity: "error",
+        at: breach.lastAt,
+        count: 1,
+        firstAt: breach.firstAt,
+        sample: breach.sample,
+      });
+    }
     const sourceGaps = gaps.filter((g) => g.source === source);
     await ports.atomically((db) => {
       if (checkpoint !== undefined) {
@@ -181,6 +279,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       const insert = db.prepare("INSERT INTO coverage (watcher, source, from_at, to_at, status, note, run_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const w of covered) insert.run(watcher.id, w.source, w.from, w.to, w.status, w.note ?? null, now);
       for (const gap of sourceGaps) insert.run(watcher.id, source, gap.from, gap.to, "gap", gap.reason, now);
+      metricsNow.save(db);
       const pending = db.prepare("INSERT OR IGNORE INTO pending_reports (watcher, kind, command_id, payload) VALUES (?, ?, ?, ?)");
       for (const report of reports) pending.run(watcher.id, "signal", report.commandId, JSON.stringify(report));
       for (const gap of sourceGaps) pending.run(watcher.id, "gap", `gap_${watcher.id}_${gap.source}_${gap.from}_${gap.to}`, JSON.stringify(gap));

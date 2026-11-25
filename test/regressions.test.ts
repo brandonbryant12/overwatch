@@ -599,3 +599,31 @@ describe("an unbuilt page is said, not served broken", () => {
     }
   });
 });
+
+describe("B1. what is measured becomes an incident, with hysteresis; a metric not measured is unknown", () => {
+  test("pods not ready for two polls open an incident; memory over its limit too; a metric with no new sample is unknown", async () => {
+    const { service, cluster } = await testService();
+    try {
+      cluster.state.ready = false;
+      cluster.state.memoryMi = 500; // limit 512Mi in the fake pod spec: about 98%
+      await service.collect("shop-api/production");
+      let opened = (await journalText(service)).match(/"_tag":"IncidentOpened"[^\n]*/g) ?? [];
+      expect(opened.filter((e) => e.includes("metric:"))).toHaveLength(0); // one breaching sample is not enough
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      opened = (await journalText(service)).match(/"_tag":"IncidentOpened"[^\n]*/g) ?? [];
+      expect(opened.some((e) => e.includes("metric:not_ready_pods"))).toBe(true);
+      expect(opened.some((e) => e.includes("metric:memory_pct_of_limit"))).toBe(true);
+      const state = await service.read((db) => db.prepare("SELECT metric, state FROM metric_state WHERE metric IN ('not_ready_pods','memory_pct_of_limit') ORDER BY metric").all().map((r) => `${r.metric}=${r.state}`));
+      expect(state).toEqual(["memory_pct_of_limit=breach", "not_ready_pods=breach"]);
+      // kubectl top stops answering: memory is no longer measured, so it is unknown, not fine.
+      cluster.state.top = false;
+      await new Promise((r) => setTimeout(r, 5));
+      await service.collect("shop-api/production");
+      const memory = await service.read((db) => db.prepare("SELECT state FROM metric_state WHERE metric = 'memory_pct_of_limit'").get() as { state: string });
+      expect(memory.state).toBe("unknown");
+    } finally {
+      await service.stop();
+    }
+  });
+});

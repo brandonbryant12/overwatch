@@ -38,6 +38,15 @@ export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS pending_reports (
     id INTEGER PRIMARY KEY, watcher TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS series (
+    watcher TEXT NOT NULL, source TEXT NOT NULL, metric TEXT NOT NULL, at INTEGER NOT NULL, value REAL NOT NULL,
+    PRIMARY KEY (watcher, source, metric, at)
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS metric_state (
+    watcher TEXT NOT NULL, source TEXT NOT NULL, metric TEXT NOT NULL,
+    state TEXT NOT NULL, observed REAL, limit_value REAL, sampled_at INTEGER, checked_at INTEGER NOT NULL,
+    PRIMARY KEY (watcher, source, metric)
+  ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS session_reads (session_id TEXT PRIMARY KEY, last_message TEXT NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS projections (name TEXT PRIMARY KEY, position INTEGER NOT NULL, version INTEGER NOT NULL) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS search_docs (

@@ -9,15 +9,23 @@ export interface FakeCluster {
   /** Appends a log line at `at` (epoch ms) to pod `pod`. */
   readonly log: (at: number, message: string, pod?: string) => void;
   readonly lines: Array<{ at: number; pod: string; message: string }>;
+  /** Pod readiness and whether `kubectl top` answers; the test changes them between polls. */
+  readonly state: { ready: boolean; top: boolean; memoryMi: number };
 }
 
 export function fakeCluster(options: { readonly pods?: number; readonly image?: string } = {}): FakeCluster {
+  const state = { ready: true, top: true, memoryMi: 100 };
   const pods = Array.from({ length: options.pods ?? 1 }, (_, i) => `shop-api-${i + 1}`);
   const lines: FakeCluster["lines"] = [];
   const pod = (name: string) => ({
     metadata: { name, labels: { app: "shop-api" }, creationTimestamp: "2026-11-20T08:00:00Z" },
     spec: { nodeName: "node-a", containers: [{ name: "api", image: options.image ?? "registry.example/shop-api:9f8e7d6", resources: { limits: { cpu: "1", memory: "512Mi" } } }] },
-    status: { phase: "Running", startTime: "2026-11-20T08:00:00Z", conditions: [{ type: "Ready", status: "True" }], containerStatuses: [{ name: "api", ready: true, restartCount: 0, state: { running: {} } }] },
+    status: {
+      phase: "Running",
+      startTime: "2026-11-20T08:00:00Z",
+      conditions: [{ type: "Ready", status: state.ready ? "True" : "False" }],
+      containerStatuses: [{ name: "api", ready: state.ready, restartCount: 0, state: { running: {} } }],
+    },
   });
   const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", killed: false });
   const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
@@ -31,7 +39,7 @@ export function fakeCluster(options: { readonly pods?: number; readonly image?: 
       const has = (prefix: string) => verb.join(" ").startsWith(prefix);
       if (has("get pods")) return ok(JSON.stringify({ items: pods.map(pod) }));
       if (has("get events") || has("get resourcequota") || has("get nodes") || has("get deployments")) return ok(JSON.stringify({ items: [] }));
-      if (has("top pods")) return ok(pods.map((p) => `${p} api 100m 100Mi`).join("\n"));
+      if (has("top pods")) return state.top ? ok(pods.map((p) => `${p} api 100m ${state.memoryMi}Mi`).join("\n")) : { code: 1, stdout: "", stderr: "metrics not available", killed: false };
       if (has("top nodes")) return ok("node-a 100m 5% 100Mi 5%");
       if (verb[0] === "logs") {
         const name = verb[1]!;
@@ -48,5 +56,5 @@ export function fakeCluster(options: { readonly pods?: number; readonly image?: 
     },
     { calls },
   ) as FakeCluster["exec"];
-  return { exec, lines, log: (at, message, podName = pods[0]!) => lines.push({ at, pod: podName, message }) };
+  return { exec, lines, state, log: (at, message, podName = pods[0]!) => lines.push({ at, pod: podName, message }) };
 }

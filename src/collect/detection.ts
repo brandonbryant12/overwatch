@@ -99,3 +99,27 @@ export function describeBreach(rule: MetricRule, verdict: Extract<Verdict, { kin
   const was = verdict.baseline !== undefined ? `, was ${trim(verdict.baseline)}` : "";
   return `${rule.metric} ${trim(verdict.observed)} ${comparison} ${trim(verdict.limit)} for ${verdict.consecutive} samples${was}`;
 }
+
+/**
+ * Rules used when an environment sets none (`metrics` in its configuration). Thresholds are relative to what the
+ * cluster itself reports (limits, desired replicas, autoscaler maximums, quotas), so none is specific to one app.
+ * A `*` in a metric name matches any part of it.
+ */
+export const DEFAULT_METRIC_RULES: ReadonlyArray<MetricRule> = [
+  { metric: "memory_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 2 },
+  { metric: "cpu_pct_of_limit", operator: "gt", threshold: 90, hysteresis: 3 },
+  { metric: "not_ready_pods", operator: "gt", threshold: 0, hysteresis: 2 },
+  { metric: "pending_pods", operator: "gt", threshold: 0, hysteresis: 2 },
+  { metric: "unavailable_replicas", operator: "gt", threshold: 0, hysteresis: 3 },
+  { metric: "hpa_pct_of_max_replicas", operator: "gte", threshold: 100, hysteresis: 3 },
+  { metric: "node_memory_pct_of_allocatable", operator: "gt", threshold: 90, hysteresis: 3 },
+  { metric: "quota_*_pct", operator: "gt", threshold: 90, hysteresis: 2 },
+];
+
+/** The rule for a metric: the first whose name (with `*` wildcards) matches. */
+export function ruleFor(rules: ReadonlyArray<MetricRule>, metric: string): MetricRule | undefined {
+  const matches = (pattern: string) =>
+    new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(metric);
+  const rule = rules.find((r) => matches(r.metric));
+  return rule ? { ...rule, metric } : undefined;
+}
