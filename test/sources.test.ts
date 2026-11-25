@@ -1,8 +1,8 @@
 import { describe, expect, parseJsonc, test } from "./harness.ts";
 import { readFileSync } from "node:fs";
-import { parseOptions } from "../src/options.ts";
-import { sourceContext, validateSources } from "../src/runtime.ts";
-import { datadogLogsSource, datadogMonitorsSource } from "../src/sources/datadog.ts";
+import { parseOptions } from "../src/collect/options.ts";
+import { sourceContext, validateSources } from "../src/collect/runtime.ts";
+import { datadogLogsSource, datadogMonitorsSource } from "../src/collect/sources/datadog.ts";
 import {
   checkKubectlArgs,
   kubernetesSource,
@@ -12,7 +12,7 @@ import {
   parsePods,
   revisionsOf,
   usageSamples,
-} from "../src/sources/kubernetes.ts";
+} from "../src/collect/sources/kubernetes.ts";
 import { fakeExec, options, runtime } from "./helpers.ts";
 
 const WINDOW = { from: Date.parse("2026-11-25T10:00:00Z"), to: Date.parse("2026-11-25T12:00:00Z") };
@@ -225,17 +225,6 @@ describe("datadog sources", () => {
 });
 
 describe("options", () => {
-  test("the shipped example config parses without errors", () => {
-    const raw = parseJsonc(readFileSync(new URL("../examples/opencode.jsonc", import.meta.url), "utf8")) as any;
-    const parsed = parseOptions(raw.plugins[0].options);
-    expect([...parsed.errors, ...validateSources(parsed.options)]).toEqual([]);
-    expect(parsed.options.watchers.map((w) => [w.id, w.everyMs, w.fix])).toEqual([
-      ["shop-api/production", 15 * 60_000, true],
-      ["shop-api/staging", 60 * 60_000, false],
-    ]);
-    expect(parsed.options.lookback).toEqual({ initialMs: 86_400_000, maxMs: 14 * 86_400_000, overlapMs: 120_000, sliceMs: 6 * 3_600_000 });
-  });
-
   test("mistakes are reported, not thrown", () => {
     const parsed = parseOptions({
       apps: { a: { environments: { prod: { sources: { x: { type: "nope" } } } } } },

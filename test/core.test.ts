@@ -1,11 +1,10 @@
 import { describe, expect, test } from "./harness.ts";
 import * as fc from "fast-check";
-import { evaluateRule, type MetricRule, type Verdict } from "../src/detection.ts";
-import { parseDuration } from "../src/duration.ts";
-import { applyIncidentAction, incidentId, planIncidents, type Incident } from "../src/incidents.ts";
-import { redactText, redactValue } from "../src/redact.ts";
-import { dedupe, fingerprint, normalizeMessage, type Signal } from "../src/signals.ts";
-import { planWindows } from "../src/window.ts";
+import { evaluateRule, type MetricRule, type Verdict } from "../src/collect/detection.ts";
+import { parseDuration } from "../src/collect/duration.ts";
+import { redactText, redactValue } from "../src/collect/redact.ts";
+import { dedupe, fingerprint, normalizeMessage, type Signal } from "../src/collect/signals.ts";
+import { planWindows } from "../src/collect/window.ts";
 
 const H = 3_600_000;
 const D = 24 * H;
@@ -150,64 +149,6 @@ describe("overlap de-duplication", () => {
   test("normalized messages group variants of the same error", () => {
     expect(normalizeMessage('2026-11-24T10:00:00Z order 1234 failed: "card declined" id=9f1c2b3a-1111-2222-3333-444455556666')).toBe(
       normalizeMessage('2026-11-25T11:30:12Z order 98 failed: "insufficient funds" id=0e1c2b3a-1111-2222-3333-444455556666'),
-    );
-  });
-});
-
-describe("incidents", () => {
-  const base = { watcherId: "shop-api/production", failedSources: new Set<string>(), pending: new Set<string>(), minCount: 1, resolveAfter: 3, now: 5000 };
-
-  test("one breach, one incident: the ID derives from the breach, so retries do not duplicate", () => {
-    const actions = planIncidents({ ...base, open: [], signals: [signal(), signal()] });
-    expect(actions.filter((a) => a.type === "open")).toHaveLength(1);
-    const again = planIncidents({ ...base, open: [], signals: [signal()] });
-    expect(again[0]!.type === "open" && again[0]!.incident.id).toBe(incidentId(base.watcherId, fingerprint(signal()), 1000));
-  });
-
-  test("a signal owned by an open incident updates it instead of opening another", () => {
-    const [open] = planIncidents({ ...base, open: [], signals: [signal()] });
-    const incident = (open as { incident: Incident }).incident;
-    const actions = planIncidents({ ...base, open: [incident], signals: [signal({ occurrences: [{ at: 4000, id: "z" }] })] });
-    expect(actions).toEqual([{ type: "update", id: incident.id, lastAt: 4000, add: 1 }]);
-  });
-
-  test("incidents resolve only after resolveAfter clean runs, and freeze when their source failed", () => {
-    let [action] = planIncidents({ ...base, open: [], signals: [signal()] });
-    let incident = applyIncidentAction(undefined as never, action!);
-    for (let run = 1; run <= 3; run++) {
-      const frozen = planIncidents({ ...base, open: [incident], signals: [], failedSources: new Set(["errors"]) });
-      expect(frozen).toEqual([]);
-      [action] = planIncidents({ ...base, open: [incident], signals: [] });
-      incident = applyIncidentAction(incident, action!);
-      expect(incident.status).toBe(run < 3 ? "open" : "resolved");
-    }
-  });
-
-  test("pending metrics neither clear nor breach", () => {
-    const metric = signal({ source: "pods", kind: "metric", key: "metric:memory_pct_of_limit", state: true });
-    const incident = applyIncidentAction(undefined as never, planIncidents({ ...base, open: [], signals: [metric] })[0]!);
-    expect(planIncidents({ ...base, open: [incident], signals: [], pending: new Set([incident.fingerprint]) })).toEqual([]);
-  });
-
-  test("below minCount opens nothing; state signals ignore minCount", () => {
-    expect(planIncidents({ ...base, minCount: 5, open: [], signals: [signal({ total: 4 })] })).toEqual([]);
-    expect(planIncidents({ ...base, minCount: 5, open: [], signals: [signal({ total: 1, state: true })] })).toHaveLength(1);
-  });
-
-  test("property: with an incident open for a fingerprint, that fingerprint never opens again", () => {
-    fc.assert(
-      fc.property(fc.array(fc.constantFrom("a", "b", "c"), { maxLength: 12 }), (keysSeen) => {
-        const open: Incident[] = [];
-        for (const [i, key] of keysSeen.entries()) {
-          const actions = planIncidents({ ...base, open, signals: [signal({ key, occurrences: [{ at: i * 10, id: String(i) }] })] });
-          for (const action of actions) {
-            if (action.type !== "open") continue;
-            if (open.some((o) => o.fingerprint === action.incident.fingerprint && o.status === "open")) return false;
-            open.push(action.incident);
-          }
-        }
-        return true;
-      }),
     );
   });
 });

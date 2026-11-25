@@ -38,5 +38,10 @@
     "@types/node": "^22.10.0",
     "fast-check": "^3.23.2",
     "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@alchemy.run/domain": "2.0.0-beta.87",
+    "alchemy": "2.0.0-beta.87",
+    "effect": "4.1.5"
   }
 }

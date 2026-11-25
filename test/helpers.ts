@@ -1,8 +1,7 @@
-import type { Exec, ExecOptions, ExecResult } from "../src/exec.ts";
-import { parseOptions, type Options } from "../src/options.ts";
-import type { Finding } from "../src/report.ts";
-import type { Runtime } from "../src/runtime.ts";
-import { memoryKV } from "../src/store.ts";
+import type { Exec, ExecOptions, ExecResult } from "../src/collect/exec.ts";
+import { parseOptions, type Options } from "../src/collect/options.ts";
+import type { Finding } from "../src/collect/report.ts";
+import type { Runtime } from "../src/collect/runtime.ts";
 
 export interface Call {
   readonly command: string;
@@ -34,7 +33,6 @@ export function options(raw: Record<string, unknown>): Options {
 export function runtime(opts: Options, overrides: Partial<Runtime> = {}): Runtime & { clock: { now: number } } {
   const clock = { now: Date.parse("2026-11-25T12:00:00Z") };
   return {
-    kv: memoryKV(),
     options: opts,
     exec: fakeExec(() => undefined),
     fetch: (async () => new Response("not faked", { status: 500 })) as unknown as typeof fetch,

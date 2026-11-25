@@ -1,11 +1,9 @@
 import type { Exec } from "./exec.ts";
 import type { Options } from "./options.ts";
 import { sourceType, type SourceContext } from "./sources/index.ts";
-import type { KV } from "./store.ts";
 
 /** Everything a watcher run or an investigation touches outside itself. Swapped for fakes in tests. */
 export interface Runtime {
-  readonly kv: KV;
   readonly options: Options;
   readonly exec: Exec;
   readonly fetch: typeof fetch;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "./harness.ts";
-import { findingJsonSchema, renderProductSummary, renderReport, validateFinding } from "../src/report.ts";
+import { findingJsonSchema, renderProductSummary, renderReport, validateFinding } from "../src/collect/report.ts";
 import { realFinding } from "./helpers.ts";
 
 

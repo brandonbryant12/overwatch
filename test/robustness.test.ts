@@ -1,12 +1,10 @@
 import { describe, expect, test } from "./harness.ts";
-import { parseWhen, queryWindow } from "../src/duration.ts";
-import { configureRedaction, looksGenerated, redactText } from "../src/redact.ts";
-import { sourceContext } from "../src/runtime.ts";
-import { datadogLogsSource, datadogMetricsSource, datadogMonitorsSource, retryAfterMs } from "../src/sources/datadog.ts";
-import { kubernetesSource, parsePods, parseWorkloads, selects } from "../src/sources/kubernetes.ts";
-import { keys, loadWatcher, memoryKV, NewerSchemaError, readRecord, scanRecords, SCHEMA_VERSION, writeRecord } from "../src/store.ts";
-import { runWatcher } from "../src/sweep.ts";
-import { items, parseJson, pick, time } from "../src/tolerant.ts";
+import { parseWhen, queryWindow } from "../src/collect/duration.ts";
+import { configureRedaction, looksGenerated, redactText } from "../src/collect/redact.ts";
+import { sourceContext } from "../src/collect/runtime.ts";
+import { datadogLogsSource, datadogMetricsSource, datadogMonitorsSource, retryAfterMs } from "../src/collect/sources/datadog.ts";
+import { kubernetesSource, parsePods, parseWorkloads, selects } from "../src/collect/sources/kubernetes.ts";
+import { items, parseJson, pick, time } from "../src/collect/tolerant.ts";
 import { fakeExec, options, runtime, type Call } from "./helpers.ts";
 
 const NOW = Date.parse("2026-11-25T12:00:00Z");
@@ -36,34 +34,6 @@ process.env.OW_TEST_DD_API = "fake-api";
 process.env.OW_TEST_DD_APP = "fake-app";
 
 const sources = config.apps["shop-api"]!.environments.production!.sources;
-
-describe("stored records carry a schema version", () => {
-  test("records are written in an envelope and read back without it", async () => {
-    const kv = memoryKV();
-    await writeRecord(kv, keys.incident("inc_1"), { id: "inc_1", status: "open" });
-    expect(kv.data.get("incident/inc_1")).toEqual({ v: SCHEMA_VERSION, data: { id: "inc_1", status: "open" } });
-    expect(await readRecord(kv, keys.incident("inc_1"))).toEqual({ id: "inc_1", status: "open" });
-  });
-
-  test("a record from before versioning is still read", async () => {
-    const kv = memoryKV();
-    await kv.set(keys.watcher("app/prod"), { lastRunAt: 5, checkpoints: { logs: 4 }, series: {} });
-    expect((await loadWatcher(kv, "app/prod")).checkpoints).toEqual({ logs: 4 });
-  });
-
-  test("a record from a newer version is neither read nor overwritten, and scans skip it", async () => {
-    const kv = memoryKV();
-    const newer = { v: SCHEMA_VERSION + 1, data: { shape: "unknown to this version" } };
-    await kv.set(keys.watcher("app/prod"), newer);
-    await kv.set(keys.incident("inc_new"), newer);
-    await writeRecord(kv, keys.incident("inc_old"), { id: "inc_old" });
-    await expect(loadWatcher(kv, "app/prod")).rejects.toThrow("newer Overwatch");
-    await expect(writeRecord(kv, keys.watcher("app/prod"), { checkpoints: {} })).rejects.toThrow("newer Overwatch");
-    expect(kv.data.get("watcher/app/prod")).toEqual(newer);
-    expect(await scanRecords(kv, "incident/")).toEqual({ records: [{ id: "inc_old" }], skipped: 1 });
-    expect(new NewerSchemaError("k", 9).name).toBe("NewerSchemaError");
-  });
-});
 
 describe("redaction looks at the value, not only its name", () => {
   test("generated values are redacted whatever they are called; the name before them is kept", () => {
@@ -254,18 +224,6 @@ describe("kubernetes: many pods do not stall a watcher", () => {
     const result = await kubernetesSource.collect(sources.pods!, { window: WINDOW, final: false }, ctx);
     expect(result.signals.find((s) => s.kind === "log")!.total).toBe(1);
     expect(result.notes[0]).toContain("were cut short");
-  });
-
-  test("a catch-up over several slices lists pods and events once and downloads each pod's log once", async () => {
-    const { exec, stats } = cluster({ podCount: 8 });
-    const rt = runtime(config, { exec });
-    const record = await runWatcher(rt, config.watchers[0]!);
-    // First run: 24h back in 6h slices, so four slices of one source.
-    expect(record.failedSources).toEqual([]);
-    expect(stats.logs).toBe(8);
-    expect(stats.events).toBe(1);
-    expect(stats.pods).toBe(1);
-    expect((await loadWatcher(rt.kv, "shop-api/production")).checkpoints.pods).toBe(rt.clock.now);
   });
 
   test("garbage from kubectl is a clear failure, never a crash on a field", async () => {
