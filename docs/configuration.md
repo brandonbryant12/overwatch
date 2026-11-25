@@ -54,9 +54,12 @@ macOS keychain, read with `security find-generic-password`). Store a key with
 }
 ```
 
-Investigations never read the checkout as it is. They read a detached worktree at the deployed commit, created under
-`dataDir/worktrees/<app>/`, and keep the five most recent. Fixes branch from `origin/<baseBranch>` in a separate
-worktree.
+Investigations never read the checkout as it is. Each one reads its own detached worktree at the deployed commit,
+created under `dataDir/worktrees/<app>/` and removed when the investigation finishes, fails or times out. A fix
+branches from `origin/<baseBranch>` in a separate worktree, which is removed with its local branch when the attempt
+ends: a passing fix lives on as the pushed branch and its draft pull request, a failing one is discarded. Only a fix
+that was committed but could not be pushed keeps its local branch. Worktrees left behind by a crash or restart are
+removed the next time an investigation starts for that app.
 
 ## Environments
 

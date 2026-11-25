@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { iso } from "./duration.ts";
 import { limiter, withTimeout } from "./exec.ts";
 import { runFix } from "./fix.ts";
-import { defaultRef, resolveCommit, worktreeAt } from "./git.ts";
+import { addWorktree, defaultRef, removeWorktree, resolveCommit, sweepWorktrees } from "./git.ts";
 import type { Incident } from "./incidents.ts";
 import type { AppConfig, PermissionRule } from "./options.ts";
 import { missingFinding, renderProductSummary, renderReport, validateFinding, type Finding } from "./report.ts";
@@ -143,8 +143,42 @@ export function createInvestigator(runtime: Runtime, host: Host) {
 
   const save = (record: InvestigationRecord) => runtime.kv.set(keys.investigation(record.id), asJson(record));
 
+  const worktreeRoot = (app: AppConfig) => join(runtime.options.dataDir, "worktrees", app.name);
+
+  /** Removes worktrees no running investigation owns: left by a crash, a restart or an older version. */
+  async function sweepStale(app: AppConfig): Promise<void> {
+    const { investigationMs, fixMs, verifyMs } = runtime.options.timeouts;
+    // The longest a live run can hold a worktree. Past it, the process that started the run is gone.
+    const holdMs = investigationMs + fixMs + verifyMs * Math.max(1, app.verify.length) + 10 * 60_000;
+    await sweepWorktrees(runtime.exec, app.checkout, worktreeRoot(app), async (name) => {
+      const id = name.startsWith("fix-") ? name.slice("fix-".length) : name;
+      const owner = (await runtime.kv.get(keys.investigation(id))) as InvestigationRecord | undefined;
+      return owner?.status === "running" && runtime.now() - (owner.startedAt ?? owner.createdAt) < holdMs;
+    });
+  }
+
   async function run(record: InvestigationRecord, request: InvestigationRequest): Promise<InvestigationRecord> {
     const app = runtime.options.apps[request.app]!;
+    // Marked running before any worktree exists, so another copy's sweep never takes this run's worktree.
+    const current: InvestigationRecord = { ...record, status: "running", startedAt: runtime.now() };
+    await save(current);
+    await sweepStale(app).catch((error) => runtime.log(`worktree sweep for ${app.name} failed: ${String(error)}`));
+
+    const worktree = join(worktreeRoot(app), record.id);
+    try {
+      return await investigate(current, request, app, worktree);
+    } finally {
+      // Done, failed or timed out: the code copy goes either way. The report and the session history stay.
+      await removeWorktree(runtime.exec, app.checkout, worktree);
+    }
+  }
+
+  async function investigate(
+    record: InvestigationRecord,
+    request: InvestigationRequest,
+    app: AppConfig,
+    worktree: string,
+  ): Promise<InvestigationRecord> {
     const coverage = [...request.coverage];
     const controller = new AbortController();
     let commit: string | undefined;
@@ -168,23 +202,14 @@ export function createInvestigator(runtime: Runtime, host: Host) {
       codeNote = "The deployed commit could not be resolved.";
     }
 
-    const directory = commit
-      ? await worktreeAt(runtime.exec, app.checkout, join(runtime.options.dataDir, "worktrees", app.name), commit)
-      : app.checkout;
+    const directory = commit ? await addWorktree(runtime.exec, app.checkout, worktree, commit) : app.checkout;
     const sessionID = await host.createSession({
       title: `Overwatch: ${record.title}`.slice(0, 120),
       agent: INVESTIGATOR,
       directory,
     });
     await runtime.kv.set(keys.session(sessionID), asJson({ investigationId: record.id, role: "investigator" }));
-    let current: InvestigationRecord = {
-      ...record,
-      status: "running",
-      sessionID,
-      coverage,
-      codeDirectory: directory,
-      ...(commit ? { commit } : {}),
-    };
+    let current: InvestigationRecord = { ...record, sessionID, coverage, ...(commit ? { commit } : {}) };
     await save(current);
 
     await host.prompt(sessionID, investigatorPrompt({ request, app, ...(commit ? { commit } : {}), codeNote }), request.skills);

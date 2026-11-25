@@ -1,5 +1,5 @@
-import { mkdir, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readdir, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Exec } from "./exec.ts";
 
 const GIT_TIMEOUT = 120_000;
@@ -23,37 +23,42 @@ export async function resolveCommit(exec: Exec, checkout: string, ref: string, s
 }
 
 /**
- * A detached worktree of the app at `commit`, so investigations read the code that is deployed rather than
- * whatever the checkout has. Worktrees are reused per commit and the oldest are removed beyond `keep`.
+ * A detached worktree of the app at `commit`, so an investigation reads the code that is deployed rather than
+ * whatever the checkout has. Each investigation gets its own and removes it when it finishes.
  */
-export async function worktreeAt(
-  exec: Exec,
-  checkout: string,
-  root: string,
-  commit: string,
-  keep = 5,
-  signal?: AbortSignal,
-): Promise<string> {
-  await mkdir(root, { recursive: true });
-  const directory = join(root, commit.slice(0, 12));
-  const existing = await git(exec, directory, ["rev-parse", "HEAD"], signal);
-  if (existing.code === 0 && existing.stdout.trim() === commit) return directory;
+export async function addWorktree(exec: Exec, checkout: string, directory: string, commit: string, signal?: AbortSignal): Promise<string> {
+  await mkdir(dirname(directory), { recursive: true });
   await git(exec, checkout, ["worktree", "prune"], signal);
   const added = await git(exec, checkout, ["worktree", "add", "--force", "--detach", directory, commit], signal);
   if (added.code !== 0) throw new Error(`git worktree add failed: ${added.stderr.trim().slice(0, 300)}`);
-  await pruneWorktrees(exec, checkout, root, keep, directory);
   return directory;
 }
 
-async function pruneWorktrees(exec: Exec, checkout: string, root: string, keep: number, current: string) {
-  const entries = await readdir(root).catch(() => [] as string[]);
-  const dated = await Promise.all(
-    entries
-      .filter((name) => /^[0-9a-f]{12}$/.test(name))
-      .map(async (name) => ({ path: join(root, name), mtime: (await stat(join(root, name))).mtimeMs })),
-  );
-  const stale = dated.filter((d) => d.path !== current).sort((a, b) => b.mtime - a.mtime).slice(Math.max(0, keep - 1));
-  for (const entry of stale) await git(exec, checkout, ["worktree", "remove", "--force", entry.path]);
+/** Removes a worktree and, when given, the local branch it was on. Never fails: leftovers are swept later. */
+export async function removeWorktree(exec: Exec, checkout: string, directory: string, branch?: string): Promise<void> {
+  const removed = await git(exec, checkout, ["worktree", "remove", "--force", directory]);
+  if (removed.code !== 0) {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    await git(exec, checkout, ["worktree", "prune"]);
+  }
+  if (branch) await git(exec, checkout, ["branch", "-D", branch]);
+}
+
+/** Removes every worktree directly under `root` that `keep` does not claim: what a crash or an older version left. */
+export async function sweepWorktrees(
+  exec: Exec,
+  checkout: string,
+  root: string,
+  keep: (name: string) => Promise<boolean>,
+): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || (await keep(entry.name))) continue;
+    await removeWorktree(exec, checkout, join(root, entry.name));
+    removed.push(entry.name);
+  }
+  return removed;
 }
 
 export async function defaultRef(exec: Exec, checkout: string, baseBranch: string): Promise<string> {

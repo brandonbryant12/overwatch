@@ -78,10 +78,11 @@ export interface InvestigationRecord {
   readonly coverage: ReadonlyArray<string>;
   readonly status: "queued" | "running" | "done" | "failed";
   readonly createdAt: number;
+  /** When it left the queue. A run that has held its worktree far longer than its timeouts allow is presumed dead. */
+  readonly startedAt?: number;
   readonly finishedAt?: number;
   readonly sessionID?: string;
   readonly commit?: string;
-  readonly codeDirectory?: string;
   readonly finding?: Finding;
   readonly report?: string;
   readonly pullRequest?: string;

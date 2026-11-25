@@ -280,6 +280,13 @@ try {
   assert.ok(report.includes("Verdict: Real (high confidence)"), "report leads with the verdict");
   console.log("✓ /investigate produced a report at the deployed commit and posted it back");
 
+  // Each investigation's worktree is removed once it is done, while the server that ran its session is still up.
+  await until("worktrees to be removed", async () => {
+    const left = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: app, encoding: "utf8" }).split("\n").filter((l) => l.startsWith("worktree "));
+    return left.length === 1 ? true : undefined;
+  }, 30_000);
+  console.log("✓ investigation worktrees were removed when the investigations finished");
+
   const kubectlCalls = readFileSync(kubectlLog, "utf8").trim().split("\n");
   assert.ok(kubectlCalls.length > 0);
   for (const line of kubectlCalls) {
