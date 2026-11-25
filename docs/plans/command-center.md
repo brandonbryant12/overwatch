@@ -123,6 +123,11 @@ Two programs, each doing what it is good at.
   serves the page. Nothing can unload it; launchd restarts it if it dies and starts it at login.
 - **OpenCode owns thinking and doing.** Every investigation, triage proposal, fix and analysis is an OpenCode
   session using the owner's models, skills and permissions. The owner works in those same sessions.
+- **The agents run on the owner's model.** At work that is an open-weights model behind a private endpoint, with
+  no token limit, not one of the models used to build Overwatch. So agents get few tools with simple inputs, every
+  refusal says exactly what to fix, and nothing an agent says is trusted without a check by code. A trial command
+  replays seeded incidents with known causes through the real model and scores the result, so a change of model
+  or prompt is measured, not hoped for.
 - **The plugin is thin.** It registers the agents and a skill that explains Overwatch, and connects OpenCode to
   the service's MCP server, which is where sessions get their Overwatch tools. It holds no state and schedules
   nothing.
@@ -581,11 +586,17 @@ It is done when these pass:
 Each increment is small, ends in something the owner uses, and is graded independently before the next is built
 on it. Nothing new is built on a grade below B.
 
-1. **The daily loop.** The inbox grouped by why (5.1), three ways out, the rule list with preview (5.2), rows that
-   stay put; and failure handling (4.1), because an expired sign-in is the first thing a real laptop will hit.
+0. **Before anything else**, the defects from the second grading (B-, below the bar): two services could still
+   take the writer lock when started at the same instant; a quote could verify against a query's own arguments
+   or under an unknown label; a thread kept its first deploy's commit across a later deploy; restore accepted a
+   database with the right table names and the wrong columns; a failed notification was never retried; the
+   strip could say "checked, quiet" with readings missing; a lost acknowledgement could send a prompt twice.
+1. **The daily loop.** The inbox grouped by why (5.1), three ways out, rows that stay put; Never with its preview
+   and undo, and one list of what is muted, but no general rule editor yet; and failure handling (4.1), because
+   an expired sign-in is the first thing a real laptop will hit.
 2. **Bring me in.** Asks, including `ask_owner` for any session (5.5); what a finding shows and "was this right?"
-   (5.6); prompting on a selection (6.1); the palette and links (6.7). With it, design pass two: personality, the
-   environment grid, the all-clear state.
+   (5.6); prompting on a selection (6.1); the palette and links (6.7); the trial command for the owner's own model.
+   With it, design pass two: personality, the environment grid, the all-clear state.
 3. **Fix it.** The fixer and draft pull requests; a change followed to release; release grades and verified
    recovery (6, 6.6); Jenkins.
 4. **Look deeper.** Spans and regressions; insights with the never-twice rule; the digest.
