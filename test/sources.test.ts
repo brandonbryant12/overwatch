@@ -54,7 +54,9 @@ describe("kubectl is read-only", () => {
     for (const verb of ["delete", "apply", "patch", "scale", "rollout", "exec", "edit", "cp", "drain", "label"]) {
       expect(() => checkKubectlArgs(verb, [])).toThrow("not allowed");
     }
-    for (const verb of ["get", "describe", "logs", "top"]) expect(() => checkKubectlArgs(verb, ["pods"])).not.toThrow();
+    for (const [verb, args] of [["get", ["pods"]], ["describe", ["pods", "shop-api-1"]], ["logs", ["shop-api-1"]], ["top", ["pods"]]] as const) {
+      expect(() => checkKubectlArgs(verb, args)).not.toThrow();
+    }
   });
 
   test("context, namespace, identity and raw access cannot be overridden, and secrets cannot be read", () => {

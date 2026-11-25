@@ -27,6 +27,8 @@ import { sourceContext, type Runtime } from "../collect/runtime.ts";
 import { sourceType } from "../collect/sources/index.ts";
 import { FindingInput, type Finding } from "../domain/finding.ts";
 import { OverwatchApi } from "../domain/model.ts";
+import { redactText } from "../domain/redact.ts";
+import { gitHistoryArgs } from "./history.ts";
 import { recordShown, shownFor, tokenRow, type TokenRow } from "./tables.ts";
 
 export const SESSION_META = "ai.opencode/sessionID";
@@ -35,7 +37,7 @@ export const MCP_SERVER_NAME = "overwatch";
 /** The `toMcp` tools: reads only. Names are `OverwatchApi_<name>_<operation>`. */
 export const EXPOSED = ["Inbox.get", "IncidentPage.get", "ThreadPage.get", "Search"] as const;
 export const EXPOSED_TOOL_NAMES = ["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search_ask"];
-export const SESSION_TOOL_NAMES = ["query_telemetry", "file_finding"];
+export const SESSION_TOOL_NAMES = ["query_telemetry", "git_history", "file_finding"];
 
 export interface McpPorts {
   readonly options: Options;
@@ -72,7 +74,23 @@ const FileFinding = Tool.make("file_finding", {
   dependencies: [McpSchema.McpRequestContext],
 });
 
-export const SessionTools = Toolkit.make(QueryTelemetry, FileFinding);
+const GitHistory = Tool.make("git_history", {
+  description:
+    'History of the code in your working directory, read-only. operation "log" (path?, max?), "show" (commit, path?), "blame" (path, from?, to? line numbers) or "diff" (from, to commits, path?). Commits are hashes or HEAD~n; paths are relative. What it returns is recorded as shown to your session.',
+  parameters: Schema.Struct({
+    token: Schema.String,
+    operation: Schema.Literals(["log", "show", "blame", "diff"]),
+    path: Schema.optionalKey(Schema.String),
+    commit: Schema.optionalKey(Schema.String),
+    from: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+    to: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+    max: Schema.optionalKey(Schema.Number),
+  }),
+  success: Schema.String,
+  dependencies: [McpSchema.McpRequestContext],
+});
+
+export const SessionTools = Toolkit.make(QueryTelemetry, GitHistory, FileFinding);
 
 /** Who is calling: the session from the call's metadata, and the run its token names. Refuses anything else. */
 async function authorize(ports: McpPorts, sessionId: string | undefined, token: string): Promise<{ ok: true; row: TokenRow } | { ok: false; error: string }> {
@@ -95,8 +113,28 @@ export function sessionToolsLayer(ports: McpPorts) {
   return SessionTools.toLayer({
     query_telemetry: (input) =>
       Effect.flatMap(sessionOf, (sessionId) => Effect.promise(() => queryTelemetry(ports, sessionId, input))),
+    git_history: (input) => Effect.flatMap(sessionOf, (sessionId) => Effect.promise(() => gitHistory(ports, sessionId, input))),
     file_finding: (input) => Effect.flatMap(sessionOf, (sessionId) => Effect.promise(() => fileFinding(ports, sessionId, input))),
   });
+}
+
+export async function gitHistory(ports: McpPorts, sessionId: string | undefined, input: Record<string, unknown> & { readonly token: string }): Promise<string> {
+  const auth = await authorize(ports, sessionId, input.token);
+  if (!auth.ok) return auth.error;
+  let args: string[];
+  try {
+    args = gitHistoryArgs(input);
+  } catch (error) {
+    return `Refused: ${(error as Error).message}`;
+  }
+  const directory = await ports.worktree(auth.row.thread_id);
+  if (!directory) return "There is no code for this thread: its worktree could not be made.";
+  const result = await ports.runtime.exec("git", args, { cwd: directory, timeoutMs: 30_000, maxBytes: 2 * 1024 * 1024 });
+  const text = redactText(result.code === 0 ? result.stdout || "(no output)" : `git failed: ${result.stderr.trim()}`, { maxBytes: 24_000 });
+  await ports.atomically((db) =>
+    recordShown(db, { sessionId: sessionId!, threadId: auth.row.thread_id, runId: auth.row.run_id, source: `git:${String(input.operation)}`, text, at: ports.now() }),
+  );
+  return text;
 }
 
 export async function queryTelemetry(
@@ -176,7 +214,7 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
 export function mcpLayer(ports: McpPorts, version: string) {
   // Plain text, not a JSON-encoded string: agents quote what they read, and quotes are checked against it.
   const asText = (text: string) => [{ type: "text" as const, text }];
-  const tools = McpServer.toolkit(SessionTools, { content: { query_telemetry: asText, file_finding: asText } }).pipe(
+  const tools = McpServer.toolkit(SessionTools, { content: { query_telemetry: asText, git_history: asText, file_finding: asText } }).pipe(
     Layer.provide(sessionToolsLayer(ports)),
   );
   const reads = DomainAi.toMcp(OverwatchApi, { expose: [...EXPOSED] });

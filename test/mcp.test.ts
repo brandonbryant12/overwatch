@@ -5,7 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileFinding, queryTelemetry, type McpPorts } from "../src/service/mcp.ts";
+import { fileFinding, gitHistory, queryTelemetry, type McpPorts } from "../src/service/mcp.ts";
 import { recordShown } from "../src/service/tables.ts";
 import { testService } from "./fixtures/service.ts";
 import { tempDir } from "./fixtures/support.ts";
@@ -79,12 +79,14 @@ describe("query_telemetry and file_finding are bound to the calling session and 
   test("kubectl runs read-only verbs only, scoped to the run's incident; what it returns is recorded as shown to the session", async () => {
     const { service, ports, cluster } = await setup();
     try {
-      const logs = await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", since: "1h", args: { verb: "logs", args: ["shop-api-1"] } });
+      const logs = await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", since: "1h", args: { operation: "logs", pod: "shop-api-1" } });
       expect(logs).toContain("ERROR payment 42 timed out after 300ms");
-      for (const verb of ["delete", "exec", "apply", "scale"]) {
-        expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { verb, args: ["pod/shop-api-1"] } })).toContain(`kubectl ${verb} is not allowed`);
+      for (const operation of ["delete", "exec", "apply", "scale"]) {
+        expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { operation, pod: "shop-api-1" } })).toContain("free-form kubectl arguments are not accepted");
       }
-      expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { verb: "get", args: ["secrets"] } })).toContain("Reading secrets is not allowed");
+      expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { verb: "delete", args: ["pod", "x"] } })).toContain("free-form kubectl arguments are not accepted");
+      expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { operation: "get", resource: "secrets" } })).toContain("Reading secrets is not allowed");
+      expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", args: { operation: "logs", pod: "--kubeconfig=/tmp/x" } })).toContain("not allowed");
       expect(await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "other" })).toContain('Unknown source "other"');
       const kubectlVerbs = cluster.exec.calls.filter((c) => c.command === "kubectl").map((c) => c.args[5]);
       expect(kubectlVerbs.every((verb) => ["get", "describe", "logs", "top"].includes(verb!))).toBe(true);
@@ -98,7 +100,7 @@ describe("query_telemetry and file_finding are bound to the calling session and 
   test("a made-up citation is refused with the reason; a checked finding completes the run, once", async () => {
     const { service, ports, completed } = await setup();
     try {
-      await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", since: "1h", args: { verb: "logs", args: ["shop-api-1"] } });
+      await queryTelemetry(ports, "ses_a", { token: "tok-a", source: "pods", since: "1h", args: { operation: "logs", pod: "shop-api-1" } });
       const invented = await fileFinding(ports, "ses_a", { token: "tok-a", finding: finding("ERROR payment 99 failed because the moon was full") });
       expect(invented).toContain("Not recorded");
       expect(invented).toContain('the quote is not in anything source "pods" returned');
@@ -108,6 +110,29 @@ describe("query_telemetry and file_finding are bound to the calling session and 
       expect(await fileFinding(ports, "ses_a", { token: "tok-a", finding: finding("ERROR payment 42 timed out after 300ms") })).toBe("Recorded. Stop now.");
       expect(completed).toEqual(["run-a"]);
       expect(await fileFinding(ports, "ses_a", { token: "tok-a", finding: finding("ERROR payment 42 timed out after 300ms") })).toContain("is finished");
+    } finally {
+      await service.stop();
+    }
+  });
+});
+
+describe("git_history", () => {
+  test("reads the thread's worktree history, records it as shown, and refuses options and paths outside it", async () => {
+    const { service, ports } = await setup();
+    try {
+      const worktree = (await ports.worktree("thr_a"))!;
+      const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: worktree });
+      git("init", "-q");
+      git("add", ".");
+      git("commit", "-q", "-m", "set the payment timeout");
+      const log = await gitHistory(ports, "ses_a", { token: "tok-a", operation: "log", path: "payments.ts" });
+      expect(log).toContain("set the payment timeout");
+      expect(await gitHistory(ports, "ses_a", { token: "tok-a", operation: "blame", path: "payments.ts" })).toContain("TIMEOUT_MS = 300");
+      expect(await gitHistory(ports, "ses_a", { token: "tok-a", operation: "show", commit: "--output=/tmp/owned" })).toContain("Refused");
+      expect(await gitHistory(ports, "ses_a", { token: "tok-a", operation: "log", path: "../../etc" })).toContain("Refused");
+      expect(await gitHistory(ports, "ses_b", { token: "tok-a", operation: "log" })).toContain("another session's run");
+      const shown = await service.read((db) => db.prepare("SELECT source FROM shown WHERE session_id = 'ses_a'").all().map((r) => r.source));
+      expect(shown).toContain("git:log");
     } finally {
       await service.stop();
     }
@@ -138,7 +163,7 @@ describe("the MCP server over HTTP", () => {
       await rpc({ jsonrpc: "2.0", method: "notifications/initialized" }, init.session ?? undefined);
       const list = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, init.session ?? undefined);
       const names = (list.json.result.tools as Array<{ name: string }>).map((t) => t.name).sort();
-      expect(names).toEqual(["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_Search_ask", "OverwatchApi_ThreadPage_get", "file_finding", "query_telemetry"]);
+      expect(names).toEqual(["OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_Search_ask", "OverwatchApi_ThreadPage_get", "file_finding", "git_history", "query_telemetry"]);
       const call = (meta: Record<string, unknown> | undefined) =>
         rpc(
           { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "query_telemetry", arguments: { token: "tok-a", source: "other" }, ...(meta ? { _meta: meta } : {}) } },
@@ -154,4 +179,4 @@ describe("the MCP server over HTTP", () => {
   });
 });
 
-void [execFileSync, mkdirSync];
+void mkdirSync;

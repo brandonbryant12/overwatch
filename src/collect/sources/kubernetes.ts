@@ -14,25 +14,40 @@ import { emptyResult, str, type CollectResult, type SourceContext, type SourceTy
  */
 export const READ_ONLY_VERBS = new Set(["get", "describe", "logs", "top"]);
 
-const FORBIDDEN_FLAGS = [
-  "--context",
-  "--namespace",
-  "-n",
-  "--kubeconfig",
-  "--server",
-  "-s",
-  "--token",
-  "--as",
-  "--as-group",
-  "--as-uid",
-  "--user",
-  "--cluster",
-  "--all-namespaces",
-  "-A",
-  "--raw",
-];
+/** Resources that may be read. Secrets, config maps and anything not listed are not. */
+const READABLE = new Set([
+  "pods", "pod", "events", "event", "nodes", "node", "resourcequota", "resourcequotas", "services", "service", "endpoints",
+  "deployments", "deployment", "deployments.apps", "statefulsets", "statefulsets.apps", "daemonsets", "daemonsets.apps",
+  "replicasets", "replicasets.apps", "horizontalpodautoscalers", "horizontalpodautoscalers.autoscaling", "hpa",
+]);
+/** A Kubernetes object name, label value or similar: never starts with "-", so it cannot be read as a flag. */
+const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
+const SELECTOR = /^[A-Za-z0-9][A-Za-z0-9._\/=!,() -]{0,250}$/;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const COUNT = /^\d{1,9}$/;
 
-const SECRET_RESOURCE = /^(secrets?|secret\/.*|secrets\/.*)$/i;
+/**
+ * The flags each verb may take, and the shape of each flag's value. Anything else is refused: this is an allowlist,
+ * so a flag kubectl adds later, or one that changes the cluster, identity, output file or namespace, is not allowed.
+ */
+const FLAGS: Readonly<Record<string, Readonly<Record<string, RegExp | null>>>> = {
+  get: { "-l": SELECTOR, "--selector": SELECTOR, "-o": /^json$/, "--output": /^json$/, "--field-selector": SELECTOR },
+  describe: { "-l": SELECTOR },
+  logs: {
+    "--all-containers": null,
+    "--prefix": null,
+    "--timestamps": null,
+    "--previous": null,
+    "--since-time": ISO_TIME,
+    "--limit-bytes": COUNT,
+    "--tail": COUNT,
+    "-c": NAME,
+    "--container": NAME,
+  },
+  top: { "-l": SELECTOR, "--containers": null, "--no-headers": null },
+};
+/** How many plain arguments each verb takes: get and describe a resource and names, logs a pod, top pods or nodes. */
+const POSITIONALS: Readonly<Record<string, number>> = { get: 52, describe: 2, logs: 1, top: 1 };
 
 export interface KubernetesConfig {
   readonly context: string;
@@ -57,18 +72,89 @@ export function kubernetesConfig(config: SourceConfig): KubernetesConfig {
   };
 }
 
-/** Rejects anything that is not a read-only verb, or that would change cluster, namespace or identity. */
+/**
+ * Accepts only what is allowed: a read-only verb, readable resources, names that cannot be flags, and the flags and
+ * value shapes listed for that verb. The context and namespace are added by `kubectl()` and cannot be given here.
+ */
 export function checkKubectlArgs(verb: string, args: ReadonlyArray<string>): void {
-  if (!READ_ONLY_VERBS.has(verb)) {
+  const flags = FLAGS[verb];
+  if (!READ_ONLY_VERBS.has(verb) || !flags) {
     throw new Error(`kubectl ${verb} is not allowed; Overwatch only runs get, describe, logs and top`);
   }
-  for (const arg of args) {
-    const flag = arg.split("=")[0]!;
-    if (FORBIDDEN_FLAGS.includes(flag)) throw new Error(`kubectl flag ${flag} is not allowed`);
-    if ((verb === "get" || verb === "describe") && arg.split(",").some((part) => SECRET_RESOURCE.test(part))) {
-      throw new Error("Reading secrets is not allowed");
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (!arg.startsWith("-")) {
+      positionals.push(arg);
+      continue;
     }
+    const eq = arg.indexOf("=");
+    const flag = eq >= 0 ? arg.slice(0, eq) : arg;
+    if (!(flag in flags)) throw new Error(`kubectl ${verb} flag ${flag} is not allowed`);
+    const shape = flags[flag]!;
+    if (shape === null) {
+      if (eq >= 0) throw new Error(`kubectl ${verb} flag ${flag} takes no value; that is not allowed`);
+      continue;
+    }
+    const value = eq >= 0 ? arg.slice(eq + 1) : args[++i];
+    if (value === undefined || !shape.test(value)) throw new Error(`kubectl ${verb} ${flag} value ${JSON.stringify(value ?? "")} is not allowed`);
   }
+  if (positionals.length === 0) throw new Error(`kubectl ${verb} with nothing to read is not allowed`);
+  if (positionals.length > (POSITIONALS[verb] ?? 0)) throw new Error(`kubectl ${verb} with ${positionals.length} arguments is not allowed`);
+  const [first, ...rest] = positionals;
+  if (verb === "get" || verb === "describe") {
+    const resources = first!.split(",");
+    if (resources.some((r) => /secret/i.test(r))) throw new Error("Reading secrets is not allowed");
+    const bad = resources.find((r) => !READABLE.has(r.toLowerCase()));
+    if (bad !== undefined) throw new Error(`kubectl ${verb} ${bad} is not allowed; readable: ${[...READABLE].join(", ")}`);
+    if (verb === "describe" && rest.length !== 1) throw new Error("kubectl describe needs exactly one name; other forms are not allowed");
+  } else if (verb === "top") {
+    if (first !== "pods" && first !== "nodes") throw new Error(`kubectl top ${first} is not allowed; only pods and nodes`);
+  }
+  for (const name of verb === "get" || verb === "describe" ? rest : verb === "logs" ? [first!] : []) {
+    if (!NAME.test(name)) throw new Error(`kubectl ${verb} name ${JSON.stringify(name)} is not allowed`);
+  }
+}
+
+/** What an agent may ask the Kubernetes source for. Each field is checked; nothing becomes a raw argument. */
+export type AgentKubectl =
+  | { readonly operation: "logs"; readonly pod: string; readonly container?: string; readonly previous?: boolean }
+  | { readonly operation: "get"; readonly resource: string; readonly name?: string; readonly selector?: string }
+  | { readonly operation: "describe"; readonly resource: string; readonly name: string }
+  | { readonly operation: "top"; readonly resource: "pods" | "nodes" };
+
+/** Builds the kubectl verb and arguments for an agent's structured request, or throws with why it is not allowed. */
+export function agentKubectl(input: Record<string, unknown>): { verb: string; args: string[] } {
+  const field = (key: string) => {
+    const value = input[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+    return value;
+  };
+  let built: { verb: string; args: string[] };
+  switch (input.operation) {
+    case "logs": {
+      const container = field("container");
+      built = { verb: "logs", args: [field("pod") ?? "", ...(container ? ["-c", container] : ["--all-containers"]), "--prefix", "--timestamps", ...(input.previous === true ? ["--previous"] : [])] };
+      break;
+    }
+    case "get": {
+      const name = field("name");
+      const selector = field("selector");
+      built = { verb: "get", args: [field("resource") ?? "", ...(name ? [name] : []), ...(selector ? ["-l", selector] : []), "-o", "json"] };
+      break;
+    }
+    case "describe":
+      built = { verb: "describe", args: [field("resource") ?? "", field("name") ?? ""] };
+      break;
+    case "top":
+      built = { verb: "top", args: [field("resource") ?? "", "--no-headers", ...(input.resource === "pods" ? ["--containers"] : [])] };
+      break;
+    default:
+      throw new Error('operation must be "logs", "get", "describe" or "top"; free-form kubectl arguments are not accepted');
+  }
+  checkKubectlArgs(built.verb, built.args);
+  return built;
 }
 
 /**
@@ -848,7 +934,7 @@ function fmtBytes(bytes: number | undefined): string {
 export const kubernetesSource: SourceType = {
   type: "kubernetes",
   queryHelp:
-    'args: { verb: "get" | "describe" | "logs" | "top", args: string[] }. Runs kubectl in this environment\'s context and namespace. For logs, since/until bound the output. Secrets and other namespaces are not readable.',
+    'args, one of: { operation: "logs", pod, container?, previous? } | { operation: "get", resource, name?, selector? } | { operation: "describe", resource, name } | { operation: "top", resource: "pods" | "nodes" }. Runs kubectl read-only in this environment\'s context and namespace; resources are pods, events, nodes, workloads, autoscalers, services and quotas, never secrets. For logs, since/until bound the output.',
   validate: (config) =>
     ["context", "namespace", "selector"].flatMap((key) =>
       typeof config[key] === "string" && config[key] ? [] : [`kubernetes source needs "${key}"`],
@@ -856,9 +942,8 @@ export const kubernetesSource: SourceType = {
   collect,
   query: async (raw, input, context) => {
     const config = kubernetesConfig(raw);
-    const verb = String(input.args.verb ?? "get");
-    const args = Array.isArray(input.args.args) ? input.args.args.map(String) : [];
-    const extra = verb === "logs" && !args.some((a) => a.startsWith("--since")) ? [`--since-time=${iso(input.since)}`, "--timestamps"] : [];
+    const { verb, args } = agentKubectl(input.args);
+    const extra = verb === "logs" ? [`--since-time=${iso(input.since)}`] : [];
     const result = await kubectl(config, verb, [...args, ...extra], context, 2 * 1024 * 1024);
     let text = result.code === 0 ? result.stdout : `kubectl failed: ${result.stderr}`;
     if (verb === "logs" && result.code === 0) {

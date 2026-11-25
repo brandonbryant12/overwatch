@@ -22,10 +22,9 @@ export interface PermissionRule {
   readonly effect: "allow" | "deny" | "ask";
 }
 
-const GIT_READ = ["git log *", "git show *", "git blame *", "git diff *", "git grep *", "git status *", "git rev-parse *"];
-
 /**
- * Deny by default. The investigator reads code and runs read-only git, uses Overwatch's MCP tools (OpenCode names
+ * Deny by default, and no shell at all. The investigator reads code (read, glob, grep), asks for history through
+ * Overwatch's `git_history` tool, uses Overwatch's other MCP tools (OpenCode names
  * an MCP tool's permission `<server>_<tool>`), and may load skills. Nothing else, unless the owner adds rules.
  */
 export function investigatorPermissions(extra: ReadonlyArray<PermissionRule> = []): PermissionRule[] {
@@ -35,8 +34,7 @@ export function investigatorPermissions(extra: ReadonlyArray<PermissionRule> = [
     { action: "read", resource: "*.env", effect: "deny" },
     { action: "read", resource: "*.env.*", effect: "deny" },
     { action: "read", resource: "*.env.example", effect: "allow" },
-    ...GIT_READ.map((resource): PermissionRule => ({ action: "shell", resource, effect: "allow" })),
-    ...["query_telemetry", "file_finding", "OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search_ask"].map(
+    ...["query_telemetry", "git_history", "file_finding", "OverwatchApi_Inbox_get", "OverwatchApi_IncidentPage_get", "OverwatchApi_ThreadPage_get", "OverwatchApi_Search_ask"].map(
       (tool): PermissionRule => ({ action: `${MCP_SERVER}_${tool}`, resource: "*", effect: "allow" }),
     ),
     ...extra,

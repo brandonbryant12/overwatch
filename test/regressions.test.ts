@@ -336,3 +336,80 @@ describe("A8. a prompt draft belongs to the incident it was typed on, and stays 
     expect(draftOf(m)).toBe("");
   });
 });
+
+describe("A9. read-only is enforced by what is allowed, not by what is forbidden", () => {
+  test("kubectl: anything outside each verb's allowed resources, flags and value shapes is refused", async () => {
+    const { checkKubectlArgs } = await import("../src/collect/sources/kubernetes.ts");
+    const refused: Array<[string, string[]]> = [
+      ["get", ["pods", "--kubeconfig=/tmp/other"]],
+      ["get", ["pods", "--kubeconfig", "/tmp/other"]],
+      ["get", ["pods", "-o", "yaml"]],
+      ["get", ["pods", "-o=go-template-file=/etc/passwd"]],
+      ["get", ["pods", "--output=jsonpath-file=/tmp/x"]],
+      ["get", ["pods", "--context=prod"]],
+      ["get", ["pods", "--server=https://evil"]],
+      ["get", ["configmaps"]],
+      ["get", ["pods,secrets"]],
+      ["get", ["pods", "-l", "--all-namespaces"]],
+      ["get", ["pods", "--watch"]],
+      ["get", ["pods", "--raw=/api"]],
+      ["logs", ["-f", "shop-api-1"]],
+      ["logs", ["shop-api-1", "--since-time=yesterday"]],
+      ["logs", ["shop-api-1", "--kubeconfig=/x"]],
+      ["describe", ["secret", "db"]],
+      ["top", ["pods", "--kubeconfig=/x"]],
+      ["exec", ["shop-api-1", "--", "sh"]],
+      ["delete", ["pod", "shop-api-1"]],
+    ];
+    for (const [verb, args] of refused) expect(() => checkKubectlArgs(verb, args)).toThrow("not allowed");
+    // What the collector itself runs is still allowed.
+    for (const [verb, args] of [
+      ["get", ["pods", "-l", "app=shop-api", "-o", "json"]],
+      ["get", ["events", "--field-selector", "type=Warning", "-o", "json"]],
+      ["logs", ["shop-api-1", "--all-containers", "--prefix", "--timestamps", "--since-time=2026-11-25T10:00:00Z", "--limit-bytes=4194304"]],
+      ["top", ["pods", "-l", "app=shop-api", "--containers", "--no-headers"]],
+      ["top", ["nodes", "--no-headers"]],
+    ] as Array<[string, string[]]>) {
+      expect(() => checkKubectlArgs(verb, args)).not.toThrow();
+    }
+  });
+
+  test("agents ask for structured read operations; free-form argument lists and injected names are refused", async () => {
+    const { agentKubectl } = (await import("../src/collect/sources/kubernetes.ts")) as Record<string, any>;
+    expect(typeof agentKubectl).toBe("function");
+    expect(agentKubectl({ operation: "logs", pod: "shop-api-1" })).toEqual({ verb: "logs", args: ["shop-api-1", "--all-containers", "--prefix", "--timestamps"] });
+    for (const bad of [
+      { verb: "get", args: ["pods", "--kubeconfig=/x"] },
+      { operation: "logs", pod: "--kubeconfig=/x" },
+      { operation: "logs", pod: "shop-api-1", container: "-o" },
+      { operation: "get", resource: "secrets" },
+      { operation: "get", resource: "pods", name: "a b" },
+      { operation: "get", resource: "pods", selector: "-A" },
+      { operation: "describe", resource: "pods" },
+      { operation: "top", resource: "deployments" },
+      { operation: "exec", pod: "x" },
+    ]) {
+      expect(() => agentKubectl(bad)).toThrow();
+    }
+  });
+
+  test("the investigator has no shell; history is a structured tool that refuses options and paths outside its worktree", async () => {
+    const { investigatorPermissions } = await import("../src/plugin/index.ts");
+    const shell = investigatorPermissions().filter((r) => r.action === "shell" && r.effect === "allow");
+    expect(shell).toEqual([]);
+    const { gitHistoryArgs } = (await import("../src/service/history.ts").catch(() => ({}))) as Record<string, any>;
+    expect(typeof gitHistoryArgs).toBe("function");
+    expect(gitHistoryArgs({ operation: "log", path: "src/payments.ts" })[0]).toBe("--no-pager");
+    for (const bad of [
+      { operation: "log", path: "--output=/tmp/x" },
+      { operation: "show", commit: "--ext-diff" },
+      { operation: "show", commit: "HEAD; rm -rf /" },
+      { operation: "diff", from: "abc1234", to: "-c", path: "x" },
+      { operation: "blame", path: "../../etc/passwd" },
+      { operation: "blame", path: "/etc/passwd" },
+      { operation: "grep", pattern: "x" },
+    ]) {
+      expect(() => gitHistoryArgs(bad)).toThrow();
+    }
+  });
+});

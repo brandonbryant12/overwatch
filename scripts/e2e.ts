@@ -115,9 +115,9 @@ function script(messages: Message[], tools: string[]): { call?: { name: string; 
   }
   switch (results.length) {
     case 0:
-      return { call: { name: tool("query_telemetry"), arguments: JSON.stringify({ token, source: "pods", since: "2h", args: { verb: "logs", args: ["shop-api-1"] } }) } };
+      return { call: { name: tool("query_telemetry"), arguments: JSON.stringify({ token, source: "pods", since: "2h", args: { operation: "logs", pod: "shop-api-1" } }) } };
     case 1:
-      return { call: { name: tool("query_telemetry"), arguments: JSON.stringify({ token, source: "pods", args: { verb: "delete", args: ["pod", "shop-api-1"] } }) } };
+      return { call: { name: tool("query_telemetry"), arguments: JSON.stringify({ token, source: "pods", args: { operation: "delete", pod: "shop-api-1" } }) } };
     case 2:
       return { call: { name: tool("file_finding"), arguments: JSON.stringify(finding(token, "ERROR payment 99 failed because the moon was full")) } };
     case 3:
@@ -332,7 +332,7 @@ try {
   assert.equal(recorded.engineering.evidence.find((e: any) => e.source === "payments.ts").verified, true, "the code quote was verified");
   const results = model.toolResults.join("\n---\n");
   assert.ok(results.includes("ERROR payment 42 timed out after 300ms"), "query_telemetry returned the fake cluster's logs");
-  assert.match(results, /kubectl delete is not allowed/, "a kubectl verb outside the allowlist was refused");
+  assert.match(results, /free-form kubectl arguments are not accepted/, "a kubectl operation outside the allowlist was refused");
   assert.match(results, /Not recorded[\s\S]*the quote is not in anything source "pods" returned/, "a made-up citation was refused");
   assert.match(results, /Refused: unknown run token/, "a finding filed for another run was refused");
   const promptOf = async (promptId: string) => ((await api((c) => c.ThreadPage.get(threadId))) as any).prompts.find((p: any) => p.promptId === promptId);
