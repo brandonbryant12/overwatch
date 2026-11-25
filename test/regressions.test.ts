@@ -190,3 +190,32 @@ describe("A4. the writer lock", () => {
     }
   });
 });
+
+describe("A5. restore never replaces a good database with a bad one", () => {
+  test("a file that is not an Overwatch backup is refused and the database is left as it was; a running service blocks restore", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { backup, restore } = await import("../src/service/backup.ts");
+    const { tempDir } = await import("./fixtures/support.ts");
+    const dataDir = tempDir("a5");
+    const db = join(dataDir, "overwatch.sqlite");
+    const { service, cluster } = await testService({ dataDir });
+    cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+    await service.collect("shop-api/production");
+    const good = join(tempDir("a5b"), "good.sqlite");
+    backup(db, good);
+    expect(() => restore(good, db)).toThrow("Another Overwatch service");
+    await service.stop();
+    const junk = join(tempDir("a5c"), "notes.txt");
+    writeFileSync(junk, "these are my notes, not a database\n");
+    expect(() => restore(junk, db)).toThrow("not an Overwatch backup");
+    const { DatabaseSync } = await import("node:sqlite");
+    const stillThere = new DatabaseSync(db, { readOnly: true });
+    expect(Number((stillThere.prepare("SELECT count(*) AS n FROM journal").get() as { n: number }).n)).toBeGreaterThan(0);
+    stillThere.close();
+    const empty = join(tempDir("a5d"), "other.sqlite");
+    new DatabaseSync(empty).exec("CREATE TABLE t (x)");
+    expect(() => restore(empty, db)).toThrow("not an Overwatch backup");
+    restore(good, db);
+  });
+});

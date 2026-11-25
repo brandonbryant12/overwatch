@@ -28,16 +28,6 @@ const command = args[0] ?? "help";
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && args[i - 1]!.startsWith("--")));
 
 const dbFile = () => join(loadConfig(configPath).dataDir, "overwatch.sqlite");
-const running = async () => {
-  const config = loadConfig(configPath);
-  try {
-    const response = await fetch(`http://127.0.0.1:${config.port}/health`, { signal: AbortSignal.timeout(1_000) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-};
-
 async function main() {
   switch (command) {
     case "serve": {
@@ -83,13 +73,11 @@ async function main() {
     case "restore": {
       const source = positional[1];
       if (!source) throw new Error("overwatch restore <backup file>");
-      if (await running()) throw new Error("Stop the service before restoring (overwatch launchd uninstall, or stop the terminal running it).");
       restore(source, dbFile());
       console.log(`restored ${dbFile()} from ${source}`);
       return;
     }
     case "rebuild-search": {
-      if (await running()) throw new Error("Stop the service first; the index is rebuilt when it starts.");
       clearSearch(dbFile());
       console.log("search index cleared; it is rebuilt from the journal when the service starts");
       return;
