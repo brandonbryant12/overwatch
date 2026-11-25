@@ -17,6 +17,7 @@ import { messageIdOf } from "../domain/ids.ts";
 import type { IncidentPageState, PendingRun } from "../domain/views.ts";
 import type { OpenCodePort } from "./opencode.ts";
 import { recordShown } from "./tables.ts";
+import type { CodeBasis } from "./worktree.ts";
 
 export const INVESTIGATOR_AGENT = "overwatch-investigator";
 
@@ -30,7 +31,10 @@ export interface WorkerPorts {
    * (what runs, since when, what the rollout brought in), which commit the code is and whether it is the deployed one,
    * and the latest capacity summary.
    */
-  readonly prepareCode: (threadId: string, page: IncidentPageState | null) => Promise<{ readonly directory: string; readonly lines: ReadonlyArray<string> }>;
+  readonly prepareCode: (
+    run: { readonly threadId: string; readonly sessionId: string; readonly newSession: boolean },
+    page: IncidentPageState | null,
+  ) => Promise<{ readonly directory: string; readonly lines: ReadonlyArray<string>; readonly basis: CodeBasis }>;
   /** The run's state on its aggregate, which the pending-runs view may lag. */
   readonly runStatus: (runId: string) => Promise<string | undefined>;
   readonly markSent: (runId: string) => Promise<void>;
@@ -51,19 +55,14 @@ export interface WorkerStatus {
 }
 
 /** The token a run's session passes to Overwatch's tools. Stored before the prompt that carries it is sent. */
-function tokenFor(db: DatabaseSync, run: PendingRun, now: number): string {
+function tokenFor(db: DatabaseSync, run: PendingRun, now: number, basis?: CodeBasis): string {
   const known = db.prepare("SELECT token FROM run_tokens WHERE run_id = ?").get(run.runId) as { token: string } | undefined;
   if (known) return known.token;
   const token = `owt_${randomBytes(18).toString("base64url")}`;
-  db.prepare("INSERT INTO run_tokens (token, run_id, session_id, thread_id, subject, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-    token,
-    run.runId,
-    run.sessionId,
-    run.threadId,
-    run.subject,
-    "investigator",
-    now,
-  );
+  // The run's token row also records exactly which code the run was given; its finding carries that.
+  db.prepare(
+    "INSERT INTO run_tokens (token, run_id, session_id, thread_id, subject, role, created_at, code_path, code_commit, code_deployed, code_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(token, run.runId, run.sessionId, run.threadId, run.subject, "investigator", now, basis?.path ?? null, basis?.commit ?? null, basis?.deployed ? 1 : 0, basis?.note ?? null);
   return token;
 }
 
@@ -93,11 +92,11 @@ export function makeWorker(ports: WorkerPorts) {
   const dispatch = async (run: PendingRun) => {
     const page = await ports.incidentPage(run.subject);
     if (!page) ports.log(`run ${run.runId}: incident ${run.subject} has no page yet; sending without its context`);
-    const { directory, lines } = await ports.prepareCode(run.threadId, page);
+    const { directory, lines, basis } = await ports.prepareCode(run, page);
     const briefInput = { page, handoff: run.handoff, ask: run.text, origin: run.origin, deploy: lines };
     const brief = contextPack(briefInput);
     const token = await ports.atomically((db) => {
-      const t = tokenFor(db, run, ports.now());
+      const t = tokenFor(db, run, ports.now(), basis);
       // What this session is shown is what its citations are checked against.
       for (const part of contextParts(briefInput)) {
         if (part.text.trim()) recordShown(db, { sessionId: run.sessionId, threadId: run.threadId, runId: run.runId, source: shownLabel(part), text: part.text, at: ports.now() });

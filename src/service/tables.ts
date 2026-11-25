@@ -28,9 +28,9 @@ export const SERVICE_SCHEMA = `
     text TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE (session_id, run_id, source, text)
   );
   CREATE INDEX IF NOT EXISTS shown_session ON shown (session_id);
-  CREATE TABLE IF NOT EXISTS worktrees (
-    thread_id TEXT PRIMARY KEY, path TEXT NOT NULL, checkout TEXT, commit_sha TEXT, created_at INTEGER NOT NULL,
-    deployed INTEGER NOT NULL DEFAULT 0, note TEXT
+  CREATE TABLE IF NOT EXISTS code_worktrees (
+    thread_id TEXT NOT NULL, path TEXT NOT NULL, checkout TEXT, commit_sha TEXT, created_at INTEGER NOT NULL,
+    PRIMARY KEY (thread_id, path)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS capacity (
     watcher TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (watcher, source)
@@ -59,8 +59,10 @@ export const SERVICE_SCHEMA = `
 
 /** Columns added after a table was first shipped: added to databases that predate them. */
 const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
-  ["worktrees", "deployed", "INTEGER NOT NULL DEFAULT 0"],
-  ["worktrees", "note", "TEXT"],
+  ["run_tokens", "code_path", "TEXT"],
+  ["run_tokens", "code_commit", "TEXT"],
+  ["run_tokens", "code_deployed", "INTEGER NOT NULL DEFAULT 0"],
+  ["run_tokens", "code_note", "TEXT"],
 ];
 
 export function createServiceTables(db: DatabaseSync) {

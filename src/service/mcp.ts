@@ -47,9 +47,10 @@ export interface McpPorts {
   /** The run's state, to refuse calls for a finished run. */
   readonly runStatus: (runId: string) => Promise<string | undefined>;
   readonly incident: (id: string) => Promise<{ readonly app: string; readonly environment: string } | undefined>;
-  readonly worktree: (threadId: string) => Promise<string | undefined>;
+  /** The directory the run's session reads code in. */
+  readonly worktree: (runId: string) => Promise<string | undefined>;
   /** Which code the thread's sessions read; recorded on every finding. */
-  readonly codeBasis: (threadId: string) => Promise<{ readonly commit: string | null; readonly deployed: boolean; readonly note: string } | undefined>;
+  readonly codeBasis: (runId: string) => Promise<{ readonly commit: string | null; readonly deployed: boolean; readonly note: string } | undefined>;
   readonly complete: (runId: string, sessionId: string, finding: Finding) => Promise<void>;
   readonly now: () => number;
 }
@@ -130,7 +131,7 @@ export async function gitHistory(ports: McpPorts, sessionId: string | undefined,
   } catch (error) {
     return `Refused: ${(error as Error).message}`;
   }
-  const directory = await ports.worktree(auth.row.thread_id);
+  const directory = await ports.worktree(auth.row.run_id);
   if (!directory) return "There is no code for this thread: its worktree could not be made.";
   const result = await ports.runtime.exec("git", args, { cwd: directory, timeoutMs: 30_000, maxBytes: 2 * 1024 * 1024 });
   const text = redactText(result.code === 0 ? result.stdout || "(no output)" : `git failed: ${result.stderr.trim()}`, { maxBytes: 24_000 });
@@ -198,7 +199,7 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
   if (!limits.ok) return `Not recorded:\n- ${limits.errors.join("\n- ")}`;
   const incident = await ports.incident(auth.row.subject);
   const env = incident ? ports.options.apps[incident.app]?.environments[incident.environment] : undefined;
-  const directory = await ports.worktree(auth.row.thread_id);
+  const directory = await ports.worktree(auth.row.run_id);
   const shown = await ports.read((db) => shownFor(db, sessionId!));
   const checked = await verifyCitations(legacy, { shown, sources: Object.keys(env?.sources ?? {}), ...(directory ? { directory } : {}) });
   if (checked.errors.length) return `Not recorded. Fix these and file again:\n- ${checked.errors.join("\n- ")}`;
@@ -209,7 +210,7 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
       evidence: checked.finding.engineering.evidence.map((e) => ({ source: e.source, quote: e.quote, verified: e.verified === true })),
     },
     ruledOut: [...(finding.ruledOut ?? [])],
-    code: (await ports.codeBasis(auth.row.thread_id)) ?? { commit: null, deployed: false, note: "No code was prepared for this thread." },
+    code: (await ports.codeBasis(auth.row.run_id)) ?? { commit: null, deployed: false, note: "No code was prepared for this thread." },
   };
   await ports.complete(auth.row.run_id, sessionId!, recorded);
   return "Recorded. Stop now.";

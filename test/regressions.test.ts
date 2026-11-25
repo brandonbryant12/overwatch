@@ -122,7 +122,7 @@ describe("A3. a quote attributed to a source verifies only against what that sou
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [{ runId: RunId.make("run_c"), threadId: thread, subject: page.incidentId, promptId: "p", mode: "investigate", sessionId: "ses_c", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: question, origin: "page", handoff: null, status: "requested" as const, nudges: [], at: 0 }] as never,
       incidentPage: async () => page as never,
-      prepareCode: async () => ({ directory: "/nonexistent", lines: [] }),
+      prepareCode: async () => ({ directory: "/nonexistent", lines: [], basis: { path: "/nonexistent", commit: null, deployed: false, note: "no code" } }),
       runStatus: async () => status,
       markSent: async () => void (status = "sent"),
       adopt: async () => undefined,
@@ -246,7 +246,7 @@ describe("A6. time spent waiting for OpenCode does not count against a run", () 
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [pending] as never,
       incidentPage: async () => null,
-      prepareCode: async () => ({ directory: "/nonexistent", lines: [] }),
+      prepareCode: async () => ({ directory: "/nonexistent", lines: [], basis: { path: "/nonexistent", commit: null, deployed: false, note: "no code" } }),
       runStatus: async () => status,
       markSent: async () => {
         status = "sent";
@@ -474,7 +474,7 @@ describe("A10/B2. code evidence comes from the deployed revision, or the brief a
           await new Promise((r) => setTimeout(r, 100));
         }
         const prompt = oc.prompts[0] ?? "";
-        const row = await service.read((db) => db.prepare("SELECT path, commit_sha, deployed FROM worktrees").get() as { path: string; commit_sha: string | null; deployed: number });
+        const row = await service.read((db) => db.prepare("SELECT code_path AS path, code_commit AS commit_sha, code_deployed AS deployed FROM run_tokens").get() as { path: string; commit_sha: string | null; deployed: number });
         if (known) {
           expect(prompt).toContain(`Running in pods: ${deployed.slice(0, 12)}`);
           expect(row.commit_sha).toBe(deployed);
@@ -551,7 +551,7 @@ describe("the worker reads only new messages in Overwatch's sessions", () => {
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [],
       incidentPage: async () => null,
-      prepareCode: async () => ({ directory: "/x", lines: [] }),
+      prepareCode: async () => ({ directory: "/x", lines: [], basis: { path: "/x", commit: null, deployed: false, note: "no code" } }),
       runStatus: async () => undefined,
       markSent: async () => undefined,
       adopt: async (input: { messageId: string }) => void adopted.push(input.messageId),

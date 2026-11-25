@@ -1,18 +1,27 @@
 /**
- * Each thread's sessions work in a directory of their own: a git worktree of the app's checkout at the commit it
- * was created from, or an empty directory when there is no checkout to read. It is kept until the thread is archived,
- * so a session can be continued later, and it can be recreated at the same commit.
+ * The code a session reads. A thread has one worktree per commit its sessions have read, under
+ * `worktrees/<thread>/<commit>`, kept until the thread is archived so a session can be continued. A new session reads
+ * the deployed commit when it can be resolved; a continued session keeps the directory it started in (OpenCode fixes a
+ * session's directory), and is told when the deployment has moved on since. Each run records exactly which commit it
+ * was given and whether that was the deployed one; its finding carries that record.
  */
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Exec } from "../collect/exec.ts";
-import { resolveCommit } from "./deploy.ts";
 
 export interface WorktreePorts {
   readonly exec: Exec;
   readonly dataDir: string;
   readonly atomically: <A>(work: (db: DatabaseSync) => A) => Promise<A>;
+}
+
+/** What code a run read: where, which commit, whether it was the deployed one, and one line saying so. */
+export interface CodeBasis {
+  readonly path: string;
+  readonly commit: string | null;
+  readonly deployed: boolean;
+  readonly note: string;
 }
 
 const git = async (exec: Exec, cwd: string, args: string[]) => {
@@ -21,84 +30,78 @@ const git = async (exec: Exec, cwd: string, args: string[]) => {
   return result.stdout.trim();
 };
 
-/** What code a thread's sessions read: where, at which commit, and whether that is what is deployed. */
-export interface CodeBasis {
-  readonly path: string;
-  readonly commit: string | null;
-  readonly deployed: boolean;
-  /** One line for the brief and the finding, saying exactly what the code is. */
-  readonly note: string;
-}
+const short = (commit: string) => commit.slice(0, 12);
 
 /**
- * The thread's worktree, made once at the deployed commit when it can be resolved. When it cannot, the code is the
- * checkout's HEAD and the note says plainly it is not the deployed code; when there is no git checkout at all, the
- * directory is empty and the note says no code is available. Nothing is silent.
+ * The worktree for a new session: at `deployedCommit` when there is one, else at the checkout's HEAD (and said so),
+ * else an empty directory (and said so). Made once per thread and commit.
  */
-export async function ensureWorktree(
+export async function codeForNewSession(
   ports: WorktreePorts,
   threadId: string,
   checkout: string | undefined,
-  deployedRef?: { readonly ref?: string; readonly why?: string },
+  deployed: { readonly commit?: string; readonly ref?: string; readonly why: string },
 ): Promise<CodeBasis> {
-  const known = await ports.atomically(
-    (db) =>
-      db.prepare("SELECT path, checkout, commit_sha, deployed, note FROM worktrees WHERE thread_id = ?").get(threadId) as
-        | { path: string; checkout: string | null; commit_sha: string | null; deployed: number; note: string | null }
-        | undefined,
-  );
-  if (known && existsSync(known.path)) {
-    return { path: known.path, commit: known.commit_sha, deployed: known.deployed === 1, note: known.note ?? "No note was recorded for this code." };
+  const root = join(ports.dataDir, "worktrees", threadId);
+  if (!checkout || !existsSync(join(checkout, ".git"))) {
+    const path = join(root, "no-code");
+    mkdirSync(path, { recursive: true });
+    return { path, commit: null, deployed: false, note: "No code is available: the app's checkout is not a git repository. Work from telemetry alone." };
   }
-  const path = known?.path ?? join(ports.dataDir, "worktrees", threadId);
-  mkdirSync(join(ports.dataDir, "worktrees"), { recursive: true });
-  let commit: string | null = known?.commit_sha ?? null;
-  let deployed = known?.deployed === 1;
+  let commit: string;
   let note: string;
-  let source: string | null = null;
-  if (checkout && existsSync(join(checkout, ".git"))) {
-    try {
-      if (commit === null && deployedRef?.ref) {
-        const resolved = await resolveCommit(ports.exec, checkout, deployedRef.ref);
-        if (resolved) {
-          commit = resolved;
-          deployed = true;
-        }
-      }
-      if (commit === null) commit = await git(ports.exec, checkout, ["rev-parse", "--verify", "HEAD^{commit}"]);
-      await git(ports.exec, checkout, ["worktree", "add", "--detach", path, commit]);
-      source = checkout;
-      note = deployed
-        ? `The working directory is the app's code at the deployed commit ${commit.slice(0, 12)}. Cite code as path:line from here.`
-        : `The working directory is the checkout's HEAD ${commit.slice(0, 12)}, NOT the deployed code: ${
-            deployedRef?.ref ? `the deployed revision ${deployedRef.ref} was not found in the checkout` : `the deployed revision is unknown (${deployedRef?.why ?? "nothing reports it"})`
-          }. Treat code citations as about this commit only.`;
-    } catch (error) {
-      commit = null;
-      deployed = false;
-      note = `No code is available: the worktree could not be made (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.`;
-    }
-  } else {
-    note = "No code is available: the app's checkout is not a git repository. Work from telemetry alone.";
+  try {
+    commit = deployed.commit ?? (await git(ports.exec, checkout, ["rev-parse", "--verify", "HEAD^{commit}"]));
+  } catch (error) {
+    const path = join(root, "no-code");
+    mkdirSync(path, { recursive: true });
+    return { path, commit: null, deployed: false, note: `No code is available: the checkout's commit could not be read (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
   }
-  if (!existsSync(path)) mkdirSync(path, { recursive: true });
+  const path = join(root, short(commit));
+  if (!existsSync(path)) {
+    try {
+      mkdirSync(root, { recursive: true });
+      await git(ports.exec, checkout, ["worktree", "add", "--detach", path, commit]);
+    } catch (error) {
+      mkdirSync(path, { recursive: true });
+      return { path, commit: null, deployed: false, note: `No code is available: the worktree could not be made (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
+    }
+  }
   await ports.atomically((db) =>
-    db
-      .prepare(
-        "INSERT INTO worktrees (thread_id, path, checkout, commit_sha, created_at, deployed, note) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET path = excluded.path, checkout = excluded.checkout, commit_sha = excluded.commit_sha, deployed = excluded.deployed, note = excluded.note",
-      )
-      .run(threadId, path, source, source ? commit : null, Date.now(), deployed && source ? 1 : 0, note),
+    db.prepare("INSERT OR IGNORE INTO code_worktrees (thread_id, path, checkout, commit_sha, created_at) VALUES (?, ?, ?, ?, ?)").run(threadId, path, checkout, commit, Date.now()),
   );
-  return { path, commit: source ? commit : null, deployed: deployed && source !== null, note };
+  note = deployed.commit
+    ? `The working directory is the app's code at the deployed commit ${short(commit)}. Cite code as path:line from here.`
+    : `The working directory is the checkout's HEAD ${short(commit)}, NOT the deployed code: ${
+        deployed.ref ? `the deployed revision ${deployed.ref} was not found in the checkout` : `the deployed revision is unknown (${deployed.why})`
+      }. Treat code citations as about this commit only.`;
+  return { path, commit, deployed: deployed.commit !== undefined, note };
 }
 
-/** Removes a thread's worktree and forgets it. Called when the thread is archived. */
-export async function removeWorktree(ports: WorktreePorts, threadId: string): Promise<void> {
-  const known = await ports.atomically(
-    (db) => db.prepare("SELECT path, checkout FROM worktrees WHERE thread_id = ?").get(threadId) as { path: string; checkout: string | null } | undefined,
+/** A continued session keeps its directory; whether it is still the deployed code is decided now. */
+export function codeForContinuedSession(previous: CodeBasis, deployedCommit: string | undefined): CodeBasis {
+  if (!previous.commit) return previous;
+  if (deployedCommit === previous.commit) {
+    return { ...previous, deployed: true, note: `The working directory is the app's code at the deployed commit ${short(previous.commit)}.` };
+  }
+  return {
+    ...previous,
+    deployed: false,
+    note: deployedCommit
+      ? `This session's working directory is still at ${short(previous.commit)}; the deployed commit is now ${short(deployedCommit)}. Code citations are about ${short(previous.commit)}; ask in a new session to read the deployed code.`
+      : `This session's working directory is at ${short(previous.commit)}; which commit is deployed now is unknown.`,
+  };
+}
+
+/** Removes every worktree a thread's sessions read. Called when the thread is archived. */
+export async function removeWorktrees(ports: WorktreePorts, threadId: string): Promise<void> {
+  const rows = await ports.atomically(
+    (db) => db.prepare("SELECT path, checkout FROM code_worktrees WHERE thread_id = ?").all(threadId) as Array<{ path: string; checkout: string | null }>,
   );
-  if (!known) return;
-  if (known.checkout) await git(ports.exec, known.checkout, ["worktree", "remove", "--force", known.path]).catch(() => undefined);
-  rmSync(known.path, { recursive: true, force: true });
-  await ports.atomically((db) => db.prepare("DELETE FROM worktrees WHERE thread_id = ?").run(threadId));
+  for (const row of rows) {
+    if (row.checkout) await git(ports.exec, row.checkout, ["worktree", "remove", "--force", row.path]).catch(() => undefined);
+    rmSync(row.path, { recursive: true, force: true });
+  }
+  rmSync(join(ports.dataDir, "worktrees", threadId), { recursive: true, force: true });
+  await ports.atomically((db) => db.prepare("DELETE FROM code_worktrees WHERE thread_id = ?").run(threadId));
 }

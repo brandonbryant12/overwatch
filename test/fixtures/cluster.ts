@@ -10,16 +10,16 @@ export interface FakeCluster {
   readonly log: (at: number, message: string, pod?: string) => void;
   readonly lines: Array<{ at: number; pod: string; message: string }>;
   /** Pod readiness and whether `kubectl top` answers; the test changes them between polls. */
-  readonly state: { ready: boolean; top: boolean; memoryMi: number };
+  readonly state: { ready: boolean; top: boolean; memoryMi: number; image: string };
 }
 
 export function fakeCluster(options: { readonly pods?: number; readonly image?: string } = {}): FakeCluster {
-  const state = { ready: true, top: true, memoryMi: 100 };
+  const state = { ready: true, top: true, memoryMi: 100, image: options.image ?? "registry.example/shop-api:9f8e7d6" };
   const pods = Array.from({ length: options.pods ?? 1 }, (_, i) => `shop-api-${i + 1}`);
   const lines: FakeCluster["lines"] = [];
   const pod = (name: string) => ({
     metadata: { name, labels: { app: "shop-api" }, creationTimestamp: "2026-11-20T08:00:00Z" },
-    spec: { nodeName: "node-a", containers: [{ name: "api", image: options.image ?? "registry.example/shop-api:9f8e7d6", resources: { limits: { cpu: "1", memory: "512Mi" } } }] },
+    spec: { nodeName: "node-a", containers: [{ name: "api", image: state.image, resources: { limits: { cpu: "1", memory: "512Mi" } } }] },
     status: {
       phase: "Running",
       startTime: "2026-11-20T08:00:00Z",

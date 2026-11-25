@@ -88,3 +88,85 @@ describe("2. what a source returned is its output, and an unknown label is never
     }
   });
 });
+
+describe("3. a thread follows the deployed commit across deploys", () => {
+  test("after a second deploy the next session reads the new commit, the brief says the code changed, and each finding records exactly what it read", { timeout: 60_000 }, async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { readFileSync, writeFileSync } = await import("node:fs");
+    const { testService } = await import("./fixtures/service.ts");
+    const { fileFinding } = await import("../src/service/mcp.ts");
+    const { IncidentId, threadIdOf } = await import("../src/domain/ids.ts");
+    const repo = tempDir("app");
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "payments.ts"), "export const TIMEOUT_MS = 300\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "first deploy");
+    const first = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "payments.ts"), "export const TIMEOUT_MS = 3000\n");
+    git("commit", "-q", "-am", "second deploy");
+    const second = git("rev-parse", "HEAD");
+    const prompts: Array<{ session: string; text: string }> = [];
+    const directories = new Map<string, string>();
+    const port = {
+      connect: async () => "http://opencode.test",
+      createSession: async (i: { id: string; directory: string }) => void directories.set(i.id, i.directory),
+      prompt: async (i: { sessionID: string; text: string }) => void prompts.push({ session: i.sessionID, text: i.text }),
+      synthetic: async () => undefined,
+      newUserMessages: async () => [],
+      promptState: async () => ({ kind: "running" as const }),
+      interrupt: async () => undefined,
+      answer: async () => undefined,
+    };
+    const { service, cluster, client } = await testService({ opencode: port, config: { checkout: repo }, cluster: { image: `registry.example/shop-api:${first.slice(0, 12)}` } });
+    try {
+      cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await service.collect("shop-api/production");
+      const incident = IncidentId.make(await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!));
+      const thread = threadIdOf(incident);
+      const ask = (promptId: string, override: "auto" | "new") =>
+        client((api) => api.AskThread(thread, { subject: incident, title: "t", promptId, text: "why?", mode: "investigate", origin: "page", override }));
+      const sendAndFile = async (promptId: string, override: "auto" | "new") => {
+        const before = prompts.length;
+        await ask(promptId, override);
+        for (let i = 0; i < 60 && prompts.length === before; i++) {
+          await service.work();
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const sent = prompts.at(-1)!;
+        const token = /run token is (owt_[\w-]+)/.exec(sent.text)![1]!;
+        const ports = { ...(service as any).mcpPorts, runStatus: async () => "sent", complete: async (_: string, __: string, finding: any) => void recorded.push(finding) };
+        const unsure = { ...findingWith([]), engineering: { ...findingWith([]).engineering, verdict: "unsure", causeBasis: "inferred", confidence: "low" } };
+        expect(await fileFinding(ports, sent.session, { token, finding: unsure })).toBe("Recorded. Stop now.");
+        return sent;
+      };
+      const recorded: any[] = [];
+      const one = await sendAndFile("p-1", "auto");
+      expect(readFileSync(join(directories.get(one.session)!, "payments.ts"), "utf8")).toBe("export const TIMEOUT_MS = 300\n");
+      // The second deploy rolls out.
+      cluster.state.image = `registry.example/shop-api:${second.slice(0, 12)}`;
+      const two = await sendAndFile("p-2", "new");
+      expect(two.session).not.toBe(one.session);
+      expect(readFileSync(join(directories.get(two.session)!, "payments.ts"), "utf8")).toBe("export const TIMEOUT_MS = 3000\n");
+      expect(two.text).toContain(`The code changed since the last session on this thread: it read ${first.slice(0, 12)}, this session reads ${second.slice(0, 12)}`);
+      expect(recorded.map((f) => [f.code.commit, f.code.deployed])).toEqual([
+        [first, true],
+        [second, true],
+      ]);
+    } finally {
+      await service.stop();
+    }
+  });
+});
+
+describe("3. a continued session after a deploy", () => {
+  test("keeps its directory, is no longer labelled deployed, and is told the deployed commit moved", async () => {
+    const { codeForContinuedSession } = await import("../src/service/worktree.ts");
+    const old = { path: "/w/aaaa", commit: "a".repeat(40), deployed: true, note: "x" };
+    const moved = codeForContinuedSession(old, "b".repeat(40));
+    expect(moved).toMatchObject({ path: "/w/aaaa", commit: "a".repeat(40), deployed: false });
+    expect(moved.note).toContain(`the deployed commit is now ${"b".repeat(12)}`);
+    expect(codeForContinuedSession(old, "a".repeat(40)).deployed).toBe(true);
+    expect(codeForContinuedSession(old, undefined).deployed).toBe(false);
+  });
+});

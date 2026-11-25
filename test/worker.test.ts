@@ -54,7 +54,7 @@ function harness() {
     atomically: async (work) => work(db),
     pendingRuns: async () => [pending],
     incidentPage: async () => null,
-    prepareCode: async () => ({ directory: "/tmp/worktree", lines: [] }),
+    prepareCode: async () => ({ directory: "/tmp/worktree", lines: [], basis: { path: "/tmp/worktree", commit: null, deployed: false, note: "no code" } }),
     runStatus: async () => status,
     markSent: async () => {
       calls.push("sent");
