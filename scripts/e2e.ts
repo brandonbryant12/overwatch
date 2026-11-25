@@ -382,7 +382,7 @@ try {
   assert.ok(answer.includes(RULED_OUT), `the fresh session answered from the handoff: ${answer}`);
   step(`a fresh session ${p3.sessionId} answered "what did we rule out" from the handoff: "${answer}"`);
 
-  // ---------------------------------------------------------------- 5 and 3. OpenCode comes and goes; archive stays archived
+  // ---------------------------------------------------------------- 5 and 3. OpenCode comes and goes; Done stays done
   await stopOpenCode();
   cluster.log(Date.now() - 60_000, "ERROR payment 88 timed out after 300ms");
   await service.collect("shop-api/production");
@@ -392,14 +392,15 @@ try {
       return ok(p) ? p : undefined;
     }, 15_000);
   await pageWhere((p) => p.occurrences >= 3, "polling to work with OpenCode stopped");
-  await api((c) => c.ArchiveIncident(incidentId, {}));
-  await until("the inbox to drop the archived incident", async () => (((await api((c) => c.Inbox.get("inbox"))) as any).items.length === 0 ? true : undefined), 10_000);
+  const inInbox = async () => (((await api((c) => c.Inbox.get("inbox"))) as any).items as any[]).filter((i) => i.disposition === "inbox");
+  await api((c) => c.MarkDone(incidentId, { actor: "e2e" }));
+  await until("Done to take the incident out of the inbox", async () => ((await inInbox()).length === 0 ? true : undefined), 10_000);
   cluster.log(Date.now() - 30_000, "ERROR payment 89 timed out after 300ms");
   await service.collect("shop-api/production");
-  const after = await pageWhere((p) => p.occurrences >= 4, "the same signal to update the archived incident");
-  assert.equal(after.disposition, "archived");
-  assert.equal(((await api((c) => c.Inbox.get("inbox"))) as any).items.length, 0, "and it did not return to the inbox");
-  step("with OpenCode stopped: polling worked, archive removed the incident, and the same signal on the next poll updated it silently without bringing it back");
+  const after = await pageWhere((p) => p.occurrences >= 4, "the same signal to update the incident marked Done");
+  assert.equal(after.disposition, "done");
+  assert.equal((await inInbox()).length, 0, "and, within one polling interval of Done, it did not come back");
+  step("with OpenCode stopped: polling worked, Done took the incident out of the inbox, and an occurrence still in flight (within one polling interval) updated it silently");
 
   await api((c) => c.AskThread(threadId, { subject: incidentId, title: item.title, promptId: "p-4", text: "check again", mode: "investigate", origin: "page", override: "new" }));
   const statusDown = await working("the run to wait for OpenCode", async () => {
