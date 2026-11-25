@@ -65,12 +65,19 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
   ["run_tokens", "code_note", "TEXT"],
 ];
 
+/**
+ * The version of the database's layout, written by the service and checked by restore. Bump it whenever a table or
+ * column the service reads changes, and say in the commit how an older database is brought forward.
+ */
+export const SCHEMA_VERSION = 2;
+
 export function createServiceTables(db: DatabaseSync) {
   db.exec(SERVICE_SCHEMA);
   for (const [table, column, definition] of ADDED_COLUMNS) {
     const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
     if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
 export interface ShownRow {

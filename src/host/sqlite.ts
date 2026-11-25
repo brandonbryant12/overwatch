@@ -53,7 +53,7 @@ export interface SqliteHostShape {
 
 export class SqliteHost extends Context.Service<SqliteHost, SqliteHostShape>()("overwatch/host/SqliteHost") {}
 
-const SCHEMA = `
+export const HOST_SCHEMA = `
   CREATE TABLE IF NOT EXISTS objects (
     object TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (object, key)
   ) WITHOUT ROWID;
@@ -126,7 +126,7 @@ export const layerSqlite = (options: SqliteHostOptions): Layer.Layer<Platform | 
       const log = options.log ?? (() => undefined);
       const tickMs = options.tickMs ?? 1_000;
       const batch = Math.max(1, options.batch ?? 32);
-      connection.db.exec(SCHEMA);
+      connection.db.exec(HOST_SCHEMA);
       const db = connection.db;
       const q = {
         get: db.prepare("SELECT value FROM objects WHERE object = ? AND key = ?"),

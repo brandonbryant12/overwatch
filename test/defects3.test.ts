@@ -170,3 +170,32 @@ describe("3. a continued session after a deploy", () => {
     expect(codeForContinuedSession(old, undefined).deployed).toBe(false);
   });
 });
+
+describe("4. restore validates the schema it will be read with", () => {
+  test("right table names with the wrong columns, or no schema version, are refused; the database is left alone", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { backup, restore } = await import("../src/service/backup.ts");
+    const { testService } = await import("./fixtures/service.ts");
+    const dataDir = tempDir("restore");
+    const db = join(dataDir, "overwatch.sqlite");
+    const { service } = await testService({ dataDir });
+    await service.stop();
+    // Every table the service has, each with one unrelated column (the reviewer's file).
+    const names = (new DatabaseSync(db, { readOnly: true }).prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((r) => r.name);
+    const wrong = join(tempDir("wrong"), "wrong.sqlite");
+    const w = new DatabaseSync(wrong);
+    for (const name of names.filter((n) => !n.startsWith("sqlite_"))) w.exec(`CREATE TABLE "${name}" (unrelated TEXT)`);
+    w.close();
+    expect(() => restore(wrong, db)).toThrow("not an Overwatch backup");
+    // A real backup whose schema version was changed.
+    const good = join(tempDir("good"), "good.sqlite");
+    backup(db, good);
+    const versionless = join(tempDir("v"), "v.sqlite");
+    backup(db, versionless);
+    const v = new DatabaseSync(versionless);
+    v.exec("PRAGMA user_version = 0");
+    v.close();
+    expect(() => restore(versionless, db)).toThrow("schema version");
+    restore(good, db);
+  });
+});

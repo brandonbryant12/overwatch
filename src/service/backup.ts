@@ -6,6 +6,8 @@
 import { copyFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { acquireWriterLock } from "../host/lock.ts";
+import { HOST_SCHEMA } from "../host/sqlite.ts";
+import { createServiceTables, SCHEMA_VERSION } from "./tables.ts";
 
 export function backup(databaseFile: string, target: string) {
   if (existsSync(target)) throw new Error(`${target} exists; choose a new file`);
@@ -17,10 +19,31 @@ export function backup(databaseFile: string, target: string) {
   }
 }
 
-/** The tables an Overwatch database has: the host's and the service's. */
-const REQUIRED_TABLES = ["objects", "alarms", "journal", "checkpoints", "coverage", "run_tokens", "shown", "projections"];
+/** The layout the service reads: the host's and the service's tables, built fresh in memory to compare against. */
+function expectedLayout(): Map<string, Map<string, string>> {
+  const reference = new DatabaseSync(":memory:");
+  reference.exec(HOST_SCHEMA);
+  createServiceTables(reference);
+  const layout = columnsOf(reference);
+  reference.close();
+  return layout;
+}
 
-/** Checks a database file is a whole Overwatch database. Throws with the reason if not. */
+function columnsOf(db: DatabaseSync): Map<string, Map<string, string>> {
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map((r) => r.name);
+  return new Map(
+    tables.map((table) => [
+      table,
+      new Map((db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string; type: string; pk: number }>).map((c) => [c.name, `${c.type.toUpperCase()}${c.pk ? " key" : ""}`])),
+    ]),
+  );
+}
+
+/**
+ * Checks a database file is a whole Overwatch database this service can read: it opens, its schema version is the
+ * one this service writes, every table and column the service reads is there with its type, and SQLite's integrity
+ * check passes. Throws with the reason if not.
+ */
 export function validateBackup(file: string) {
   let db: DatabaseSync;
   try {
@@ -29,14 +52,30 @@ export function validateBackup(file: string) {
     throw new Error(`${file} is not an Overwatch backup: it does not open as a database (${(error as Error).message})`);
   }
   try {
-    let tables: string[];
+    let version: number;
+    let found: Map<string, Map<string, string>>;
     try {
-      tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((r) => r.name);
+      version = Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+      found = columnsOf(db);
     } catch (error) {
       throw new Error(`${file} is not an Overwatch backup: ${(error as Error).message}`);
     }
-    const missing = REQUIRED_TABLES.filter((t) => !tables.includes(t));
-    if (missing.length) throw new Error(`${file} is not an Overwatch backup: it has no ${missing.join(", ")} table(s)`);
+    const problems: string[] = [];
+    for (const [table, columns] of expectedLayout()) {
+      const have = found.get(table);
+      if (!have) {
+        problems.push(`no ${table} table`);
+        continue;
+      }
+      for (const [column, type] of columns) {
+        if (!have.has(column)) problems.push(`${table} has no ${column} column`);
+        else if (have.get(column) !== type) problems.push(`${table}.${column} is ${have.get(column)}, expected ${type}`);
+      }
+    }
+    if (problems.length) throw new Error(`${file} is not an Overwatch backup: ${problems.slice(0, 5).join("; ")}${problems.length > 5 ? `; and ${problems.length - 5} more` : ""}`);
+    if (version !== SCHEMA_VERSION) {
+      throw new Error(`${file} is not an Overwatch backup this version can restore: its schema version is ${version}, this service writes ${SCHEMA_VERSION}`);
+    }
     const check = (db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>).map((r) => r.integrity_check);
     if (check.join() !== "ok") throw new Error(`${file} is not an Overwatch backup: the integrity check failed (${check.slice(0, 3).join("; ")})`);
   } finally {
