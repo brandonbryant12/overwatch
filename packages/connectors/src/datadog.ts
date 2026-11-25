@@ -214,3 +214,130 @@ export function scoreExplorationCandidate(input: {
   const deployBoost = input.recentDeploy ? 1.8 : 1.0;
   return Number((staleness * trafficWeight * p95ToP50 * deployBoost).toFixed(2));
 }
+
+export interface DatadogServiceMetrics {
+  readonly tsMs: number;
+  readonly p50LatencyMs: number;
+  readonly p95LatencyMs: number;
+  readonly errorRatePct: number;
+  readonly rps: number;
+}
+
+/** The four timeseries queries behind a service health sample. Config can override any of them. */
+export function datadogMetricQueries(config: DatadogEnvConfig): {
+  readonly p50LatencySeconds: string;
+  readonly p95LatencySeconds: string;
+  readonly hitsPerSecond: string;
+  readonly errorsPerSecond: string;
+} {
+  const op = config.apmOperation ?? "http.request";
+  const scope = `{service:${config.service},env:${config.env}}`;
+  return {
+    p50LatencySeconds: config.metricQueries?.p50LatencySeconds ?? `p50:trace.${op}${scope}`,
+    p95LatencySeconds: config.metricQueries?.p95LatencySeconds ?? `p95:trace.${op}${scope}`,
+    hitsPerSecond: config.metricQueries?.hitsPerSecond ?? `sum:trace.${op}.hits${scope}.as_rate()`,
+    errorsPerSecond: config.metricQueries?.errorsPerSecond ?? `sum:trace.${op}.errors${scope}.as_rate()`,
+  };
+}
+
+/** Latest non-null point of the first series in a `/api/v1/query` response. */
+export function latestDatadogPoint(body: unknown): { readonly tsMs: number; readonly value: number } | undefined {
+  const series = (body as { series?: ReadonlyArray<{ pointlist?: ReadonlyArray<ReadonlyArray<number | null>> }> })
+    ?.series;
+  const points = series?.[0]?.pointlist;
+  if (!Array.isArray(points)) return undefined;
+  for (let i = points.length - 1; i >= 0; i--) {
+    const [tsMs, value] = points[i] ?? [];
+    if (typeof tsMs === "number" && typeof value === "number" && Number.isFinite(value)) {
+      return { tsMs, value };
+    }
+  }
+  return undefined;
+}
+
+export type DatadogMetricsResult =
+  | { readonly ok: true; readonly metrics: DatadogServiceMetrics }
+  | { readonly ok: false; readonly coverage: ConnectorProbeResult["coverage"]; readonly detail: string };
+
+/**
+ * Reads one service health sample (latency percentiles, error rate, throughput) from Datadog's
+ * timeseries query API. Returns a failure instead of a partial sample: a missing latency number
+ * must surface as lost coverage, never as zero latency.
+ */
+export function collectDatadogMetrics(
+  config: DatadogEnvConfig,
+  options: { readonly nowMs?: number; readonly windowSeconds?: number; readonly fetchImpl?: typeof fetch } = {},
+): Effect.Effect<DatadogMetricsResult, never, SecretVault> {
+  return Effect.gen(function* () {
+    const vault = yield* SecretVault;
+    const apiKey = yield* Effect.result(vault.resolve(config.apiKey));
+    const appKey = yield* Effect.result(vault.resolve(config.appKey));
+    if (apiKey._tag === "Failure" || appKey._tag === "Failure") {
+      return { ok: false as const, coverage: "auth_expired" as const, detail: "Datadog credentials unavailable" };
+    }
+
+    const nowMs = options.nowMs ?? Date.now();
+    const to = Math.floor(nowMs / 1000);
+    const from = to - (options.windowSeconds ?? 300);
+    const doFetch = options.fetchImpl ?? fetch;
+    const queries = datadogMetricQueries(config);
+
+    const run = (query: string) =>
+      Effect.tryPromise({
+        try: async () => {
+          const url = `https://api.${config.site}/api/v1/query?from=${from}&to=${to}&query=${encodeURIComponent(query)}`;
+          const resp = await doFetch(url, {
+            headers: {
+              "DD-API-KEY": Redacted.value(apiKey.success),
+              "DD-APPLICATION-KEY": Redacted.value(appKey.success),
+            },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!resp.ok) return { status: resp.status, point: undefined };
+          return { status: 200, point: latestDatadogPoint(await resp.json()) };
+        },
+        catch: () => "network" as const,
+      }).pipe(Effect.catch(() => Effect.succeed({ status: -1, point: undefined })));
+
+    const [p50, p95, hits, errors] = yield* Effect.all(
+      [run(queries.p50LatencySeconds), run(queries.p95LatencySeconds), run(queries.hitsPerSecond), run(queries.errorsPerSecond)],
+      { concurrency: 4 },
+    );
+
+    const failed = [p50, p95, hits, errors].find((r) => r.status !== 200);
+    if (failed) {
+      const coverage =
+        failed.status === 401 || failed.status === 403
+          ? ("auth_expired" as const)
+          : failed.status === 429
+            ? ("rate_limited" as const)
+            : ("unreachable" as const);
+      return {
+        ok: false as const,
+        coverage,
+        detail: failed.status === -1 ? `Could not reach api.${config.site}` : `Datadog query returned HTTP ${failed.status}`,
+      };
+    }
+    if (!p50.point || !p95.point || !hits.point) {
+      return {
+        ok: false as const,
+        coverage: "unreachable" as const,
+        detail: `Datadog returned no datapoints for service:${config.service} env:${config.env}; check apmOperation or metricQueries`,
+      };
+    }
+
+    const rps = hits.point.value;
+    // No error series at all means the service reported zero errors in the window.
+    const errorsPerSecond = errors.point?.value ?? 0;
+    return {
+      ok: true as const,
+      metrics: {
+        tsMs: nowMs,
+        p50LatencyMs: Math.round(p50.point.value * 1000),
+        p95LatencyMs: Math.round(p95.point.value * 1000),
+        errorRatePct: rps > 0 ? Number(((errorsPerSecond / rps) * 100).toFixed(3)) : 0,
+        rps: Number(rps.toFixed(2)),
+      },
+    };
+  });
+}

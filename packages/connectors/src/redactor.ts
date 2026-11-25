@@ -6,8 +6,11 @@ export interface RedactionOptions {
 const DEFAULT_MAX_BYTES = 16_384;
 
 const BUILTIN_PATTERNS: ReadonlyArray<{ readonly kind: string; readonly pattern: RegExp }> = [
-  // Authorization headers (Bearer, Basic, Token)
-  { kind: "auth_header", pattern: /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]+=*\b/gi },
+  // Authorization headers: anything after an explicit `Authorization:` name, whatever its length.
+  { kind: "auth_header", pattern: /\b(proxy-)?authorization\s*[:=]\s*["']?[^\s"',;]+(\s+[^\s"',;]+)?/gi },
+  // A bare scheme followed by something credential-shaped. The length floor keeps ordinary
+  // prose such as "token expired" or "basic auth" readable.
+  { kind: "auth_header", pattern: /\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/-]{16,}=*/gi },
   // JWTs
   { kind: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   // AWS access key IDs & secret access keys

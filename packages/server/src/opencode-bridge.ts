@@ -116,7 +116,17 @@ export function compileSessionPermissions(
 export function makeOpenCodeExternalLayer(options: {
   readonly serviceUrl: string;
   readonly mode: "live" | "demo";
+  /** Service token, sent as a bearer credential. Defaults to `OPENCODE_TOKEN`. */
+  readonly authToken?: string;
 }) {
+  // Routes and bodies follow the generated `@opencode/client` 2.4.1 contract:
+  // `POST /api/session` takes `location.directory`, and a permission is answered at
+  // `/api/session/{id}/permission/{requestID}/reply` with `{ decision }`.
+  const token = options.authToken ?? process.env.OPENCODE_TOKEN;
+  const jsonHeaders = (): Record<string, string> => ({
+    "content-type": "application/json",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  });
   return OpenCodeExternal.toLayer(
     Effect.succeed({
       createSession: ({ sessionId, agent, directory, title, permissions }) =>
@@ -127,12 +137,12 @@ export function makeOpenCodeExternalLayer(options: {
             }
             const resp = await fetch(`${options.serviceUrl}/api/session`, {
               method: "POST",
-              headers: { "content-type": "application/json" },
+              headers: jsonHeaders(),
               body: JSON.stringify({
                 id: sessionId,
                 agent,
                 title,
-                directory,
+                location: { directory },
                 permissions,
               }),
               signal: AbortSignal.timeout(8_000),
@@ -158,7 +168,7 @@ export function makeOpenCodeExternalLayer(options: {
               `${options.serviceUrl}/api/session/${encodeURIComponent(sessionId)}/prompt`,
               {
                 method: "POST",
-                headers: { "content-type": "application/json" },
+                headers: jsonHeaders(),
                 body: JSON.stringify({ text, delivery }),
                 signal: AbortSignal.timeout(8_000),
               },
@@ -181,11 +191,11 @@ export function makeOpenCodeExternalLayer(options: {
           try: async () => {
             if (options.mode === "demo") return { replied: true };
             const resp = await fetch(
-              `${options.serviceUrl}/api/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(requestId)}`,
+              `${options.serviceUrl}/api/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}/reply`,
               {
                 method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ response: decision }),
+                headers: jsonHeaders(),
+                body: JSON.stringify({ decision }),
                 signal: AbortSignal.timeout(8_000),
               },
             );
@@ -208,9 +218,12 @@ export function makeOpenCodeExternalLayer(options: {
             if (options.mode === "demo") {
               return { directory, branch };
             }
+            // Known gap: the 2.4.1 contract expects `{ projectID, from, branch, directory }`.
+            // Resolving a project id from `repoPath` is not implemented, so a live service
+            // will reject this call until the agent runner lands.
             const resp = await fetch(`${options.serviceUrl}/api/worktree`, {
               method: "POST",
-              headers: { "content-type": "application/json" },
+              headers: jsonHeaders(),
               body: JSON.stringify({ directory, branch, baseRef, projectPath: repoPath }),
               signal: AbortSignal.timeout(15_000),
             });
@@ -233,7 +246,7 @@ export function makeOpenCodeExternalLayer(options: {
             if (options.mode === "demo") return { interrupted: true };
             await fetch(
               `${options.serviceUrl}/api/session/${encodeURIComponent(sessionId)}/interrupt`,
-              { method: "POST", signal: AbortSignal.timeout(5_000) },
+              { method: "POST", headers: jsonHeaders(), signal: AbortSignal.timeout(5_000) },
             );
             return { interrupted: true };
           },

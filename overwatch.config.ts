@@ -1,9 +1,15 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import { defineConfig } from "@overwatch/domain/config";
+
+// The demo apps all point at this repository, wherever it is checked out and whichever
+// directory the daemon is started from.
+const repoRoot = import.meta.dir;
 
 export default defineConfig({
   mode: process.env.OVERWATCH_MODE === "live" ? "live" : "demo",
   opencode: {
-    binaryPath: process.env.OPENCODE_BIN ?? "/Users/brandon/.opencode/bin/opencode",
+    binaryPath: process.env.OPENCODE_BIN ?? path.join(os.homedir(), ".opencode", "bin", "opencode"),
     minVersion: "2.4.1",
     serviceUrl: process.env.OPENCODE_URL ?? "http://127.0.0.1:4096",
     models: {
@@ -26,7 +32,7 @@ export default defineConfig({
     {
       id: "checkout-api",
       name: "Checkout API",
-      repoPath: process.cwd(),
+      repoPath: repoRoot,
       githubRepo: "brandonbryant12/overwatch",
       defaultBranch: "main",
       worktreeSetup: ["bun install --frozen-lockfile"],
@@ -93,7 +99,7 @@ export default defineConfig({
     {
       id: "billing-worker",
       name: "Billing Worker",
-      repoPath: process.cwd(),
+      repoPath: repoRoot,
       githubRepo: "brandonbryant12/overwatch",
       defaultBranch: "main",
       worktreeSetup: ["bun install --frozen-lockfile"],
@@ -129,7 +135,7 @@ export default defineConfig({
     {
       id: "identity-edge",
       name: "Identity Edge",
-      repoPath: process.cwd(),
+      repoPath: repoRoot,
       githubRepo: "brandonbryant12/overwatch",
       defaultBranch: "main",
       worktreeSetup: ["bun install --frozen-lockfile"],
@@ -157,7 +163,7 @@ export default defineConfig({
     {
       id: "ledger-ingest",
       name: "Ledger Ingest",
-      repoPath: process.cwd(),
+      repoPath: repoRoot,
       githubRepo: "brandonbryant12/overwatch",
       defaultBranch: "main",
       worktreeSetup: ["bun install --frozen-lockfile"],

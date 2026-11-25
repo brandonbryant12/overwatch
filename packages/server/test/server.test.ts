@@ -16,7 +16,7 @@ describe("Overwatch Daemon, OpenCode Permissions & Sleep-Native WakeCoordinator"
     const handoff = buildSessionHandoff({
       serviceUrl: "http://127.0.0.1:4096",
       sessionId: sid,
-      locationDir: "/Users/brandon/Development/overwatch",
+      locationDir: "/srv/repos/checkout-api",
     });
     expect(handoff.cliCommand).toContain(`--session ${sid}`);
     expect(handoff.desktopDeepLink).toContain("opencode://open-project?directory=");

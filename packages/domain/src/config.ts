@@ -38,6 +38,17 @@ export const DatadogEnvConfigSchema = Schema.Struct({
   indexes: Schema.Array(Schema.String),
   service: Schema.String,
   env: Schema.String,
+  /** APM span name the service reports under, as in `trace.<apmOperation>.hits`. Default `http.request`. */
+  apmOperation: Schema.optional(Schema.String),
+  /** Full metric queries, for services whose metrics do not follow the APM naming convention. */
+  metricQueries: Schema.optional(
+    Schema.Struct({
+      p50LatencySeconds: Schema.optional(Schema.String),
+      p95LatencySeconds: Schema.optional(Schema.String),
+      hitsPerSecond: Schema.optional(Schema.String),
+      errorsPerSecond: Schema.optional(Schema.String),
+    }),
+  ),
 });
 
 export const JenkinsEnvConfigSchema = Schema.Struct({
