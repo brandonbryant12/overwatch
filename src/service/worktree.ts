@@ -57,14 +57,28 @@ export async function codeForNewSession(
     mkdirSync(path, { recursive: true });
     return { path, commit: null, deployed: false, note: `No code is available: the checkout's commit could not be read (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
   }
+  // A directory is the commit's code only when git says so: its HEAD is that commit and no tracked file differs. A
+  // directory that exists is not taken on trust; one that fails the check is removed and made again.
   const path = join(root, short(commit));
-  if (!existsSync(path)) {
+  const isCommit = async () =>
+    existsSync(path) &&
+    (await git(ports.exec, path, ["rev-parse", "--verify", "HEAD^{commit}"]).catch(() => "")) === commit &&
+    (await git(ports.exec, path, ["status", "--porcelain", "--untracked-files=no"]).catch(() => "dirty")) === "";
+  if (!(await isCommit())) {
     try {
+      if (existsSync(path)) {
+        await git(ports.exec, checkout, ["worktree", "remove", "--force", path]).catch(() => undefined);
+        rmSync(path, { recursive: true, force: true });
+        await git(ports.exec, checkout, ["worktree", "prune"]).catch(() => undefined);
+      }
       mkdirSync(root, { recursive: true });
       await git(ports.exec, checkout, ["worktree", "add", "--detach", path, commit]);
+      if (!(await isCommit())) throw new Error(`the worktree at ${path} is not at ${short(commit)}`);
     } catch (error) {
-      mkdirSync(path, { recursive: true });
-      return { path, commit: null, deployed: false, note: `No code is available: the worktree could not be made (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
+      rmSync(path, { recursive: true, force: true });
+      const fallback = join(root, "no-code");
+      mkdirSync(fallback, { recursive: true });
+      return { path: fallback, commit: null, deployed: false, note: `No code is available: the worktree could not be made (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
     }
   }
   await ports.atomically((db) =>
