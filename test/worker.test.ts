@@ -24,6 +24,7 @@ const run: PendingRun = {
   status: "requested",
   nudges: [],
   at: 0,
+  sentAt: null,
 };
 
 function harness() {
@@ -59,7 +60,7 @@ function harness() {
     markSent: async () => {
       calls.push("sent");
       status = "sent";
-      pending = { ...pending, status: "sent" };
+      pending = { ...pending, status: "sent", sentAt: now };
     },
     adopt: async () => undefined,
     nudge: async (_, id) => void (pending = { ...pending, nudges: [...pending.nudges, id] }),

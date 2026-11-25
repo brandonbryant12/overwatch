@@ -223,7 +223,10 @@ export const PendingRun = Schema.Struct({
   handoff: Schema.NullOr(Handoff),
   status: RunStatus,
   nudges: Schema.Array(Schema.String),
+  /** When the run was asked for. */
   at: Schema.Number,
+  /** When its prompt was sent to OpenCode: its time limit counts from here, not from when it was asked for. */
+  sentAt: Schema.NullOr(Schema.Number),
 });
 export type PendingRun = typeof PendingRun.Type;
 export const RUNS = "runs";
@@ -234,6 +237,8 @@ const updateRun = (v: { runs: ReadonlyArray<PendingRun> }, id: string, update: (
 
 export class PendingRuns extends Domain.View("PendingRuns", {
   from: [Run],
+  // 1: runs carry sentAt.
+  version: 1,
   key: Schema.String,
   keyOf: {
     RunRequested: () => RUNS,
@@ -264,10 +269,11 @@ export class PendingRuns extends Domain.View("PendingRuns", {
           status: "requested" as const,
           nudges: [],
           at: e.at,
+          sentAt: null,
         },
       ],
     }),
-    RunSent: (v, _e, { source }) => updateRun(v, source.id, (r) => ({ ...r, status: "sent" as const })),
+    RunSent: (v, e, { source }) => updateRun(v, source.id, (r) => ({ ...r, status: "sent" as const, sentAt: e.at })),
     RunNudged: (v, e, { source }) => updateRun(v, source.id, (r) => ({ ...r, nudges: [...r.nudges, e.messageId] })),
     RunCompleted: (v, _e, { source }) => ({ runs: v.runs.filter((r) => r.runId !== source.id) }),
     RunFailed: (v, _e, { source }) => ({ runs: v.runs.filter((r) => r.runId !== source.id) }),

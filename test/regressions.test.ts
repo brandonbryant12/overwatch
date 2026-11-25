@@ -219,3 +219,49 @@ describe("A5. restore never replaces a good database with a bad one", () => {
     restore(good, db);
   });
 });
+
+describe("A6. time spent waiting for OpenCode does not count against a run", () => {
+  test("a run requested while OpenCode was closed gets its whole time limit once it is sent", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { createServiceTables } = await import("../src/service/tables.ts");
+    const { makeWorker } = await import("../src/service/worker.ts");
+    const { messageIdOf } = await import("../src/domain/ids.ts");
+    const db = new DatabaseSync(":memory:");
+    createServiceTables(db);
+    const thread = ThreadId.make("thr_t");
+    let now = 0;
+    let up = false;
+    let status = "requested";
+    const calls: string[] = [];
+    let pending: Record<string, unknown> = { runId: RunId.make("run_t"), threadId: thread, subject: IncidentId.make("inc_t"), promptId: "p", mode: "investigate", sessionId: "ses_t", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: "why?", origin: "page", handoff: null, status: "requested", nudges: [], at: 0, sentAt: null };
+    const worker = makeWorker({
+      opencode: { connect: async () => (up ? "x" : undefined), createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, userMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => void calls.push("interrupt"), answer: async () => undefined } as never,
+      atomically: async (work: (d: typeof db) => unknown) => work(db),
+      pendingRuns: async () => [pending] as never,
+      incidentPage: async () => null,
+      checkoutOf: () => undefined,
+      worktree: async () => "/nonexistent",
+      runStatus: async () => status,
+      markSent: async () => {
+        status = "sent";
+        pending = { ...pending, status: "sent", sentAt: now };
+      },
+      adopt: async () => undefined,
+      nudge: async () => undefined,
+      fail: async (_: string, reason: string) => void calls.push(`fail: ${reason}`),
+      now: () => now,
+      runTimeoutMs: 60_000,
+      log: () => undefined,
+    } as never);
+    await worker.tick();
+    now = 120_000; // two minutes with OpenCode closed
+    up = true;
+    await worker.tick(); // sent now
+    now = 150_000;
+    await worker.tick(); // thirty seconds into its turn
+    expect(calls).toEqual([]);
+    now = 190_000;
+    await worker.tick(); // seventy seconds after it was sent
+    expect(calls).toEqual(["interrupt", "fail: no finding within 1 minutes"]);
+  });
+});

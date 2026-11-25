@@ -163,7 +163,8 @@ export function makeWorker(ports: WorkerPorts) {
     }
     stalledSince.delete(run.runId);
     if (state.kind === "running") {
-      if (ports.now() - run.at > ports.runTimeoutMs) {
+      // Counted from when the prompt was sent: time spent waiting for OpenCode to open is not the run's.
+      if (run.sentAt !== null && ports.now() - run.sentAt > ports.runTimeoutMs) {
         await ports.opencode.interrupt(run.sessionId).catch(() => undefined);
         await ports.fail(run.runId, `no finding within ${Math.round(ports.runTimeoutMs / 60_000)} minutes`);
       }
