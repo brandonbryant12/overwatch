@@ -463,3 +463,33 @@ describe("9. the page uses the tier the service reports, not the environment's n
     expect(app.visibleInbox({ ...model, status: null, envFilter: "prod" })).toHaveLength(2);
   });
 });
+
+describe("11. rows read back are decoded with a schema", () => {
+  test("a code_deployed that is not 0 or 1, or a metric state nobody writes, is an error naming the table, not a quiet false or a healthy chip", async () => {
+    const { testService } = await import("./fixtures/service.ts");
+    const { service } = await testService();
+    try {
+      await service.atomically((db) =>
+        db
+          .prepare("INSERT INTO run_tokens (token, run_id, session_id, thread_id, subject, role, created_at, code_path, code_commit, code_deployed, code_note) VALUES ('tok', 'run_t', 'ses_t', 'thr_t', 'inc_t', 'investigator', 0, '/w', 'abc', 'yes', 'n')")
+          .run(),
+      );
+      const basis = await service.mcpPorts.codeBasis("run_t").then(
+        (value) => ({ value }),
+        (error: Error) => ({ error: error.message }),
+      );
+      expect((basis as { error?: string }).error ?? "decoded").toContain("run_tokens");
+      expect((basis as { error?: string }).error ?? "decoded").toContain("code_deployed");
+      await service.atomically((db) =>
+        db.prepare("INSERT INTO metric_state (watcher, source, metric, state, observed, limit_value, sampled_at, checked_at) VALUES ('shop-api/production', 'pods', 'not_ready_pods', 'fine', 0, 1, 0, 9e15)").run(),
+      );
+      const status = await service.status().then(
+        () => "answered",
+        (error: Error) => error.message,
+      );
+      expect(status).toContain("metric_state");
+    } finally {
+      await service.stop();
+    }
+  });
+});

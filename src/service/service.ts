@@ -34,6 +34,7 @@ import { SearchStore } from "../domain/search.ts";
 import { IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
 import { ConfigureWatcher, RecordGap, Watcher } from "../domain/watcher.ts";
 import { layerSqlite, SqliteHost } from "../host/sqlite.ts";
+import { CapacityRow, CheckpointRow, CodeBasisRow, CodeRow, MetricStateRow, WatcherRunRow } from "./rows.ts";
 import { runWatcher, type CollectorPorts, type WatcherRunSummary } from "./collector.ts";
 import type { ServiceConfig } from "./config.ts";
 import { mcpLayer, type McpPorts } from "./mcp.ts";
@@ -288,8 +289,10 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     const deployedCommit = checkout && deploy?.ref ? await resolveCommit(exec, checkout, deploy.ref) : undefined;
     const earlier = (sql: string, ...args: string[]) =>
       read((db) => {
-        const row = db.prepare(sql).get(...args) as { code_path: string; code_commit: string | null; code_deployed: number; code_note: string | null } | undefined;
-        return row ? { path: row.code_path, commit: row.code_commit, deployed: row.code_deployed === 1, note: row.code_note ?? "" } : undefined;
+        const found = db.prepare(sql).get(...args);
+        if (!found) return undefined;
+        const row = CodeBasisRow(found);
+        return { path: row.code_path, commit: row.code_commit, deployed: row.code_deployed === 1, note: row.code_note ?? "" };
       });
     const sessionBefore = run.newSession ? undefined : await earlier("SELECT code_path, code_commit, code_deployed, code_note FROM run_tokens WHERE session_id = ? AND code_path IS NOT NULL ORDER BY created_at DESC LIMIT 1", run.sessionId);
     const threadBefore = await earlier("SELECT code_path, code_commit, code_deployed, code_note FROM run_tokens WHERE thread_id = ? AND code_path IS NOT NULL ORDER BY created_at DESC LIMIT 1", run.threadId);
@@ -314,7 +317,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     lines.push(basis.note);
     if (page) {
       const capacity = await read((db) =>
-        db.prepare("SELECT source, text, at FROM capacity WHERE watcher = ? ORDER BY source").all(`${page.app}/${page.environment}`) as Array<{ source: string; text: string; at: number }>,
+        db.prepare("SELECT source, text, at FROM capacity WHERE watcher = ? ORDER BY source").all(`${page.app}/${page.environment}`).map(CapacityRow),
       );
       for (const c of capacity) lines.push(`Capacity from ${c.source} at the last check (${new Date(c.at).toISOString().replace(/\.\d{3}Z$/, "Z")}): ${c.text}`);
     }
@@ -405,9 +408,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
         worktree: (runId) => read((db) => (db.prepare("SELECT code_path FROM run_tokens WHERE run_id = ?").get(runId) as { code_path: string | null } | undefined)?.code_path ?? undefined),
         codeBasis: (runId) =>
           read((db) => {
-            const row = db.prepare("SELECT code_commit, code_deployed, code_note FROM run_tokens WHERE run_id = ?").get(runId) as
-              | { code_commit: string | null; code_deployed: number; code_note: string | null }
-              | undefined;
+            const found = db.prepare("SELECT code_commit, code_deployed, code_note FROM run_tokens WHERE run_id = ?").get(runId);
+            const row = found ? CodeRow(found) : undefined;
             return row?.code_note ? { commit: row.code_commit, deployed: row.code_deployed === 1, note: row.code_note } : undefined;
           }),
         complete: (runId, sessionId, finding) => domain.runCommand(runId, new CompleteRun({ sessionId, finding }), `complete_${runId}`),
@@ -429,9 +431,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
 
   const status = async () => {
     const watchers = await read((db) =>
-      db.prepare("SELECT watcher, next_at, last_started, last_finished, last_error, last_summary FROM watcher_runs ORDER BY watcher").all(),
+      db.prepare("SELECT watcher, next_at, last_started, last_finished, last_error, last_summary FROM watcher_runs ORDER BY watcher").all().map(WatcherRunRow),
     );
-    const checkpoints = await read((db) => db.prepare("SELECT watcher, source, at FROM checkpoints ORDER BY watcher, source").all());
+    const checkpoints = await read((db) => db.prepare("SELECT watcher, source, at FROM checkpoints ORDER BY watcher, source").all().map(CheckpointRow));
     const w = worker.status();
     const value: ServiceStatus = {
       name: "overwatch",
@@ -439,17 +441,19 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       apiVersion: API_VERSION,
       configErrors: config.errors,
       opencode: { connected: w.opencode !== undefined, url: w.opencode ?? null, checkedAt: w.checkedAt, waitingRuns: w.waiting, runningRuns: w.running },
-      watchers: watchers.map((row) => ({ ...row })) as unknown as ServiceStatus["watchers"],
-      checkpoints: checkpoints.map((row) => ({ ...row })) as unknown as ServiceStatus["checkpoints"],
+      watchers,
+      checkpoints,
       environments: await read((db) =>
         options.watchers.map((w) => {
           const env = options.apps[w.app]!.environments[w.environment]!;
-          const at = w.sources.map((source) => (db.prepare("SELECT at FROM checkpoints WHERE watcher = ? AND source = ?").get(w.id, source) as { at: number } | undefined)?.at);
+          const at = w.sources.map((source) => {
+            const found = db.prepare("SELECT watcher, source, at FROM checkpoints WHERE watcher = ? AND source = ?").get(w.id, source);
+            return found ? CheckpointRow(found).at : undefined;
+          });
           const runRow = db.prepare("SELECT last_error FROM watcher_runs WHERE watcher = ?").get(w.id) as { last_error: string | null } | undefined;
           const reading = (metric: string) => {
-            const row = db.prepare("SELECT state, observed, limit_value, sampled_at FROM metric_state WHERE watcher = ? AND metric = ? ORDER BY checked_at DESC LIMIT 1").get(w.id, metric) as
-              | { state: string; observed: number | null; limit_value: number | null; sampled_at: number | null }
-              | undefined;
+            const found = db.prepare("SELECT state, observed, limit_value, sampled_at FROM metric_state WHERE watcher = ? AND metric = ? ORDER BY checked_at DESC LIMIT 1").get(w.id, metric);
+            const row = found ? MetricStateRow(found) : undefined;
             return row ? { value: row.observed, limit: row.limit_value, state: row.state, sampledAt: row.sampled_at } : null;
           };
           return {

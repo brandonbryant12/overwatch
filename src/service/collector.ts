@@ -7,6 +7,7 @@
  * Only what happened becomes an event: a run that finds nothing writes rows to the coverage table and nothing to the
  * journal. A stretch the lookback cap cut off is a gap, recorded on the Watcher.
  */
+import { MetricPointRow, WindowCheckpointRow } from "./rows.ts";
 import type { DatabaseSync } from "node:sqlite";
 import type { WatcherConfig } from "../collect/options.ts";
 import { sourceContext, type Runtime } from "../collect/runtime.ts";
@@ -94,7 +95,7 @@ export function evaluateMetrics(
       missing.push(metric);
       continue;
     }
-    const stored = db.prepare("SELECT at, value FROM metric_points WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?").all(input.watcher, input.source, metric, SERIES_POINTS) as Array<{ at: number; value: number | null }>;
+    const stored = db.prepare("SELECT at, value FROM metric_points WHERE watcher = ? AND source = ? AND metric = ? ORDER BY at DESC LIMIT ?").all(input.watcher, input.source, metric, SERIES_POINTS).map(MetricPointRow);
     const all = [...stored.reverse(), ...fresh.filter((f) => !stored.some((s) => s.at === f.at)).map((f) => ({ at: f.at, value: f.value as number | null }))].sort((a, b) => a.at - b.at).slice(-SERIES_POINTS);
     // Consecutive means consecutive measurements: only the samples since the last gap count.
     const lastGap = all.findLastIndex((p) => p.value === null);
@@ -173,7 +174,10 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       continue;
     }
     const stored = await ports.read(
-      (db) => db.prepare("SELECT at, seen FROM checkpoints WHERE watcher = ? AND source = ?").get(watcher.id, source) as { at: number; seen: string } | undefined,
+      (db) => {
+        const found = db.prepare("SELECT at, seen FROM checkpoints WHERE watcher = ? AND source = ?").get(watcher.id, source);
+        return found ? WindowCheckpointRow(found) : undefined;
+      },
     );
     let seen: Seen = stored ? (JSON.parse(stored.seen) as Seen) : {};
     const plan = planWindows({ now, ...(stored ? { checkpoint: stored.at } : {}), ...options.lookback });

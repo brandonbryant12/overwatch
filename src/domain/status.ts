@@ -16,10 +16,11 @@ export type WatcherStatus = typeof WatcherStatus.Type;
 export const Checkpoint = Schema.Struct({ watcher: Schema.String, source: Schema.String, at: Schema.Number });
 
 /** A measured value and what its rule made of it: breach, clear, pending, no_data, measured, or unknown (not sampled by the last check). */
+export const MetricState = Schema.Literals(["breach", "clear", "pending", "no_data", "measured", "unknown"]);
 export const MetricReading = Schema.Struct({
   value: Schema.NullOr(Schema.Number),
   limit: Schema.NullOr(Schema.Number),
-  state: Schema.String,
+  state: MetricState,
   sampledAt: Schema.NullOr(Schema.Number),
 });
 export type MetricReading = typeof MetricReading.Type;
