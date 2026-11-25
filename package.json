@@ -3,9 +3,6 @@
   "version": "0.2.0",
   "description": "OpenCode 2 plugin that watches your apps' logs and telemetry since it last checked, opens incidents, investigates them with agents, and reports tersely.",
   "type": "module",
-  "workspaces": [
-    "packages/*"
-  ],
   "exports": {
     ".": "./src/index.ts"
   },
@@ -30,18 +27,11 @@
     "typecheck": "tsc --noEmit",
     "smoke": "bun scripts/smoke.ts"
   },
-  "dependencies": {
-    "@alchemy.run/domain": "2.0.0-beta.87",
-    "@opencode/client": "2.4.1",
-    "@opencode/protocol": "2.4.1",
-    "@opencode/schema": "2.4.1",
-    "@overwatch/domain": "workspace:*",
-    "effect": "4.1.4"
-  },
   "devDependencies": {
+    "@opencode/client": "2.4.1",
+    "@opencode/plugin": "2.4.1",
     "@types/bun": "latest",
     "fast-check": "^3.23.2",
-    "typescript": "^5.8.2",
-    "@opencode/plugin": "2.4.1"
+    "typescript": "^5.8.2"
   }
 }
