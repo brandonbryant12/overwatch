@@ -83,7 +83,7 @@ describe("the worker", () => {
     await h.worker.tick();
     expect(h.calls).toEqual(["create ses_owx overwatch-investigator", "create ses_owx overwatch-investigator", `prompt ${run.messageId}`, "sent"]);
     expect((h.db.prepare("SELECT token FROM run_tokens WHERE run_id = 'run_x'").get() as { token: string }).token).toBe(token);
-    expect(h.db.prepare("SELECT source FROM shown WHERE session_id = 'ses_owx'").all().map((r) => r.source)).toEqual(["brief"]);
+    expect(h.db.prepare("SELECT source FROM shown WHERE session_id = 'ses_owx'").all().map((r) => r.source)).toEqual(["brief:question"]);
   });
 
   test("idle without a finding: asked once more, then the run fails with the reason", async () => {
