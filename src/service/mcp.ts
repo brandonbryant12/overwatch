@@ -174,7 +174,8 @@ export async function queryTelemetry(
       threadId: auth.row.thread_id,
       runId: auth.row.run_id,
       source: input.source,
-      text: `query_telemetry ${input.source} ${iso(window.since)} to ${iso(window.until)} ${JSON.stringify(input.args ?? {})}\n${text}`,
+      // Only the output: what was asked for (selectors, names, the window) is not something the source said.
+      text,
       at: ports.now(),
     }),
   );

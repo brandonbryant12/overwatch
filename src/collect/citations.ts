@@ -11,8 +11,8 @@ import type { Finding } from "./report.ts";
  * - A quote attributed to a telemetry source must be in something that source returned to this session: a
  *   `query_telemetry` result, or an excerpt of that source in its context pack. Other parts of the context pack
  *   (Overwatch's description, the owner's question, earlier conclusions) are recorded as shown but are not evidence.
- * - A quote attributed to anything else (a skill, a tool Overwatch cannot see) cannot be checked. It is kept and
- *   the report marks it "not verified".
+ * - A quote attributed to anything else (a skill, a tool Overwatch cannot see, a mistyped name) cannot be checked.
+ *   It is kept and marked not verified, even if the same words appear somewhere the session was shown.
  *
  * The first three are contradictions when they fail, and the finding is sent back with what was wrong.
  */
@@ -116,8 +116,9 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
         );
       }
     } else {
-      // Not attributed to something Overwatch can read. Still worth a look in everything it did see.
-      verified = input.shown.some((shown) => quoted(item.quote, shown.text)) || (locationFile !== undefined && quoted(item.quote, locationFile));
+      // Not a configured source and not a file: Overwatch cannot tell where it came from, so it is not verified,
+      // whatever else the session was shown. It is kept, and shown as unverified.
+      verified = false;
     }
     evidence.push({ source: item.source, quote: item.quote, verified });
   }
