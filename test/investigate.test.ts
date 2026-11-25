@@ -22,6 +22,10 @@ function appRepo(name: string) {
   execFileSync("git", ["init", "--bare", "-b", "main", remote]);
   execFileSync("git", ["clone", "-q", remote, checkout], { stdio: "ignore" });
   git(checkout, "checkout", "-q", "-b", "main");
+  // Fixes commit with the repository's own identity, as they would on the user's machine.
+  for (const [key, value] of [["user.name", "Test"], ["user.email", "test@example.invalid"], ["commit.gpgsign", "false"]]) {
+    git(checkout, "config", key!, value!);
+  }
   writeFileSync(join(checkout, "payments.ts"), "export const TIMEOUT_MS = 300\n");
   git(checkout, "add", ".");
   git(checkout, "commit", "-q", "-m", "deployed");
@@ -179,6 +183,7 @@ describe("fixes", () => {
     await investigator.idle();
 
     const record = (await rt.kv.get(keys.investigation(id))) as InvestigationRecord;
+    expect(record.fixNote).toBe("draft pull request opened");
     expect(record.pullRequest).toBe("https://example.invalid/pr/1");
     expect(record.report).toContain("Draft PR: https://example.invalid/pr/1");
     const gh = exec.calls.filter((c) => c.command === "gh");
