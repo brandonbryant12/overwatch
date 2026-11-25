@@ -122,8 +122,7 @@ describe("A3. a quote attributed to a source verifies only against what that sou
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [{ runId: RunId.make("run_c"), threadId: thread, subject: page.incidentId, promptId: "p", mode: "investigate", sessionId: "ses_c", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: question, origin: "page", handoff: null, status: "requested" as const, nudges: [], at: 0 }] as never,
       incidentPage: async () => page as never,
-      checkoutOf: () => undefined,
-      worktree: async () => "/nonexistent",
+      prepareCode: async () => ({ directory: "/nonexistent", lines: [] }),
       runStatus: async () => status,
       markSent: async () => void (status = "sent"),
       adopt: async () => undefined,
@@ -239,8 +238,7 @@ describe("A6. time spent waiting for OpenCode does not count against a run", () 
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [pending] as never,
       incidentPage: async () => null,
-      checkoutOf: () => undefined,
-      worktree: async () => "/nonexistent",
+      prepareCode: async () => ({ directory: "/nonexistent", lines: [] }),
       runStatus: async () => status,
       markSent: async () => {
         status = "sent";
@@ -412,4 +410,99 @@ describe("A9. read-only is enforced by what is allowed, not by what is forbidden
       expect(() => gitHistoryArgs(bad)).toThrow();
     }
   });
+});
+
+describe("A10/B2. code evidence comes from the deployed revision, or the brief and the finding say it does not", () => {
+  const setupRepo = async () => {
+    const { execFileSync } = await import("node:child_process");
+    const { writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tempDir } = await import("./fixtures/support.ts");
+    const repo = tempDir("app");
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd: repo, encoding: "utf8" }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "payments.ts"), "export const TIMEOUT_MS = 300\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "deployed: timeout 300");
+    const deployed = git("rev-parse", "HEAD");
+    writeFileSync(join(repo, "payments.ts"), "export const TIMEOUT_MS = 3000\n");
+    git("commit", "-q", "-am", "not deployed yet: timeout 3000");
+    return { repo, deployed, head: git("rev-parse", "HEAD") };
+  };
+  const recording = () => {
+    const prompts: string[] = [];
+    return {
+      prompts,
+      port: {
+        connect: async () => "http://opencode.test",
+        createSession: async () => undefined,
+        prompt: async (i: { text: string }) => void prompts.push(i.text),
+        synthetic: async () => undefined,
+        userMessages: async () => [],
+        promptState: async () => ({ kind: "running" as const }),
+        interrupt: async () => undefined,
+        answer: async () => undefined,
+      },
+    };
+  };
+
+  for (const known of [true, false]) {
+    test(known ? "the worktree is at the deployed commit, and the brief says what is deployed" : "an unresolvable deployed revision is said in the brief and recorded on the finding", async () => {
+      const { readFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const { fileFinding } = await import("../src/service/mcp.ts");
+      const { repo, deployed, head } = await setupRepo();
+      const oc = recording();
+      const { service, cluster, client } = await testService({
+        opencode: oc.port,
+        config: { checkout: repo, opencode: { autoInvestigate: true } },
+        cluster: { image: `registry.example/shop-api:${known ? deployed.slice(0, 12) : "v9.9.9-unknown"}` },
+      });
+      try {
+        cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+        await service.collect("shop-api/production");
+        for (let i = 0; i < 40 && oc.prompts.length === 0; i++) {
+          await service.work();
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        const prompt = oc.prompts[0] ?? "";
+        const row = await service.read((db) => db.prepare("SELECT path, commit_sha, deployed FROM worktrees").get() as { path: string; commit_sha: string | null; deployed: number });
+        if (known) {
+          expect(prompt).toContain(`Running in pods: ${deployed.slice(0, 12)}`);
+          expect(row.commit_sha).toBe(deployed);
+          expect(row.deployed).toBe(1);
+          expect(readFileSync(join(row.path, "payments.ts"), "utf8")).toContain("TIMEOUT_MS = 300\n");
+          expect(prompt).toContain(`the deployed commit ${deployed.slice(0, 12)}`);
+        } else {
+          expect(row.deployed).toBe(0);
+          expect(row.commit_sha).toBe(head);
+          expect(prompt).toContain("NOT the deployed code");
+        }
+        const token = /run token is (owt_[\w-]+)/.exec(prompt)?.[1] ?? "";
+        const sessionId = (await service.read((db) => db.prepare("SELECT session_id FROM run_tokens").get() as { session_id: string })).session_id;
+        const ports = (service as any).mcpPorts;
+        const result = await fileFinding(ports, sessionId, {
+          token,
+          finding: {
+            product: { impact: "x", affected: "x", since: "x", status: "x" },
+            engineering: { verdict: "unsure", confidence: "low", cause: "x", causeBasis: "inferred", evidence: [], notChecked: [], nextCheck: "x" },
+          },
+        });
+        expect(result).toBe("Recorded. Stop now.");
+        const incidentId = await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type='IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!);
+        const page = await (async () => {
+          for (let i = 0; i < 40; i++) {
+            const p = (await client((api) => api.IncidentPage.get(incidentId as never))) as any;
+            if (p?.findings.length) return p;
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          return undefined;
+        })();
+        expect(page.findings[0].finding.code.deployed).toBe(known);
+        expect(page.findings[0].finding.code.commit).toBe(known ? deployed : head);
+      } finally {
+        await service.stop();
+      }
+    });
+  }
 });

@@ -29,7 +29,11 @@ export const SERVICE_SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS shown_session ON shown (session_id);
   CREATE TABLE IF NOT EXISTS worktrees (
-    thread_id TEXT PRIMARY KEY, path TEXT NOT NULL, checkout TEXT, commit_sha TEXT, created_at INTEGER NOT NULL
+    thread_id TEXT PRIMARY KEY, path TEXT NOT NULL, checkout TEXT, commit_sha TEXT, created_at INTEGER NOT NULL,
+    deployed INTEGER NOT NULL DEFAULT 0, note TEXT
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS capacity (
+    watcher TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (watcher, source)
   ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS pending_reports (
     id INTEGER PRIMARY KEY, watcher TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
@@ -42,8 +46,18 @@ export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS search_terms (term TEXT NOT NULL, doc TEXT NOT NULL, PRIMARY KEY (term, doc)) WITHOUT ROWID;
 `;
 
+/** Columns added after a table was first shipped: added to databases that predate them. */
+const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
+  ["worktrees", "deployed", "INTEGER NOT NULL DEFAULT 0"],
+  ["worktrees", "note", "TEXT"],
+];
+
 export function createServiceTables(db: DatabaseSync) {
   db.exec(SERVICE_SCHEMA);
+  for (const [table, column, definition] of ADDED_COLUMNS) {
+    const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+    if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export interface ShownRow {

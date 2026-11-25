@@ -104,6 +104,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
     const scratch = new Map<string, unknown>();
     const fresh: Signal[] = [];
     let checkpoint = stored?.at;
+    let capacity: string | undefined;
     const covered: Array<WatcherRunSummary["windows"][number]> = [];
     for (const [index, window] of plan.windows.entries()) {
       const deadline = Date.now() + options.timeouts.sliceMs;
@@ -113,6 +114,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         const deduped = dedupe(result.signals, seen, options.lookback.overlapMs);
         seen = deduped.seen;
         fresh.push(...deduped.fresh);
+        if (result.capacity) capacity = redactText(result.capacity, { maxBytes: 2_000 });
         checkpoint = window.to;
         covered.push({ source, from: window.from, to: window.to, status: "ok", ...(result.notes.length ? { note: redactText(result.notes.join("; "), { maxBytes: 1000 }) } : {}) });
       } catch (error) {
@@ -163,6 +165,9 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
           checkpoint,
           JSON.stringify(pruneSeen(seen, now - SEEN_KEEP_MS)),
         );
+      }
+      if (capacity !== undefined) {
+        db.prepare("INSERT INTO capacity (watcher, source, text, at) VALUES (?, ?, ?, ?) ON CONFLICT (watcher, source) DO UPDATE SET text = excluded.text, at = excluded.at").run(watcher.id, source, capacity, now);
       }
       const insert = db.prepare("INSERT INTO coverage (watcher, source, from_at, to_at, status, note, run_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const w of covered) insert.run(watcher.id, w.source, w.from, w.to, w.status, w.note ?? null, now);

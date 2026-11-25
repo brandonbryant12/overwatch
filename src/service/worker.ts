@@ -25,8 +25,12 @@ export interface WorkerPorts {
   readonly atomically: <A>(work: (db: DatabaseSync) => A) => Promise<A>;
   readonly pendingRuns: () => Promise<ReadonlyArray<PendingRun>>;
   readonly incidentPage: (id: string) => Promise<IncidentPageState | null>;
-  readonly checkoutOf: (app: string) => string | undefined;
-  readonly worktree: (threadId: string, checkout: string | undefined) => Promise<string>;
+  /**
+   * The thread's working directory and what the brief says about the code and the environment: the deploy context
+   * (what runs, since when, what the rollout brought in), which commit the code is and whether it is the deployed one,
+   * and the latest capacity summary.
+   */
+  readonly prepareCode: (threadId: string, page: IncidentPageState | null) => Promise<{ readonly directory: string; readonly lines: ReadonlyArray<string> }>;
   /** The run's state on its aggregate, which the pending-runs view may lag. */
   readonly runStatus: (runId: string) => Promise<string | undefined>;
   readonly markSent: (runId: string) => Promise<void>;
@@ -89,8 +93,8 @@ export function makeWorker(ports: WorkerPorts) {
   const dispatch = async (run: PendingRun) => {
     const page = await ports.incidentPage(run.subject);
     if (!page) ports.log(`run ${run.runId}: incident ${run.subject} has no page yet; sending without its context`);
-    const directory = await ports.worktree(run.threadId, page ? ports.checkoutOf(page.app) : undefined);
-    const briefInput = { page, handoff: run.handoff, ask: run.text, origin: run.origin };
+    const { directory, lines } = await ports.prepareCode(run.threadId, page);
+    const briefInput = { page, handoff: run.handoff, ask: run.text, origin: run.origin, deploy: lines };
     const brief = contextPack(briefInput);
     const token = await ports.atomically((db) => {
       const t = tokenFor(db, run, ports.now());

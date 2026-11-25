@@ -53,6 +53,7 @@ async function setup() {
     runStatus: async (runId) => runs.get(runId),
     incident: async () => ({ app: "shop-api", environment: "production" }),
     worktree: async () => worktree,
+    codeBasis: async () => ({ commit: null, deployed: false, note: "test worktree" }),
     complete: async (runId) => {
       completed.push(runId);
       runs.set(runId, "completed");

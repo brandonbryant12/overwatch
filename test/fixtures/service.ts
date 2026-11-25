@@ -45,9 +45,11 @@ export function testConfig(dataDir: string, extra: Record<string, unknown> = {})
   });
 }
 
-export async function testService(options: { dataDir?: string; opencode?: OpenCodePort; deps?: Partial<ServiceDeps>; config?: Record<string, unknown> } = {}) {
+export async function testService(
+  options: { dataDir?: string; opencode?: OpenCodePort; deps?: Partial<ServiceDeps>; config?: Record<string, unknown>; cluster?: Parameters<typeof fakeCluster>[0] } = {},
+) {
   const dataDir = options.dataDir ?? tempDir("service");
-  const cluster = fakeCluster();
+  const cluster = fakeCluster(options.cluster);
   const config = testConfig(dataDir, options.config);
   if (config.errors.length) throw new Error(config.errors.join("\n"));
   const service = await startService(config, {

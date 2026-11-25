@@ -45,5 +45,7 @@ export const Finding = Schema.Struct({
     evidence: Schema.Array(CheckedEvidence),
   }),
   ruledOut: Schema.Array(Schema.String),
+  /** Which code the session read, recorded by the service: the deployed commit, another one (said why), or none. */
+  code: Schema.optionalKey(Schema.Struct({ commit: Schema.NullOr(Schema.String), deployed: Schema.Boolean, note: Schema.String })),
 });
 export type Finding = typeof Finding.Type;

@@ -48,6 +48,8 @@ export interface McpPorts {
   readonly runStatus: (runId: string) => Promise<string | undefined>;
   readonly incident: (id: string) => Promise<{ readonly app: string; readonly environment: string } | undefined>;
   readonly worktree: (threadId: string) => Promise<string | undefined>;
+  /** Which code the thread's sessions read; recorded on every finding. */
+  readonly codeBasis: (threadId: string) => Promise<{ readonly commit: string | null; readonly deployed: boolean; readonly note: string } | undefined>;
   readonly complete: (runId: string, sessionId: string, finding: Finding) => Promise<void>;
   readonly now: () => number;
 }
@@ -205,6 +207,7 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
       evidence: checked.finding.engineering.evidence.map((e) => ({ source: e.source, quote: e.quote, verified: e.verified === true })),
     },
     ruledOut: [...(finding.ruledOut ?? [])],
+    code: (await ports.codeBasis(auth.row.thread_id)) ?? { commit: null, deployed: false, note: "No code was prepared for this thread." },
   };
   await ports.complete(auth.row.run_id, sessionId!, recorded);
   return "Recorded. Stop now.";
