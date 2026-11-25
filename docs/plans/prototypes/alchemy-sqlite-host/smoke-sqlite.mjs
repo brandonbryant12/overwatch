@@ -1,0 +1,25 @@
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import { DatabaseSync } from "node:sqlite";
+import { Bank, BankApi, BigDepositsLive } from "./model.mjs";
+import { layerSqlite } from "./sqlite-host.mjs";
+const file = process.argv[2];
+const Live = Bank.layer(BigDepositsLive).pipe(Layer.provide(layerSqlite(file)));
+const program = Effect.gen(function* () {
+  const bank = yield* BankApi.clientInProcess;
+  console.log("view before:", JSON.stringify(yield* bank.Summary.get("a-1")));
+  const r = yield* bank.DepositMoney("a-1", { amount: 700 });
+  console.log("receipt:", JSON.stringify(r));
+  const again = yield* bank.DepositMoney("a-1", { amount: 700 }, { commandId: "fixed-id" });
+  const dup = yield* bank.DepositMoney("a-1", { amount: 700 }, { commandId: "fixed-id" });
+  console.log("idempotent retry same receipt:", again.version === dup.version, again.version);
+  const rej = yield* bank.DepositMoney("a-1", { amount: 70000 }).pipe(Effect.flip);
+  console.log("rejection:", rej._tag);
+  yield* Effect.sleep("500 millis");
+  console.log("view after:", JSON.stringify(yield* bank.Summary.get("a-1", { atLeast: again })));
+}).pipe(Effect.scoped, Effect.provide(Live));
+await Effect.runPromise(program).catch((e) => { console.error("ERR", e); process.exitCode = 1; });
+const db = new DatabaseSync(file);
+console.log("rows:", db.prepare("SELECT object, count(*) n FROM objects GROUP BY object").all().map((r) => `${r.object}=${r.n}`).join("  "));
+console.log("sample keys:", db.prepare("SELECT key FROM objects WHERE object LIKE '%AccountAggregate/a-1' ORDER BY key").all().map((r) => r.key).join(", "));
+process.exit();
