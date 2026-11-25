@@ -28,6 +28,8 @@ export interface WorkerPorts {
   readonly checkoutOf: (app: string) => string | undefined;
   readonly worktree: (threadId: string, checkout: string | undefined) => Promise<string>;
   readonly markSent: (runId: string) => Promise<void>;
+  /** Record a prompt the owner typed in an Overwatch session in OpenCode on that session's thread. */
+  readonly adopt: (input: { readonly threadId: string; readonly subject: string; readonly sessionId: string; readonly messageId: string; readonly text: string }) => Promise<void>;
   readonly nudge: (runId: string, messageId: string) => Promise<void>;
   readonly fail: (runId: string, reason: string) => Promise<void>;
   readonly now: () => number;
@@ -71,12 +73,20 @@ export function promptText(brief: string, token: string): string {
 export const NUDGE =
   "You have not filed a finding for this run yet. File it now with the overwatch file_finding tool, with your run token. If you found nothing, say so in the finding: unsure is a valid verdict.";
 
+export const RESUME =
+  "OpenCode restarted while you were working, and your turn was not resumed. Continue from where you left off without repeating completed work, and file your finding with the overwatch file_finding tool and your run token.";
+
+/** How long a delivered prompt may be neither running nor finished before it is nudged. */
+const STALL_MS = 15_000;
+
 export function makeWorker(ports: WorkerPorts) {
   let status: WorkerStatus = { opencode: undefined, checkedAt: 0, waiting: 0, running: 0 };
   let busy = false;
+  const stalledSince = new Map<string, number>();
 
   const dispatch = async (run: PendingRun) => {
     const page = await ports.incidentPage(run.subject);
+    if (!page) ports.log(`run ${run.runId}: incident ${run.subject} has no page yet; sending without its context`);
     const directory = await ports.worktree(run.threadId, page ? ports.checkoutOf(page.app) : undefined);
     const brief = contextPack({ page, handoff: run.handoff, ask: run.text, origin: run.origin });
     const token = await ports.atomically((db) => {
@@ -85,6 +95,18 @@ export function makeWorker(ports: WorkerPorts) {
       recordShown(db, { sessionId: run.sessionId, threadId: run.threadId, runId: run.runId, source: "brief", text: brief, at: ports.now() });
       return t;
     });
+    if (run.origin === "opencode") {
+      // The owner typed the question in this session; it is already there. The session gets this run's token.
+      await ports.opencode.synthetic({
+        sessionID: run.sessionId,
+        id: run.messageId,
+        text: `Overwatch recorded the owner's question on thread ${run.threadId}: "${run.text.slice(0, 300)}"\n\n${promptText("", token).trim()}`,
+        delivery: "queue",
+      });
+      await ports.markSent(run.runId);
+      ports.log(`run ${run.runId}: token for the owner's question sent to session ${run.sessionId}`);
+      return;
+    }
     if (run.newSession) {
       await ports.opencode.createSession({
         id: run.sessionId,
@@ -118,6 +140,23 @@ export function makeWorker(ports: WorkerPorts) {
       }
       return;
     }
+    if (state.kind === "stalled") {
+      // A managed OpenCode server resumes interrupted turns when it boots; one that does not leaves them here.
+      const since = stalledSince.get(run.runId) ?? ports.now();
+      stalledSince.set(run.runId, since);
+      if (ports.now() - since < STALL_MS) return;
+      stalledSince.delete(run.runId);
+      if (run.nudges.length > 0) {
+        await ports.fail(run.runId, "the session stopped twice without filing a finding");
+        return;
+      }
+      const messageId = messageIdOf(run.threadId, run.promptId, 1);
+      await ports.nudge(run.runId, messageId);
+      await ports.opencode.prompt({ sessionID: run.sessionId, id: messageId, text: RESUME, delivery: "queue" });
+      ports.log(`run ${run.runId}: the turn was interrupted and not resumed; asked the session to continue`);
+      return;
+    }
+    stalledSince.delete(run.runId);
     if (state.kind === "running") {
       if (ports.now() - run.at > ports.runTimeoutMs) {
         await ports.opencode.interrupt(run.sessionId).catch(() => undefined);
@@ -137,6 +176,23 @@ export function makeWorker(ports: WorkerPorts) {
     await ports.fail(run.runId, state.outcome === "failed" ? `the session failed: ${state.error ?? "no detail"}` : "the session finished twice without filing a finding");
   };
 
+  /**
+   * Prompts the owner typed in OpenCode, in a session Overwatch started, land on that session's thread. Overwatch's
+   * own messages have ids it chose (`msg_ow…`); anything else in the session is the owner's.
+   */
+  const adoptTyped = async () => {
+    const sessions = await ports.atomically(
+      (db) => db.prepare("SELECT session_id, thread_id, subject FROM run_tokens GROUP BY session_id").all() as Array<{ session_id: string; thread_id: string; subject: string }>,
+    );
+    for (const s of sessions) {
+      const messages = await ports.opencode.userMessages(s.session_id).catch(() => []);
+      for (const m of messages) {
+        if (m.id.startsWith("msg_ow")) continue;
+        await ports.adopt({ threadId: s.thread_id, subject: s.subject, sessionId: s.session_id, messageId: m.id, text: m.text });
+      }
+    }
+  };
+
   const tick = async () => {
     if (busy) return status;
     busy = true;
@@ -150,6 +206,7 @@ export function makeWorker(ports: WorkerPorts) {
         running: runs.filter((r) => r.status === "sent").length,
       };
       if (!url) return status;
+      await adoptTyped().catch((error) => ports.log(`reading sessions for the owner's prompts: ${(error as Error).message}`));
       for (const run of runs) {
         try {
           if (run.status === "requested") await dispatch(run);

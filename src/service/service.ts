@@ -23,7 +23,8 @@ import { exec as defaultExec, type Exec } from "../collect/exec.ts";
 import { configureRedaction } from "../collect/redact.ts";
 import { sleep, type Runtime } from "../collect/runtime.ts";
 import { resolveSecret } from "../collect/secrets.ts";
-import { WatcherId } from "../domain/ids.ts";
+import { IncidentId, ThreadId, WatcherId } from "../domain/ids.ts";
+import { AskThread, Thread } from "../domain/thread.ts";
 import { Incident, ReportSignal } from "../domain/incident.ts";
 import { API_VERSION, handlers, Overwatch, OverwatchApi } from "../domain/model.ts";
 import { CompleteRun, FailRun, MarkRunSent, NudgeRun, Run } from "../domain/run.ts";
@@ -148,13 +149,18 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
           return Option.match(yield* views.get(RUNS), { onNone: () => [], onSome: (v) => v.runs });
         }),
       ),
-    incidentPage: (id: string) =>
-      run(
+    /** The incident's page, at least as new as its last commit in the journal: views are eventually consistent. */
+    incidentPage: async (id: string) => {
+      const stream = `Incident/${id}`;
+      const version = await read((db) => (db.prepare("SELECT max(version) AS v FROM journal WHERE stream = ?").get(stream) as { v: number | null }).v);
+      return run(
         Effect.gen(function* () {
           const pages = yield* IncidentPage;
-          return Option.getOrNull(yield* pages.get(Incident.ref(id as never))) ?? null;
+          const options = version ? { atLeast: { stream, version }, timeout: "15 seconds" as const } : {};
+          return Option.getOrNull(yield* pages.get(Incident.ref(id as never), options).pipe(Effect.orElseSucceed(() => Option.none()))) ?? null;
         }),
-      ),
+      );
+    },
     incident: (id: string) =>
       run(
         Effect.gen(function* () {
@@ -244,6 +250,29 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     checkoutOf: (app) => options.apps[app]?.checkout,
     worktree: (threadId, checkout) => ensureWorktree(worktreePorts, threadId, checkout),
     markSent: (runId) => domain.runCommand(runId, new MarkRunSent({}), `sent_${runId}`),
+    adopt: (input) =>
+      run(
+        Effect.gen(function* () {
+          const threads = yield* Thread;
+          const page = yield* Effect.promise(() => domain.incidentPage(input.subject));
+          yield* threads
+            .send(
+              Thread.ref(ThreadId.make(input.threadId)),
+              new AskThread({
+                subject: IncidentId.make(input.subject),
+                title: page?.title ?? input.subject,
+                promptId: input.messageId,
+                text: input.text,
+                mode: "investigate",
+                origin: "opencode",
+                override: "here",
+                inSession: input.sessionId,
+              }),
+              { commandId: `adopt_${input.messageId}` },
+            )
+            .pipe(Effect.catchTag("ThreadClosed", () => Effect.void));
+        }),
+      ),
     nudge: (runId, messageId) => domain.runCommand(runId, new NudgeRun({ messageId }), `nudge_${messageId}`),
     fail: (runId, reason) => domain.runCommand(runId, new FailRun({ reason }), `fail_${runId}`),
     now: Date.now,

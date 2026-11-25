@@ -63,6 +63,8 @@ export class AskThread extends Domain.Command("AskThread", {
     origin: Origin,
     override: Override,
     hold: Schema.optionalKey(Schema.Boolean),
+    /** The session the prompt was typed in, when the owner asked in OpenCode itself: it continues there. */
+    inSession: Schema.optionalKey(Schema.String),
   },
   events: [PromptAsked],
   rejects: [ThreadClosed],
@@ -110,7 +112,10 @@ export class Thread extends Domain.Aggregate("Thread", {
       if (s._tag === "Active" && s.archived) return new ThreadClosed();
       if (s._tag === "Active" && s.prompts.includes(cmd.promptId)) return [];
       const sessions = s._tag === "Active" ? s.sessions : [];
-      const route = routePrompt(sessions, cmd.mode, cmd.override);
+      const route =
+        cmd.inSession !== undefined
+          ? ({ kind: "continue", sessionId: cmd.inSession, delivery: "queue", reason: "asked in this session, in OpenCode" } as const)
+          : routePrompt(sessions, cmd.mode, cmd.override);
       const newSession = route.kind === "new";
       return [
         new PromptAsked({

@@ -1,0 +1,18 @@
+/* Plain styles for phase 1A. A dedicated design pass replaces this file; app.ts only sets class names. */
+body { font-family: system-ui, sans-serif; margin: 0; }
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+.top { display: flex; gap: 1rem; align-items: baseline; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
+.top h1 { font-size: 1.1rem; margin: 0; }
+.live.off { color: #a00; }
+.notice { padding: 0.5rem 1rem; background: #fee; margin: 0; }
+.columns { display: grid; grid-template-columns: minmax(18rem, 1fr) 2fr; gap: 1rem; padding: 1rem; flex: 1; }
+.inbox ul, .focus ul { list-style: none; padding: 0; }
+.item { display: grid; gap: 0.2rem; padding: 0.5rem; border: 1px solid #ddd; margin-bottom: 0.5rem; cursor: pointer; }
+.item.focused { border-color: #333; }
+.item .where, .item .count, .meta { color: #666; font-size: 0.85rem; }
+.evidence .unverified { color: #a60; }
+.sample { white-space: pre-wrap; background: #f5f5f5; padding: 0.5rem; }
+.prompt-bar { display: flex; gap: 0.5rem; padding: 0.75rem 1rem; border-top: 1px solid #ccc; align-items: center; position: sticky; bottom: 0; background: #fff; }
+.prompt-bar .prompt { flex: 1; padding: 0.4rem; }
+.prompt-bar .route { color: #666; font-size: 0.85rem; }
+.empty { color: #888; }

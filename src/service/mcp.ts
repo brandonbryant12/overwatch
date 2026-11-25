@@ -174,7 +174,11 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
 
 /** The whole MCP server as a Layer: the hand-written tools and the allowlisted model reads. */
 export function mcpLayer(ports: McpPorts, version: string) {
-  const tools = McpServer.toolkit(SessionTools).pipe(Layer.provide(sessionToolsLayer(ports)));
+  // Plain text, not a JSON-encoded string: agents quote what they read, and quotes are checked against it.
+  const asText = (text: string) => [{ type: "text" as const, text }];
+  const tools = McpServer.toolkit(SessionTools, { content: { query_telemetry: asText, file_finding: asText } }).pipe(
+    Layer.provide(sessionToolsLayer(ports)),
+  );
   const reads = DomainAi.toMcp(OverwatchApi, { expose: [...EXPOSED] });
   return Layer.mergeAll(tools, reads).pipe(
     Layer.provideMerge(

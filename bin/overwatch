@@ -1,0 +1,4 @@
+#!/bin/sh
+# The overwatch command: runs the service's CLI with Node, which strips the TypeScript types.
+here="$(cd "$(dirname "$0")/.." && pwd)"
+exec node --experimental-strip-types --no-warnings "$here/src/service/main.ts" "$@"

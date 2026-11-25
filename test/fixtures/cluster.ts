@@ -2,7 +2,7 @@
  * A fake Kubernetes cluster behind a fake `kubectl`: one deployment's pods and a log the test appends to. `logs`
  * honours `--since-time`, as kubectl does, so overlapping polls see overlapping lines. Every call is recorded.
  */
-import type { Exec, ExecResult } from "../../src/collect/exec.ts";
+import { exec as realExec, type Exec, type ExecOptions, type ExecResult } from "../../src/collect/exec.ts";
 
 export interface FakeCluster {
   readonly exec: Exec & { calls: Array<{ command: string; args: ReadonlyArray<string> }> };
@@ -22,8 +22,10 @@ export function fakeCluster(options: { readonly pods?: number; readonly image?: 
   const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "", killed: false });
   const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
   const exec = Object.assign(
-    async (command: string, args: ReadonlyArray<string>): Promise<ExecResult> => {
+    async (command: string, args: ReadonlyArray<string>, options: ExecOptions): Promise<ExecResult> => {
       calls.push({ command, args });
+      // git is real: the service makes worktrees of a real test repository.
+      if (command === "git") return realExec(command, args, options);
       if (command !== "kubectl") return { code: 127, stdout: "", stderr: `unexpected ${command}`, killed: false };
       const verb = args.slice(5);
       const has = (prefix: string) => verb.join(" ").startsWith(prefix);

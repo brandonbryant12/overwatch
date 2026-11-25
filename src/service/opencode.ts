@@ -12,6 +12,8 @@ export type PromptState =
   /** Not delivered yet: in the session's inbox, or not received at all (then it is sent again). */
   | { readonly kind: "waiting"; readonly inInbox: boolean }
   | { readonly kind: "running" }
+  /** Delivered, but neither running nor finished: the turn was interrupted (OpenCode restarted) and not resumed. */
+  | { readonly kind: "stalled" }
   | { readonly kind: "idle"; readonly outcome: "succeeded" | "failed" | "interrupted"; readonly error?: string };
 
 export interface OpenCodePort {
@@ -25,6 +27,10 @@ export interface OpenCodePort {
     readonly metadata: Record<string, string>;
   }) => Promise<void>;
   readonly prompt: (input: { readonly sessionID: string; readonly id: string; readonly text: string; readonly delivery?: "queue" | "steer" }) => Promise<void>;
+  /** Text the model reads as user input that the user did not type, such as a run token. Idempotent by id. */
+  readonly synthetic: (input: { readonly sessionID: string; readonly id: string; readonly text: string; readonly delivery?: "queue" | "steer" }) => Promise<void>;
+  /** User messages in a session, oldest first: what the owner typed there, and what Overwatch sent. */
+  readonly userMessages: (sessionID: string) => Promise<ReadonlyArray<{ readonly id: string; readonly text: string }>>;
   readonly promptState: (sessionID: string, messageId: string) => Promise<PromptState>;
   readonly interrupt: (sessionID: string) => Promise<void>;
   /** The last assistant text after a message, for showing an answer next to its subject. */
@@ -96,6 +102,13 @@ export function openCodePort(options: OpenCodeOptions): OpenCodePort {
     prompt: async (input) => {
       await need().session.prompt({ sessionID: input.sessionID, id: input.id, text: input.text, ...(input.delivery ? { delivery: input.delivery } : {}) });
     },
+    synthetic: async (input) => {
+      await need().session.synthetic({ sessionID: input.sessionID, id: input.id, text: input.text, description: "Overwatch", ...(input.delivery ? { delivery: input.delivery } : {}) });
+    },
+    userMessages: async (sessionID) => {
+      const messages = (await need().message.list({ sessionID, type: "user", order: "asc", limit: 200 })).data;
+      return messages.map((m) => ({ id: m.id, text: (m as { text?: string }).text ?? "" }));
+    },
     promptState: async (sessionID, messageId) => {
       const c = need();
       try {
@@ -114,7 +127,7 @@ export function openCodePort(options: OpenCodeOptions): OpenCodePort {
       const idle = messages.slice(0, at).findLast((m) => m.type === "idle") as { outcome: "succeeded" | "failed" | "interrupted"; error?: unknown } | undefined;
       const active = await c.session.active();
       if (sessionID in active) return { kind: "running" };
-      if (!idle) return { kind: "running" };
+      if (!idle) return { kind: "stalled" };
       return { kind: "idle", outcome: idle.outcome, ...(idle.error ? { error: JSON.stringify(idle.error).slice(0, 300) } : {}) };
     },
     interrupt: async (sessionID) => {
