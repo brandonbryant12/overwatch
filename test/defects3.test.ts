@@ -340,8 +340,107 @@ describe("7. a send whose acknowledgement was lost is not asked twice", () => {
         (db) => db.prepare("SELECT data FROM journal WHERE type = 'PromptAsked' AND json_extract(data, '$.promptId') = 'prompt:s:0'").all() as Array<{ data: string }>,
       );
       expect(asked).toHaveLength(1);
-      const runs = await service.read((db) => (db.prepare("SELECT count(*) AS n FROM journal WHERE stream = ?").get(`Run/${runIdOf(threadIdOf(incident), "prompt:s:0")}`) as { n: number }).n);
-      expect(runs).toBe(1);
+      // The run is made by a policy after the prompt: wait for it, then for anything a second prompt would have added.
+      const runs = () => service.read((db) => (db.prepare("SELECT count(*) AS n FROM journal WHERE stream = ? AND version = 1").get(`Run/${runIdOf(threadIdOf(incident), "prompt:s:0")}`) as { n: number }).n);
+      for (let i = 0; i < 50 && (await runs()) === 0; i++) await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await runs()).toBe(1);
+    } finally {
+      await service.stop();
+    }
+  });
+});
+
+/** Each shape a secret takes, with the part that must never be stored. */
+const SECRET_SHAPES: ReadonlyArray<{ readonly shape: string; readonly secret: string }> = [
+  { shape: "password=Hunter2pass", secret: "Hunter2pass" },
+  { shape: "db_password: Hunter3pass", secret: "Hunter3pass" },
+  { shape: '{"client_secret": "two words here"}', secret: "two words here" },
+  { shape: "PASSWORD='quoted Hunter4'", secret: "quoted Hunter4" },
+  { shape: "postgres://app:Hunter5pass@db.internal/shop", secret: "Hunter5pass" },
+  { shape: "Server=db;User Id=app;Password=Hunter6pw;", secret: "Hunter6pw" },
+  { shape: "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END RSA PRIVATE KEY-----", secret: "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7" },
+  { shape: "sent q7Zr2Lw9Xk4Tn8Vb3Hc6Pm1J upstream", secret: "q7Zr2Lw9Xk4Tn8Vb3Hc6Pm1J" },
+];
+
+describe("8. every shape of secret is redacted on every way text enters", () => {
+  test("the shapes, one by one", async () => {
+    const { redactText } = await import("../src/domain/redact.ts");
+    for (const { shape, secret } of SECRET_SHAPES) expect(redactText(shape)).not.toContain(secret);
+    // Prose that names a secret without giving one stays readable.
+    expect(redactText("the token expired; password reset required")).toBe("the token expired; password reset required");
+  });
+
+  test("a page prompt, a typed OpenCode message, a log line, a query's output, a finding and a handoff store none of them", { timeout: 60_000 }, async () => {
+    const { testService } = await import("./fixtures/service.ts");
+    const { IncidentId, threadIdOf, RunId } = await import("../src/domain/ids.ts");
+    const { Thread, RecordHandoff } = await import("../src/domain/thread.ts");
+    const { fileFinding, queryTelemetry } = await import("../src/service/mcp.ts");
+    const Effect = await import("effect/Effect");
+    const all = SECRET_SHAPES.map((s) => s.shape).join(" | ");
+    const prompts: Array<{ session: string; text: string }> = [];
+    let typed: Array<{ id: string; text: string }> = [];
+    const port = {
+      connect: async () => "http://opencode.test",
+      createSession: async () => undefined,
+      prompt: async (i: { sessionID: string; text: string }) => void prompts.push({ session: i.sessionID, text: i.text }),
+      synthetic: async () => undefined,
+      newUserMessages: async () => {
+        const out = typed;
+        typed = [];
+        return out;
+      },
+      promptState: async () => ({ kind: "running" as const }),
+      interrupt: async () => undefined,
+      answer: async () => undefined,
+    };
+    const { service, cluster, client } = await testService({ opencode: port });
+    try {
+      // A log line, through the collector.
+      for (const { shape } of SECRET_SHAPES) cluster.log(Date.now() - 60_000, `ERROR payment failed ${shape}`);
+      await service.collect("shop-api/production");
+      const incident = IncidentId.make(await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!));
+      const thread = threadIdOf(incident);
+      // A prompt from the page.
+      await client((api) => api.AskThread(thread, { subject: incident, title: all, promptId: "p-secret", text: `why? ${all}`, mode: "investigate", origin: "page", override: "new" }));
+      for (let i = 0; i < 60 && !prompts.some((p) => p.text.includes("run token")); i++) {
+        await service.work();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const sent = prompts.find((p) => p.text.includes("run token"))!;
+      const token = /run token is (owt_[\w-]+)/.exec(sent.text)![1]!;
+      // A message the owner typed in the OpenCode session.
+      typed = [{ id: "msg_typed1", text: `also ${all}` }];
+      for (let i = 0; i < 20; i++) {
+        await service.work();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // A query's output, shown to the session.
+      const ports = { ...(service as any).mcpPorts, runStatus: async () => "sent", complete: async () => undefined };
+      await queryTelemetry(ports, sent.session, { token, source: "pods", args: { operation: "logs", sinceMinutes: 30 } });
+      // A finding filed by the session.
+      const finding = {
+        product: { impact: all, affected: all, since: "x", status: "x" },
+        engineering: { verdict: "unsure", confidence: "low", cause: all, causeBasis: "inferred", evidence: [], notChecked: [all], nextCheck: all },
+        ruledOut: [all],
+      };
+      await fileFinding({ ...ports, complete: (service as any).mcpPorts.complete }, sent.session, { token, finding });
+      // A handoff.
+      await service.runtime.runPromise(
+        Effect.gen(function* () {
+          const threads = yield* Thread;
+          yield* threads.send(Thread.ref(thread), new RecordHandoff({ handoff: { runId: RunId.make("run_h"), sessionId: sent.session, concluded: all, verified: [], ruledOut: [all], open: [all], at: 0 } }));
+        }) as never,
+      );
+      await new Promise((r) => setTimeout(r, 300));
+      const stored = await service.read((db) => {
+        const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+        return tables.map((t) => JSON.stringify(db.prepare(`SELECT * FROM "${t.name}"`).all())).join("\n");
+      });
+      expect(stored).toContain("REDACTED:named_secret");
+      expect(await service.read((db) => (db.prepare("SELECT count(*) AS n FROM journal WHERE type = 'PromptAsked' AND json_extract(data, '$.origin') = 'opencode'").get() as { n: number }).n)).toBe(1);
+      const leaked = SECRET_SHAPES.filter(({ secret }) => stored.includes(secret) || prompts.some((p) => p.text.includes(secret))).map((s) => s.shape);
+      expect(leaked).toEqual([]);
     } finally {
       await service.stop();
     }

@@ -50,6 +50,14 @@ const BUILTIN_PATTERNS: ReadonlyArray<{ readonly kind: string; readonly pattern:
   },
   // DSN connection passwords (postgres://user:pass@host, redis://:pass@host)
   { kind: "dsn_password", pattern: /\b([a-z][a-z0-9+.-]{1,15}:\/\/[^:\s/@]{0,64}:)([^@\s]{1,128})(@)/gi },
+  // A named secret given a value with "=" or ":": `password=x`, `db_password: x`, `"client_secret": "two words"`,
+  // `Password=x;` in a connection string. Quoted values are taken whole; unquoted ones end at a space, quote or
+  // separator. A name followed by prose ("the token expired") has no separator and is left alone.
+  {
+    kind: "named_secret",
+    pattern:
+      /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_.-]*["']?[ \t]*[:=][ \t]*)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s"',;&})\]]+)/gi,
+  },
   // Cookie headers
   { kind: "cookie", pattern: /\b(set-cookie|cookie)\s*:\s*[^\r\n]+/gi },
   // Private key PEM blocks
@@ -142,7 +150,9 @@ export function redactText(input: string, options: RedactionOptions = {}): strin
   ];
 
   for (const { kind, pattern } of patterns) {
-    if (kind === "dsn_password") {
+    if (kind === "named_secret") {
+      out = out.replace(pattern, `$1[REDACTED:${kind}]`);
+    } else if (kind === "dsn_password") {
       out = out.replace(pattern, `$1[REDACTED:${kind}]$3`);
     } else if (kind === "api_key") {
       out = out.replace(pattern, (match) => {
