@@ -13,11 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  typescript:
+  check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      OVERWATCH_SILENT_NOTIFY: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -26,3 +24,25 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
+
+  smoke:
+    # Loads the plugin into a real, isolated OpenCode server with a fake model, kubectl and gh.
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENCODE_VERSION: 2.4.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+      - run: bun install --frozen-lockfile
+      - name: Fetch OpenCode
+        run: |
+          mkdir -p "$RUNNER_TEMP/opencode"
+          cd "$RUNNER_TEMP/opencode"
+          npm pack "@opencode/cli-linux-x64@${OPENCODE_VERSION}"
+          tar xzf opencode-cli-linux-x64-*.tgz
+          echo "OPENCODE_BIN=$RUNNER_TEMP/opencode/package/bin/opencode" >> "$GITHUB_ENV"
+      - run: bun run smoke

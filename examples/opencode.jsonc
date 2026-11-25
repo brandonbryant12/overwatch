@@ -1,0 +1,74 @@
+// Example global OpenCode config (~/.config/opencode/opencode.jsonc) for Overwatch.
+// Every name, path, context and query below is a placeholder. Replace them with your own.
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      // A published package name, a git spec, or the path to a local clone of this repository.
+      "package": "/path/to/overwatch",
+      "options": {
+        "apps": {
+          "shop-api": {
+            // Local clone of the app. Investigations read code at the deployed commit in a worktree of it.
+            "checkout": "~/code/shop-api",
+            "baseBranch": "main",
+            // Must all pass before a draft pull request is opened. Leave empty to never open one.
+            "verify": ["bun test"],
+            // Your own skills, by ID, for every investigation of this app.
+            "skills": [],
+            "environments": {
+              "production": {
+                "sources": {
+                  "pods": {
+                    "type": "kubernetes",
+                    "context": "prod-cluster",
+                    "namespace": "shop",
+                    "selector": "app=shop-api",
+                    "workload": "shop-api"
+                  },
+                  "errors": {
+                    "type": "datadog-logs",
+                    "query": "service:shop-api env:production status:(error OR critical)",
+                    "indexes": ["main"]
+                  },
+                  "monitors": {
+                    "type": "datadog-monitors",
+                    "tags": ["service:shop-api", "env:production"]
+                  },
+                  "ci": {
+                    "type": "github-ci",
+                    "branch": "main"
+                  }
+                },
+                // Where the running commit comes from. Default: the image tag of the first kubernetes source.
+                "deployedCommit": { "source": "pods", "from": "label:app.kubernetes.io/version" }
+              },
+              "staging": {
+                "sources": {
+                  "pods": {
+                    "type": "kubernetes",
+                    "context": "staging-cluster",
+                    "namespace": "shop",
+                    "selector": "app=shop-api"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "watchers": [
+          { "app": "shop-api", "environment": "production", "every": "15m", "fix": true },
+          { "app": "shop-api", "environment": "staging", "every": "1h", "investigate": false }
+        ],
+        "datadog": {
+          "site": "datadoghq.com",
+          "apiKey": "keychain:overwatch/datadog-api-key",
+          "appKey": "keychain:overwatch/datadog-app-key"
+        },
+        "lookback": { "initial": "24h", "max": "14d", "overlap": "2m", "slice": "6h" },
+        "timeouts": { "source": "60s", "investigation": "20m", "fix": "30m", "verify": "10m" },
+        "concurrency": { "investigations": 2, "watchers": 2 }
+      }
+    }
+  ]
+}
