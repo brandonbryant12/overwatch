@@ -195,10 +195,16 @@ export function makeWorker(ports: WorkerPorts) {
       (db) => db.prepare("SELECT session_id, thread_id, subject FROM run_tokens GROUP BY session_id").all() as Array<{ session_id: string; thread_id: string; subject: string }>,
     );
     for (const s of sessions) {
-      const messages = await ports.opencode.userMessages(s.session_id).catch(() => []);
+      const last = await ports.atomically(
+        (db) => (db.prepare("SELECT last_message FROM session_reads WHERE session_id = ?").get(s.session_id) as { last_message: string } | undefined)?.last_message,
+      );
+      const messages = await ports.opencode.newUserMessages(s.session_id, last).catch(() => []);
       for (const m of messages) {
-        if (m.id.startsWith("msg_ow")) continue;
-        await ports.adopt({ threadId: s.thread_id, subject: s.subject, sessionId: s.session_id, messageId: m.id, text: m.text });
+        if (!m.id.startsWith("msg_ow")) await ports.adopt({ threadId: s.thread_id, subject: s.subject, sessionId: s.session_id, messageId: m.id, text: m.text });
+        // Moves past each message only once it is handled, so a failure reads it again next time.
+        await ports.atomically((db) =>
+          db.prepare("INSERT INTO session_reads (session_id, last_message) VALUES (?, ?) ON CONFLICT (session_id) DO UPDATE SET last_message = excluded.last_message").run(s.session_id, m.id),
+        );
       }
     }
   };

@@ -29,8 +29,11 @@ export interface OpenCodePort {
   readonly prompt: (input: { readonly sessionID: string; readonly id: string; readonly text: string; readonly delivery?: "queue" | "steer" }) => Promise<void>;
   /** Text the model reads as user input that the user did not type, such as a run token. Idempotent by id. */
   readonly synthetic: (input: { readonly sessionID: string; readonly id: string; readonly text: string; readonly delivery?: "queue" | "steer" }) => Promise<void>;
-  /** User messages in a session, oldest first: what the owner typed there, and what Overwatch sent. */
-  readonly userMessages: (sessionID: string) => Promise<ReadonlyArray<{ readonly id: string; readonly text: string }>>;
+  /**
+   * User messages newer than `after`, oldest first, read newest first a page at a time until `after` is reached.
+   * Without `after` (a session not read before), only the newest page.
+   */
+  readonly newUserMessages: (sessionID: string, after: string | undefined) => Promise<ReadonlyArray<{ readonly id: string; readonly text: string }>>;
   readonly promptState: (sessionID: string, messageId: string) => Promise<PromptState>;
   readonly interrupt: (sessionID: string) => Promise<void>;
   /** The last assistant text after a message, for showing an answer next to its subject. */
@@ -105,9 +108,19 @@ export function openCodePort(options: OpenCodeOptions): OpenCodePort {
     synthetic: async (input) => {
       await need().session.synthetic({ sessionID: input.sessionID, id: input.id, text: input.text, description: "Overwatch", ...(input.delivery ? { delivery: input.delivery } : {}) });
     },
-    userMessages: async (sessionID) => {
-      const messages = (await need().message.list({ sessionID, type: "user", order: "asc", limit: 200 })).data;
-      return messages.map((m) => ({ id: m.id, text: (m as { text?: string }).text ?? "" }));
+    newUserMessages: async (sessionID, after) => {
+      const found: Array<{ id: string; text: string }> = [];
+      let cursor: string | undefined;
+      for (let page = 0; page < 50; page++) {
+        const result = await need().message.list({ sessionID, type: "user", limit: 20, ...(cursor ? { cursor } : { order: "desc" as const }) });
+        for (const m of result.data) {
+          if (m.id === after) return found.reverse();
+          found.push({ id: m.id, text: (m as { text?: string }).text ?? "" });
+        }
+        cursor = result.cursor.next ?? undefined;
+        if (!cursor || after === undefined) break;
+      }
+      return found.reverse();
     },
     promptState: async (sessionID, messageId) => {
       const c = need();

@@ -21,7 +21,7 @@ export const offline: OpenCodePort = {
   synthetic: async () => {
     throw new Error("offline");
   },
-  userMessages: async () => [],
+  newUserMessages: async () => [],
   promptState: async () => ({ kind: "session-missing" }),
   interrupt: async () => undefined,
   answer: async () => undefined,

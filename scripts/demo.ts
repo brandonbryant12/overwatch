@@ -57,7 +57,7 @@ const offlineOpenCode: OpenCodePort = {
   synthetic: async () => {
     throw new Error("OpenCode is not connected in demo mode");
   },
-  userMessages: async () => [],
+  newUserMessages: async () => [],
   promptState: async () => ({ kind: "session-missing" }),
   interrupt: async () => undefined,
   answer: async () => undefined,

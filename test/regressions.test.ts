@@ -118,7 +118,7 @@ describe("A3. a quote attributed to a source verifies only against what that sou
     };
     let status = "requested";
     const worker = makeWorker({
-      opencode: { connect: async () => "x", createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, userMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => undefined, answer: async () => undefined } as never,
+      opencode: { connect: async () => "x", createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, newUserMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => undefined, answer: async () => undefined } as never,
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [{ runId: RunId.make("run_c"), threadId: thread, subject: page.incidentId, promptId: "p", mode: "investigate", sessionId: "ses_c", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: question, origin: "page", handoff: null, status: "requested" as const, nudges: [], at: 0 }] as never,
       incidentPage: async () => page as never,
@@ -234,7 +234,7 @@ describe("A6. time spent waiting for OpenCode does not count against a run", () 
     const calls: string[] = [];
     let pending: Record<string, unknown> = { runId: RunId.make("run_t"), threadId: thread, subject: IncidentId.make("inc_t"), promptId: "p", mode: "investigate", sessionId: "ses_t", messageId: messageIdOf(thread, "p"), newSession: true, delivery: null, text: "why?", origin: "page", handoff: null, status: "requested", nudges: [], at: 0, sentAt: null };
     const worker = makeWorker({
-      opencode: { connect: async () => (up ? "x" : undefined), createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, userMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => void calls.push("interrupt"), answer: async () => undefined } as never,
+      opencode: { connect: async () => (up ? "x" : undefined), createSession: async () => undefined, prompt: async () => undefined, synthetic: async () => undefined, newUserMessages: async () => [], promptState: async () => ({ kind: "running" as const }), interrupt: async () => void calls.push("interrupt"), answer: async () => undefined } as never,
       atomically: async (work: (d: typeof db) => unknown) => work(db),
       pendingRuns: async () => [pending] as never,
       incidentPage: async () => null,
@@ -438,7 +438,7 @@ describe("A10/B2. code evidence comes from the deployed revision, or the brief a
         createSession: async () => undefined,
         prompt: async (i: { text: string }) => void prompts.push(i.text),
         synthetic: async () => undefined,
-        userMessages: async () => [],
+        newUserMessages: async () => [],
         promptState: async () => ({ kind: "running" as const }),
         interrupt: async () => undefined,
         answer: async () => undefined,
@@ -505,4 +505,64 @@ describe("A10/B2. code evidence comes from the deployed revision, or the brief a
       }
     });
   }
+});
+
+describe("the worker reads only new messages in Overwatch's sessions", () => {
+  test("each session is read from where the last read stopped, a page at a time; a typed prompt is adopted once", async () => {
+    const { DatabaseSync } = await import("node:sqlite");
+    const { createServiceTables } = await import("../src/service/tables.ts");
+    const { makeWorker } = await import("../src/service/worker.ts");
+    const db = new DatabaseSync(":memory:");
+    createServiceTables(db);
+    db.prepare("INSERT INTO run_tokens (token, run_id, session_id, thread_id, subject, role, created_at) VALUES ('t', 'run_x', 'ses_x', 'thr_x', 'inc_x', 'investigator', 0)").run();
+    // A long session: 300 messages, newest first as OpenCode lists them in descending order.
+    const messages = Array.from({ length: 300 }, (_, i) => ({ id: `msg_${String(i).padStart(4, "0")}`, text: `message ${i}` })).reverse();
+    let read = 0;
+    const adopted: string[] = [];
+    const port = {
+      connect: async () => "x",
+      createSession: async () => undefined,
+      prompt: async () => undefined,
+      synthetic: async () => undefined,
+      newUserMessages: async (_session: string, after: string | undefined) => {
+        const out: Array<{ id: string; text: string }> = [];
+        for (const m of messages) {
+          read++;
+          if (m.id === after) break;
+          out.push(m);
+          if (out.length >= 20 && after === undefined) break;
+        }
+        return out.reverse();
+      },
+      promptState: async () => ({ kind: "running" as const }),
+      interrupt: async () => undefined,
+      answer: async () => undefined,
+    };
+    const worker = makeWorker({
+      opencode: port as never,
+      atomically: async (work: (d: typeof db) => unknown) => work(db),
+      pendingRuns: async () => [],
+      incidentPage: async () => null,
+      prepareCode: async () => ({ directory: "/x", lines: [] }),
+      runStatus: async () => undefined,
+      markSent: async () => undefined,
+      adopt: async (input: { messageId: string }) => void adopted.push(input.messageId),
+      nudge: async () => undefined,
+      fail: async () => undefined,
+      now: () => 0,
+      runTimeoutMs: 60_000,
+      log: () => undefined,
+    } as never);
+    await worker.tick();
+    const firstRead = read;
+    read = 0;
+    await worker.tick();
+    expect(read).toBeLessThan(5);
+    messages.unshift({ id: "msg_9999", text: "a new question typed in OpenCode" });
+    const before = adopted.length;
+    await worker.tick();
+    await worker.tick();
+    expect(adopted.slice(before)).toEqual(["msg_9999"]);
+    expect(firstRead).toBeLessThan(300);
+  });
 });

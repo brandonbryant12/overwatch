@@ -44,7 +44,7 @@ function harness() {
       calls.push(`prompt ${i.id}${i.text === NUDGE ? " nudge" : i.text === RESUME ? " resume" : ""}`);
     },
     synthetic: async (i) => void calls.push(`synthetic ${i.id}`),
-    userMessages: async () => [],
+    newUserMessages: async () => [],
     promptState: async () => state,
     interrupt: async () => void calls.push("interrupt"),
     answer: async () => undefined,
