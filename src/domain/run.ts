@@ -42,7 +42,17 @@ export class RunCompleted extends Domain.Event("RunCompleted", {
   finding: Finding,
   at: Schema.Number,
 }) {}
-export class RunFailed extends Domain.Event("RunFailed", { threadId: ThreadId, sessionId: Schema.String, reason: Schema.String, at: Schema.Number }) {}
+export class RunFailed extends Domain.Event("RunFailed", {
+  threadId: ThreadId,
+  sessionId: Schema.String,
+  reason: Schema.String,
+  at: Schema.Number,
+  /** Agent work is retried once, in a fresh session: the prompt id of that retry. Absent when this was the retry. */
+  retryAs: Schema.optionalKey(Schema.String),
+}) {}
+
+/** The suffix of a retry's prompt id. A run whose prompt id ends with it is not retried again: it is parked. */
+export const RETRY = ":retry";
 
 export class RequestRun extends Domain.Command("RequestRun", { target: RunId, input: Requested, events: [RunRequested] }) {}
 export class MarkRunSent extends Domain.Command("MarkRunSent", { target: RunId, input: {}, events: [RunSent], rejects: [RunUnknown, RunClosed] }) {}
@@ -68,6 +78,7 @@ export const RunState = Schema.Union([
     messageId: Schema.String,
     status: RunStatus,
     nudges: Schema.Array(Schema.String),
+    promptId: Schema.optionalKey(Schema.String),
   }),
 ]);
 
@@ -103,7 +114,8 @@ export class Run extends Domain.Aggregate("Run", {
       if (s._tag !== "Run") return new RunUnknown();
       if (s.status === "failed") return [];
       if (s.status === "completed") return new RunClosed();
-      return [new RunFailed({ threadId: s.threadId, sessionId: s.sessionId, reason: redactText(cmd.reason, { maxBytes: 1_000 }), at: nowMs(ctx) })];
+      const retryAs = s.promptId !== undefined && !s.promptId.endsWith(RETRY) ? `${s.promptId}${RETRY}` : undefined;
+      return [new RunFailed({ threadId: s.threadId, sessionId: s.sessionId, reason: redactText(cmd.reason, { maxBytes: 1_000 }), at: nowMs(ctx), ...(retryAs ? { retryAs } : {}) })];
     },
   },
   evolve: {
@@ -115,6 +127,7 @@ export class Run extends Domain.Aggregate("Run", {
       messageId: e.messageId,
       status: "requested" as const,
       nudges: [],
+      promptId: e.promptId,
     }),
     RunSent: (s) => (s._tag === "Run" ? { ...s, status: "sent" as const } : s),
     RunNudged: (s, e) => (s._tag === "Run" ? { ...s, nudges: [...s.nudges, e.messageId] } : s),

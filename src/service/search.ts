@@ -9,7 +9,7 @@ import * as Layer from "effect/Layer";
 import { SearchStore, type SearchHit } from "../domain/search.ts";
 import type { Connection } from "../host/connection.ts";
 
-export const SEARCH_VERSION = 1;
+export const SEARCH_VERSION = 2;
 const NAME = "search";
 
 interface JournalRow {
@@ -45,6 +45,15 @@ function upsert(db: DatabaseSync, doc: Doc) {
 
 const getDoc = (db: DatabaseSync, doc: string) => db.prepare("SELECT * FROM search_docs WHERE doc = ?").get(doc) as Doc | undefined;
 
+const STATE_AFTER: Record<string, string> = {
+  IncidentArchived: "done",
+  IncidentDone: "done",
+  IncidentDeferred: "later",
+  IncidentMuted: "never",
+  IncidentRestored: "inbox",
+  IncidentCameBack: "inbox",
+};
+
 /** Applies one journal row to the documents. Pure apart from the tables it writes. */
 function apply(db: DatabaseSync, row: JournalRow) {
   const data = JSON.parse(row.data) as Record<string, any>;
@@ -65,9 +74,16 @@ function apply(db: DatabaseSync, row: JournalRow) {
       });
       return;
     case "SignalRecurred":
-    case "IncidentArchived": {
+    case "IncidentArchived":
+    case "IncidentDone":
+    case "IncidentDeferred":
+    case "IncidentMuted":
+    case "IncidentRestored":
+    case "IncidentCameBack": {
+      // An incident's state in search is where it is now: in the inbox, done, later or never (muted).
       const doc = getDoc(db, `incident:${id}`);
-      if (doc) upsert(db, { ...doc, at: Math.max(doc.at, at), state: row.type === "IncidentArchived" ? "archived" : doc.state });
+      const state = STATE_AFTER[row.type] ?? doc?.state ?? null;
+      if (doc) upsert(db, { ...doc, at: Math.max(doc.at, at), state });
       return;
     }
     case "FindingRecorded": {

@@ -19,7 +19,7 @@ import * as McpSchema from "effect/ai/McpSchema";
 import * as McpServer from "effect/ai/McpServer";
 import * as Tool from "effect/ai/Tool";
 import * as Toolkit from "effect/ai/Toolkit";
-import { verifyCitations } from "../collect/citations.ts";
+import { claimable, verifyCitations } from "../collect/citations.ts";
 import { iso, queryWindow } from "../collect/duration.ts";
 import type { Options } from "../collect/options.ts";
 import { validateFinding, type Finding as LegacyFinding } from "../collect/report.ts";
@@ -203,17 +203,19 @@ export async function fileFinding(ports: McpPorts, sessionId: string | undefined
   const shown = await ports.read((db) => shownFor(db, sessionId!));
   const checked = await verifyCitations(legacy, { shown, sources: Object.keys(env?.sources ?? {}), ...(directory ? { directory } : {}) });
   if (checked.errors.length) return `Not recorded. Fix these and file again:\n- ${checked.errors.join("\n- ")}`;
+  const claim = claimable(checked.finding);
   const recorded: Finding = {
     product: finding.product,
     engineering: {
       ...finding.engineering,
+      causeBasis: claim.finding.engineering.causeBasis as Finding["engineering"]["causeBasis"],
       evidence: checked.finding.engineering.evidence.map((e) => ({ source: e.source, quote: e.quote, verified: e.verified === true })),
     },
     ruledOut: [...(finding.ruledOut ?? [])],
     code: (await ports.codeBasis(auth.row.run_id)) ?? { commit: null, deployed: false, note: "No code was prepared for this thread." },
   };
   await ports.complete(auth.row.run_id, sessionId!, recorded);
-  return "Recorded. Stop now.";
+  return claim.note ? `Recorded. ${claim.note} Stop now.` : "Recorded. Stop now.";
 }
 
 /** The whole MCP server as a Layer: the hand-written tools and the allowlisted model reads. */

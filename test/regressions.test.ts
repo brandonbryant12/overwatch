@@ -324,16 +324,16 @@ describe("A8. a prompt draft belongs to the incident it was typed on, and stays 
     const draftOf = (m: any) => (typeof app.draftOf === "function" ? app.draftOf(m) : m.draft);
     const a = IncidentId.make("inc_a");
     const b = IncidentId.make("inc_b");
-    const item = (id: string) => ({ incidentId: id, title: id, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null });
+    const item = (id: string) => ({ incidentId: id, title: id, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null, disposition: "inbox", way: null, back: null, changedAt: 0, running: 0, failure: null, recent: [], hidden: [], returns: [] });
     let m = app.update(app.init({ session: "s" }).model, app.Message.ReceivedInbox({ items: [item(a), item(b)] })).model;
     m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
     m = app.update(m, app.Message.ChangedDraft({ text: "why is A failing?" })).model;
     m = app.update(m, app.Message.ClickedItem({ incidentId: b })).model;
     expect(draftOf(m)).toBe("");
-    expect(app.update(m, app.Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
+    expect(app.update(m, app.Message.SubmittedPrompt({})).commands ?? []).toHaveLength(0);
     m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
     expect(draftOf(m)).toBe("why is A failing?");
-    const sent = app.update(m, app.Message.SubmittedPrompt());
+    const sent = app.update(m, app.Message.SubmittedPrompt({}));
     expect(sent.commands).toHaveLength(1);
     m = sent.model;
     expect(draftOf(m)).toBe("why is A failing?");
@@ -341,7 +341,7 @@ describe("A8. a prompt draft belongs to the incident it was typed on, and stays 
     const commandId = `${m.commandIds.session}:${m.commandIds.sent - 1}`;
     m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.FailedAskThread({ commandId, failure: { _tag: "Unknown" } }) })).model;
     expect(draftOf(m)).toBe("why is A failing?");
-    const again = app.update(m, app.Message.SubmittedPrompt());
+    const again = app.update(m, app.Message.SubmittedPrompt({}));
     m = again.model;
     const second = `${m.commandIds.session}:${m.commandIds.sent - 1}`;
     m = app.update(m, app.Message.ReceivedResult({ result: app.Client.Message.SucceededAskThread({ commandId: second, reply: undefined, receipt: { stream: "Thread/x", version: 1 } }) })).model;
@@ -702,7 +702,7 @@ describe("B4. environments at a glance", () => {
       const unmeasured = environmentChips({ status: (await service.status()) as any, inbox: [] })[0]!;
       expect(unmeasured.details).toContain("memory not measured");
       // An open incident, and a failing check.
-      const item = { incidentId: "inc_1", title: "x", app: "shop-api", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null };
+      const item = { incidentId: "inc_1", title: "x", app: "shop-api", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null, disposition: "inbox", way: null, back: null, changedAt: 0, running: 0, failure: null, recent: [], hidden: [], returns: [] };
       expect(environmentChips({ status: after, inbox: [item as never] })[0]).toMatchObject({ state: "attention", label: "1 open" });
       const failing = { ...after, environments: [{ ...after.environments[0], lastError: "failed: pods" }] };
       expect(environmentChips({ status: failing, inbox: [] })[0]!.state).toBe("failing");
@@ -738,5 +738,34 @@ describe("B6. a finding's product summary can be copied as one paragraph", () =>
       expect(after.notice).toContain("Could not copy");
     }
     expect(((await Effect.runPromise(app.copyToClipboard(text, "run_1", { writeText: async () => Promise.reject(new Error("Document is not focused.")) }))) as { reason: string }).reason).toContain("Document is not focused");
+  });
+});
+
+describe("A1 (ways out). text the ways out carry is redacted before it is recorded", () => {
+  test("Done's reason, Later's label, the actor, and a suspension's error and fix never store a secret", async () => {
+    const { NoteSuspended, Watcher } = await import("../src/domain/watcher.ts");
+    const { service, cluster, client } = await testService();
+    try {
+      cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
+      await service.collect("shop-api/production");
+      const incident = IncidentId.make(await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!));
+      await client((api) => api.MarkDone(incident, { reason: `rotated, ${SECRET}`, actor: `owner ${SECRET}` }));
+      await client((api) => api.Defer(incident, { label: `password=Hunter2pass`, actor: "owner (page)" }));
+      await service.runtime.runPromise(
+        Effect.gen(function* () {
+          const watchers = yield* Watcher;
+          yield* watchers.send(
+            Watcher.ref(WatcherId.make("shop-api/production")),
+            new NoteSuspended({ source: "pods", connection: "kubernetes:prod", kind: "signin", reason: `token ${TOKEN} rejected`, fix: `export TOKEN=${TOKEN}`, at: Date.now() }),
+          );
+        }) as never,
+      );
+      const journal = await journalText(service);
+      expect(journal).toContain("IncidentDone");
+      expect(journal).not.toContain(TOKEN);
+      expect(journal).not.toContain("Hunter2pass");
+    } finally {
+      await service.stop();
+    }
   });
 });

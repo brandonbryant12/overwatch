@@ -5,7 +5,8 @@
 import * as Domain from "@alchemy.run/domain";
 import * as Effect from "effect/Effect";
 import { threadIdOf } from "./ids.ts";
-import { Incident, IncidentOpened, RecordFinding } from "./incident.ts";
+import * as DateTime from "effect/DateTime";
+import { Incident, IncidentDeferred, IncidentOpened, RecordFinding, WakeDeferred } from "./incident.ts";
 import { RequestRun, Run, RunCompleted, RunFailed, RunSent } from "./run.ts";
 import { AskThread, NoteSession, PromptAsked, RecordHandoff, Thread } from "./thread.ts";
 
@@ -76,15 +77,37 @@ export const OutcomeLive = Outcome.toLayer(
   Effect.gen(function* () {
     const threads = yield* Thread;
     const incidents = yield* Incident;
+    const runs = yield* Run;
     return Effect.fn(function* ({ source, event }) {
       const thread = Thread.ref(event.threadId);
       switch (event._tag) {
         case "RunSent":
           yield* threads.send(thread, new NoteSession({ sessionId: event.sessionId, status: "running" }));
           return;
-        case "RunFailed":
+        case "RunFailed": {
           yield* threads.send(thread, new NoteSession({ sessionId: event.sessionId, status: "failed" }));
+          // Agent work gets one retry in a fresh session; a failed retry is parked with its reason.
+          if (event.retryAs === undefined) return;
+          const asked = yield* runs.get(Run.ref(source.id));
+          if (asked._tag !== "Run") return;
+          const subject = asked.subject;
+          yield* threads
+            .send(
+              thread,
+              new AskThread({
+                subject,
+                // The thread already has its subject's title; this one is only used for a thread that has none.
+                title: subject,
+                promptId: event.retryAs,
+                text: `The previous attempt failed (${event.reason}). Investigate this incident again, from the start.`,
+                mode: "investigate",
+                origin: "system",
+                override: "new",
+              }),
+            )
+            .pipe(Effect.catchTag("ThreadClosed", () => Effect.void));
           return;
+        }
         case "RunCompleted": {
           const e = event.finding.engineering;
           yield* incidents
@@ -96,7 +119,7 @@ export const OutcomeLive = Outcome.toLayer(
               handoff: {
                 runId: source.id,
                 sessionId: event.sessionId,
-                concluded: `${e.verdict} (${e.confidence} confidence): ${e.cause}`,
+                concluded: `${e.verdict} (${e.evidence.filter((x) => x.verified).length} of ${e.evidence.length} quotes matched): ${e.cause}`,
                 verified: e.evidence.filter((x) => x.verified).map((x) => ({ source: x.source, quote: x.quote })),
                 ruledOut: event.finding.ruledOut,
                 open: e.notChecked,
@@ -108,6 +131,22 @@ export const OutcomeLive = Outcome.toLayer(
           return;
         }
       }
+    });
+  }),
+);
+
+/** Later until a time: the incident is woken then. Deferring again replaces the wake (same command id). */
+export class Deadline extends Domain.Policy("Deadline", { from: Incident, on: [IncidentDeferred] }) {}
+
+export const DeadlineLive = Deadline.toLayer(
+  Effect.gen(function* () {
+    const incidents = yield* Incident;
+    return Effect.fn(function* ({ source, event }) {
+      if (event.until === null) return;
+      yield* incidents.schedule(Incident.ref(source.id), new WakeDeferred({ deferredAt: event.at }), {
+        at: DateTime.makeUnsafe(event.until),
+        commandId: "wake",
+      });
     });
   }),
 );

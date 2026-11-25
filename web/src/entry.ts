@@ -18,6 +18,19 @@ function initialTheme(): Theme {
   return "dark";
 }
 
+/** What the owner has looked at, kept in this browser. Without storage the page works and only forgets. */
+function initialSeen(): Record<string, number> {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("overwatch.seen") ?? "{}") as unknown;
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      return Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, number] => typeof entry[1] === "number"));
+    }
+  } catch {
+    // Unreadable or blocked: start empty.
+  }
+  return {};
+}
+
 const theme = initialTheme();
 document.documentElement.dataset.theme = theme;
 
@@ -37,5 +50,5 @@ Runtime.run(
     resources: Connection as never,
     container: document.getElementById("root"),
   }),
-  { flags: Effect.succeed({ session: crypto.randomUUID(), theme }) } as never,
+  { flags: Effect.succeed({ session: crypto.randomUUID(), theme, seen: initialSeen() }) } as never,
 );

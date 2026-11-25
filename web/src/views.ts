@@ -8,20 +8,33 @@ import { productSummary, type Finding } from "../../src/domain/finding.ts";
 import type { SearchHit } from "../../src/domain/search.ts";
 import type { IncidentPageState, InboxItem, ThreadPageState } from "../../src/domain/views.ts";
 import {
+  allQuiet,
+  arrangedInbox,
+  bounceOffer,
+  COLLAPSED,
   draftOf,
   environmentChips,
   type EnvState,
+  GROUP_TITLE,
+  GROUPS,
+  type Group,
   isProduction,
   isSending,
   Message,
+  mutedRows,
+  type Row,
   visibleInbox,
+  wouldHide,
   type EnvFilter,
   type Model,
-  type Override,
   type SortOrder,
 } from "./app.ts";
+import type { Cause } from "../../src/domain/status.ts";
 import {
-  iconArchive,
+  iconDone,
+  iconLater,
+  iconNever,
+  iconUndo,
   iconClose,
   iconCopy,
   iconKeyboard,
@@ -108,12 +121,14 @@ export function renderDocument(model: Model, h: H, routePreview: string): Docume
         ...(model.searchOpen ? [searchModalView(model, h)] : []),
         ...(model.statusOpen ? [statusDrawerView(model, h)] : []),
         ...(model.shortcutsOpen ? [shortcutsModalView(h)] : []),
+        ...(model.sheet ? [wayOutSheetView(model, h)] : []),
+        ...(model.mutedOpen ? [mutedListView(model, h)] : []),
       ],
     ),
   };
 }
 
-const ENV_GLYPH: Record<EnvState, string> = { failing: "◆", attention: "▲", unchecked: "?", stale: "?", unmeasured: "?", quiet: "●" };
+const ENV_GLYPH: Record<EnvState, string> = { suspended: "⊘", failing: "◆", attention: "▲", unchecked: "?", stale: "?", unmeasured: "?", quiet: "●" };
 
 /** Each watched environment, compact: its state in words and a glyph, how fresh its last check is, readiness and memory. */
 function fleetStripView(model: Model, h: H): Html {
@@ -200,7 +215,7 @@ function headerView(model: Model, h: H): Html {
         ],
         [
           iconSearch(h),
-          h.span([h.Class("search-trigger-label")], ["Search incidents, findings, archived..."]),
+          h.span([h.Class("search-trigger-label")], ["Search incidents, findings, prompts..."]),
           h.kbd([h.Class("kbd")], ["/"]),
         ],
       ),
@@ -260,8 +275,12 @@ function noticeBarView(text: string, h: H): Html {
 
 function inboxRailView(model: Model, h: H): Html {
   const items = visibleInbox(model);
-  const prodCount = model.inbox.filter((i) => isProduction(model, i)).length;
-  const preprodCount = model.inbox.length - prodCount;
+  const open = model.inbox.filter((i) => i.disposition === "inbox");
+  const prodCount = open.filter((i) => isProduction(model, i)).length;
+  const preprodCount = open.length - prodCount;
+  const muted = model.inbox.filter((i) => i.disposition === "never").length;
+  const { rows, pending } = arrangedInbox(model);
+  const causes = model.status?.causes.length ?? 0;
 
   const filterOption = (value: EnvFilter, label: string, count?: number): Html =>
     h.button(
@@ -288,7 +307,7 @@ function inboxRailView(model: Model, h: H): Html {
     );
 
   return h.aside(
-    [h.Class("inbox-rail"), h.AriaLabel("Incident inbox")],
+    [h.Class("inbox-rail"), h.AriaLabel("Inbox")],
     [
       h.div(
         [h.Class("rail-header")],
@@ -297,7 +316,15 @@ function inboxRailView(model: Model, h: H): Html {
             [h.Class("rail-title-row")],
             [
               h.h2([h.Class("rail-heading")], ["Inbox"]),
-              h.span([h.Class("rail-total")], [String(model.inbox.length)]),
+              h.span([h.Class("rail-total")], [String(open.length)]),
+              ...(muted > 0
+                ? [
+                    h.button(
+                      [h.Class("text-action rail-muted"), h.Type("button"), h.Title("What Never is hiding (m)"), h.OnClick(Message.ToggledMuted())],
+                      [iconNever(h), `Muted ${muted}`],
+                    ),
+                  ]
+                : []),
             ],
           ),
           h.div(
@@ -305,16 +332,9 @@ function inboxRailView(model: Model, h: H): Html {
             [
               h.div(
                 [h.Class("segmented"), h.Role("radiogroup"), h.AriaLabel("Filter by environment tier")],
-                [
-                  filterOption("all", "All", model.inbox.length),
-                  filterOption("prod", "Prod", prodCount),
-                  filterOption("preprod", "Pre-prod", preprodCount),
-                ],
+                [filterOption("all", "All", open.length), filterOption("prod", "Prod", prodCount), filterOption("preprod", "Pre-prod", preprodCount)],
               ),
-              h.div(
-                [h.Class("segmented"), h.Role("radiogroup"), h.AriaLabel("Sort order")],
-                [sortOption("priority", "Priority"), sortOption("recent", "Recent")],
-              ),
+              h.div([h.Class("segmented"), h.Role("radiogroup"), h.AriaLabel("Sort order")], [sortOption("priority", "Priority"), sortOption("recent", "Recent")]),
             ],
           ),
         ],
@@ -324,33 +344,77 @@ function inboxRailView(model: Model, h: H): Html {
         [
           model.connection === "connecting" && model.inbox.length === 0
             ? inboxConnectingView(h)
-            : model.inbox.length === 0
+            : open.length === 0 && causes === 0
               ? inboxEmptyView(model, h)
-              : items.length === 0
+              : items.length === 0 && causes === 0
                 ? h.div(
                     [h.Class("rail-empty")],
                     [
-                      h.p([h.Class("empty-title")], ["No incidents match this filter."]),
-                      h.button(
-                        [h.Class("text-action"), h.Type("button"), h.OnClick(Message.ChangedEnvFilter({ filter: "all" }))],
-                        ["Show all environments"],
-                      ),
+                      h.p([h.Class("empty-title")], ["Nothing in the inbox matches this filter."]),
+                      h.button([h.Class("text-action"), h.Type("button"), h.OnClick(Message.ChangedEnvFilter({ filter: "all" }))], ["Show all environments"]),
                     ],
                   )
-                : h.ul(
-                    [h.Class("inbox-list"), h.Role("listbox"), h.AriaLabel("Incidents")],
-                    items.map((item) => inboxItemView(model, item, item.incidentId === model.focus, h)),
-                  ),
+                : h.div([h.Class("inbox-groups")], GROUPS.flatMap((g) => groupView(model, g, rows[g], pending[g], h))),
         ],
       ),
       h.div(
         [h.Class("rail-footer")],
         [
           h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["j"]), h.kbd([h.Class("kbd")], ["k"]), " move"]),
-          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["a"]), " archive"]),
-          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["p"]), " prompt"]),
+          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["d"]), " done"]),
+          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["l"]), " later"]),
+          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["n"]), " never"]),
+          h.span([h.Class("hint-item")], [h.kbd([h.Class("kbd")], ["u"]), " undo"]),
         ],
       ),
+    ],
+  );
+}
+
+/** One group: its heading with a count, its rows (or only the count, for Working and Quiet), and its "new" line. */
+function groupView(model: Model, group: Group, rows: ReadonlyArray<Row>, pending: number, h: H): ReadonlyArray<Html> {
+  if (rows.length === 0 && pending === 0) return [];
+  const collapsible = COLLAPSED.includes(group);
+  const shown = !collapsible || model.expanded[group] === true;
+  const total = rows.length + pending;
+  return [
+    h.section(
+      [h.Class(`inbox-group group-${group}`), h.AriaLabel(GROUP_TITLE[group]), h.DataAttribute("group", group)],
+      [
+        collapsible
+          ? h.button(
+              [h.Class("group-head toggle"), h.Type("button"), h.AriaExpanded(shown), h.OnClick(Message.ToggledGroup({ group }))],
+              [h.span([h.Class("group-title")], [GROUP_TITLE[group]]), h.span([h.Class("group-count")], [String(total)]), h.span([h.Class("group-caret"), h.AriaHidden(true)], [shown ? "▾" : "▸"])],
+            )
+          : h.div([h.Class("group-head")], [h.span([h.Class("group-title")], [GROUP_TITLE[group]]), h.span([h.Class("group-count")], [String(total)])]),
+        ...(shown
+          ? [
+              h.ul(
+                [h.Class("inbox-list"), h.Role("listbox"), h.AriaLabel(GROUP_TITLE[group])],
+                rows.map((row) => (row.kind === "cause" ? causeRowView(row.cause, h) : inboxItemView(model, row.item, row.why, group, row.item.incidentId === model.focus, h))),
+              ),
+            ]
+          : []),
+        ...(pending > 0
+          ? [
+              h.button(
+                [h.Class("pending-line"), h.Type("button"), h.DataAttribute("pending", String(pending)), h.OnClick(Message.PressedShowNew())],
+                [`${pending} new`, h.span([h.Class("pending-hint")], [" · ", h.kbd([h.Class("kbd")], ["r"]), " to show"])],
+              ),
+            ]
+          : []),
+      ],
+    ),
+  ];
+}
+
+/** A cause that stops Overwatch working: what it is, since when, and the exact thing to do. */
+function causeRowView(cause: Cause, h: H): Html {
+  return h.li(
+    [h.Key(`cause:${cause.id}`), h.Class("inbox-item cause-item"), h.DataAttribute("cause", cause.id), h.Role("option")],
+    [
+      h.div([h.Class("item-top")], [h.span([h.Class("sev-glyph cause-glyph"), h.Title("Suspended")], [iconOffline(h)]), h.span([h.Class("item-title")], [cause.title])]),
+      h.code([h.Class("cause-fix")], [cause.fix]),
     ],
   );
 }
@@ -367,34 +431,45 @@ function inboxConnectingView(h: H): Html {
 }
 
 function inboxEmptyView(model: Model, h: H): Html {
-  const watcherCount = model.status?.watchers.length ?? 0;
+  const quiet = allQuiet(model);
   return h.div(
-    [h.Class("rail-empty all-clear")],
+    [h.Class(quiet ? "rail-empty all-clear" : "rail-empty"), h.DataAttribute("all-quiet", String(quiet))],
     [
-      h.div([h.Class("empty-icon")], [iconVerified(h)]),
-      h.p([h.Class("empty-title")], ["Inbox clear"]),
+      h.div([h.Class("empty-icon")], [quiet ? iconVerified(h) : iconUnverified(h)]),
+      h.p([h.Class("empty-title")], [quiet ? "All quiet" : "Inbox empty"]),
       h.p(
         [h.Class("empty-copy")],
         [
-          watcherCount > 0
-            ? `${watcherCount} watchers polling on schedule. Archived incidents stay quiet unless something new breaks.`
-            : "Nothing needs your decision right now. New incidents appear live without reload.",
+          quiet
+            ? "Every environment is checked and quiet. What you marked Done comes back if it happens again."
+            : "Nothing needs a decision, but not every environment is checked and quiet: see the strip above.",
         ],
       ),
       h.button(
         [h.Class("text-action"), h.Type("button"), h.OnClick(Message.OpenedSearch())],
-        ["Search archived history"],
+        ["Search past incidents"],
       ),
     ],
   );
 }
 
-function inboxItemView(model: Model, item: InboxItem, focused: boolean, h: H): Html {
+function inboxItemView(model: Model, item: InboxItem, why: string, group: Group, focused: boolean, h: H): Html {
   const prod = isProduction(model, item);
+  const way = (kind: "done" | "later" | "never", label: string, key: string, icon: Html) =>
+    h.button(
+      [
+        h.Class(`item-way-btn way-${kind}`),
+        h.Type("button"),
+        h.Title(`${label} (${key})`),
+        h.AriaLabel(`${label}: ${item.title}`),
+        h.OnClick(Message.ChoseWayOut({ incidentId: item.incidentId, kind }), { propagation: "Stop" }),
+      ],
+      [icon],
+    );
   return h.li(
     [
       h.Key(item.incidentId),
-      h.Class(`inbox-item sev-${item.severity}${focused ? " focused" : ""}${prod ? " tier-prod" : ""}`),
+      h.Class(`inbox-item sev-${item.severity}${focused ? " focused" : ""}${prod ? " tier-prod" : ""}${item.back ? " came-back" : ""}`),
       h.DataAttribute("incident", item.incidentId),
       h.Role("option"),
       h.AriaSelected(focused),
@@ -410,16 +485,7 @@ function inboxItemView(model: Model, item: InboxItem, focused: boolean, h: H): H
         [
           h.span([h.Class(`sev-glyph sev-${item.severity}`), h.Title(`Severity: ${item.severity}`)], [iconSeverity(h, item.severity)]),
           h.span([h.Class("item-title")], [item.title]),
-          h.button(
-            [
-              h.Class("item-archive-btn"),
-              h.Type("button"),
-              h.Title("Archive incident (a)"),
-              h.AriaLabel(`Archive ${item.title}`),
-              h.OnClick(Message.ClickedArchive({ incidentId: item.incidentId }), { propagation: "Stop" }),
-            ],
-            [iconArchive(h)],
-          ),
+          h.span([h.Class("item-ways")], [way("done", "Done", "d", iconDone(h)), way("later", "Later", "l", iconLater(h)), way("never", "Never", "n", iconNever(h))]),
         ],
       ),
       h.div(
@@ -432,14 +498,27 @@ function inboxItemView(model: Model, item: InboxItem, focused: boolean, h: H): H
           h.time([h.Class("meta-time"), h.Title(utcStamp(item.lastAt))], [relativeAge(item.lastAt)]),
         ],
       ),
-      ...(item.verdict
+      ...(group === "needs" ? [h.div([h.Class(`item-why${item.back ? " back" : ""}`)], [why])] : []),
+      ...((() => {
+        const bounced = item.back ? bounceOffer(model, item) : null;
+        if (bounced === null) return [];
+        return [
+          h.div(
+            [h.Class("bounce-offer")],
+            [
+              `Back ${bounced} times since Done. `,
+              h.button([h.Class("text-action"), h.Type("button"), h.OnClick(Message.ClickedLaterWorse({ incidentId: item.incidentId }), { propagation: "Stop" })], [h.kbd([h.Class("kbd")], ["w"]), " Later until it gets worse"]),
+              " · ",
+              h.button([h.Class("text-action"), h.Type("button"), h.OnClick(Message.ChoseWayOut({ incidentId: item.incidentId, kind: "never" }), { propagation: "Stop" })], [h.kbd([h.Class("kbd")], ["n"]), " Never"]),
+            ],
+          ),
+        ];
+      })()),
+      ...(item.verdict && group !== "needs"
         ? [
             h.div(
               [h.Class(`item-verdict verdict-${item.verdict}`)],
-              [
-                h.span([h.Class("verdict-tag")], [verdictLabel(item.verdict)]),
-                h.span([h.Class("verdict-cause")], [item.cause ?? ""]),
-              ],
+              [h.span([h.Class("verdict-tag")], [verdictLabel(item.verdict)]), h.span([h.Class("verdict-cause")], [item.cause ?? ""])],
             ),
           ]
         : []),
@@ -465,18 +544,22 @@ function focusView(model: Model, h: H): ReadonlyArray<Html> {
 }
 
 function emptyFocusView(model: Model, h: H): Html {
-  const hasItems = model.inbox.length > 0;
+  const hasItems = model.inbox.some((i) => i.disposition === "inbox");
+  // "All quiet" only when allQuiet says so: never while anything is stale, failing, suspended, unchecked or unmeasured.
+  const quiet = allQuiet(model);
   return h.div(
-    [h.Class("empty-focus")],
+    [h.Class("empty-focus"), h.DataAttribute("all-quiet", String(quiet))],
     [
       h.div([h.Class("empty-focus-reticle")], [logoMark(h, 52)]),
-      h.h2([h.Class("empty-focus-title")], [hasItems ? "Put an incident in focus" : "All environments quiet"]),
+      h.h2([h.Class("empty-focus-title")], [hasItems ? "Put an incident in focus" : quiet ? "All environments quiet" : "Nothing to decide, but not everything is checked"]),
       h.p(
         [h.Class("empty-focus-copy")],
         [
           hasItems
             ? "Select any incident on the left to inspect its telemetry, checked citations, and agent thread, or prompt directly with it locked in focus."
-            : "Every watcher is on schedule and nothing is waiting for a decision. Press / to search past incidents, findings, and archived threads.",
+            : quiet
+              ? "Every watcher is on schedule and nothing is waiting for a decision. Press / to search past incidents, findings and prompts, wherever they went."
+              : "The inbox is empty, but some environment is not checked, failing, suspended or missing a reading: see the strip above.",
         ],
       ),
       h.div(
@@ -484,7 +567,7 @@ function emptyFocusView(model: Model, h: H): Html {
         [
           h.div([h.Class("key-pair")], [h.kbd([h.Class("kbd")], ["j / k"]), h.span([], ["Step through inbox"])]),
           h.div([h.Class("key-pair")], [h.kbd([h.Class("kbd")], ["p"]), h.span([], ["Focus prompt bar"])]),
-          h.div([h.Class("key-pair")], [h.kbd([h.Class("kbd")], ["a"]), h.span([], ["Archive focused item"])]),
+          h.div([h.Class("key-pair")], [h.kbd([h.Class("kbd")], ["d l n"]), h.span([], ["Done, Later, Never"])]),
           h.div([h.Class("key-pair")], [h.kbd([h.Class("kbd")], ["/"]), h.span([], ["Search everything"])]),
         ],
       ),
@@ -505,8 +588,22 @@ function focusLoadingView(h: H): Html {
 }
 
 function focusHeaderView(model: Model, page: IncidentPageState, h: H): Html {
-  const archived = page.disposition === "archived";
   const prod = isProduction(model, page);
+  const item = model.inbox.find((i) => i.incidentId === page.incidentId);
+  const way = item?.way ?? null;
+  const wayButton = (kind: "done" | "later" | "never", label: string, key: string, icon: Html) =>
+    h.button(
+      [h.Class(`way-action way-${kind}`), h.Type("button"), h.OnClick(Message.ChoseWayOut({ incidentId: page.incidentId, kind }))],
+      [icon, h.span([], [label]), h.kbd([h.Class("kbd")], [key])],
+    );
+  const where =
+    page.disposition === "done"
+      ? `Done${way?.label ? `: ${way.label}` : ""}`
+      : page.disposition === "later"
+        ? `Later: ${way?.label ?? "until something changes"}${way?.until ? ` (back ${utcStamp(way.until)})` : ""}`
+        : page.disposition === "never"
+          ? `Never${way?.label ? ` (${way.label})` : ""}: muted in ${page.app}/${page.environment}`
+          : null;
   return h.header(
     [h.Class("focus-header")],
     [
@@ -524,18 +621,24 @@ function focusHeaderView(model: Model, page: IncidentPageState, h: H): Html {
               h.code([h.Class("mono-id")], [page.incidentId]),
             ],
           ),
-          archived
-            ? h.span([h.Class("disposition-state archived")], [iconArchive(h), "Archived"])
-            : h.button(
+          where
+            ? h.div(
+                [h.Class("way-actions")],
                 [
-                  h.Class("archive-action"),
-                  h.Type("button"),
-                  h.OnClick(Message.ClickedArchive({ incidentId: page.incidentId })),
+                  h.span([h.Class(`disposition-state ${page.disposition}`)], [where]),
+                  h.button(
+                    [h.Class("way-action way-restore"), h.Type("button"), h.OnClick(Message.ClickedRestore({ incidentId: page.incidentId }))],
+                    [iconUndo(h), h.span([], ["Put back"]), h.kbd([h.Class("kbd")], ["u"])],
+                  ),
                 ],
-                [iconArchive(h), h.span([], ["Archive"]), h.kbd([h.Class("kbd")], ["a"])],
+              )
+            : h.div(
+                [h.Class("way-actions")],
+                [wayButton("done", "Done", "d", iconDone(h)), wayButton("later", "Later", "l", iconLater(h)), wayButton("never", "Never", "n", iconNever(h))],
               ),
         ],
       ),
+      ...(page.back ? [h.p([h.Class("came-back-line")], [page.back])] : []),
       h.div(
         [h.Class("focus-title-row")],
         [
@@ -615,6 +718,10 @@ function findingsSectionView(page: IncidentPageState, h: H, copiedSummary: strin
   );
 }
 
+/** "2 of 3 quotes matched": a matched quote proves the words are where the finding says, not that it is right. */
+export const quotesMatched = (evidence: ReadonlyArray<{ readonly verified?: boolean }>) =>
+  evidence.length === 0 ? "no quotes" : `${evidence.filter((e) => e.verified === true).length} of ${evidence.length} quote${evidence.length === 1 ? "" : "s"} matched`;
+
 function findingView(finding: Finding, at: number, sessionId: string, num: number, h: H, runId: string, copied: boolean): Html {
   const eng = finding.engineering;
   const prod = finding.product;
@@ -632,7 +739,10 @@ function findingView(finding: Finding, at: number, sessionId: string, num: numbe
         [h.Class("finding-head")],
         [
           h.span([h.Class(`verdict-cell verdict-${eng.verdict}`)], [verdictIcon, h.span([], [verdictLabel(eng.verdict)])]),
-          h.span([h.Class("finding-meta-item")], [`${eng.confidence} confidence`]),
+          // Not the model's own confidence: how many of its quotes were found exactly where it said, and what code it read.
+          h.span([h.Class("finding-meta-item quotes-matched")], [quotesMatched(eng.evidence)]),
+          h.span([h.Class("meta-sep"), h.AriaHidden(true)], ["·"]),
+          h.span([h.Class("finding-meta-item")], [finding.code ? (finding.code.deployed ? "deployed code" : "not the deployed code") : "no code read"]),
           h.span([h.Class("meta-sep"), h.AriaHidden(true)], ["·"]),
           h.span([h.Class("finding-meta-item")], [eng.causeBasis]),
           ...(eng.codeLocation
@@ -696,7 +806,7 @@ function findingView(finding: Finding, at: number, sessionId: string, num: numbe
                               [h.Class(ev.verified ? "citation-status verified" : "citation-status unverified")],
                               [
                                 ev.verified ? iconVerified(h) : iconUnverified(h),
-                                h.span([], [ev.verified ? "Verified by code" : "Unverifiable"]),
+                                h.span([], [ev.verified ? "Exact quote matched" : "Not matched"]),
                               ],
                             ),
                             h.code([h.Class("citation-source")], [ev.source]),
@@ -879,27 +989,12 @@ function timelineSectionView(page: IncidentPageState, h: H): Html {
 }
 
 function promptBarView(model: Model, h: H, routePreview: string): Html {
-  const archived = model.page?.disposition === "archived";
-  const disabled = !model.focus || archived;
+  const disabled = !model.focus;
   const focusedItem = model.page ?? model.inbox.find((i) => i.incidentId === model.focus) ?? null;
   const ocOffline = model.status !== null && !model.status.opencode.connected;
 
-  const overrideOption = (value: Override, label: string, title: string): Html =>
-    h.button(
-      [
-        h.Class(model.override === value ? "seg-option active" : "seg-option"),
-        h.Type("button"),
-        h.Role("radio"),
-        h.AriaChecked(model.override === value),
-        h.Disabled(disabled),
-        h.Title(title),
-        h.OnClick(Message.ChangedOverride({ override: value })),
-      ],
-      [label],
-    );
-
   return h.form(
-    [h.Class(`prompt-dock${model.focus ? " locked" : ""}`), h.OnSubmit(Message.SubmittedPrompt())],
+    [h.Class(`prompt-dock${model.focus ? " locked" : ""}`), h.OnSubmit(Message.SubmittedPrompt({}))],
     [
       h.div(
         [h.Class("prompt-context-strip")],
@@ -932,25 +1027,18 @@ function promptBarView(model: Model, h: H, routePreview: string): Html {
             h.Class("prompt-input"),
             h.Type("text"),
             h.Placeholder(
-              archived
-                ? "Archived thread is closed"
-                : model.focus
+              model.focus
                   ? "Ask about this incident (e.g. compare with staging, check recent deploys, draft next step)..."
                   : "Select an incident first to lock it in focus",
             ),
             h.Value(draftOf(model)),
             h.OnInput((text) => Message.ChangedDraft({ text })),
+            // Shift+Enter: a new session. Prevented here, so the form does not also send it where the preview says.
+            h.OnKeyDownPreventDefault((key, modifiers) => (key === "Enter" && modifiers.shiftKey ? Option.some(Message.SubmittedPrompt({ newSession: true })) : Option.none())),
             h.Disabled(disabled),
             h.Autocomplete("off"),
           ]),
-          h.div(
-            [h.Class("segmented session-selector"), h.Role("radiogroup"), h.AriaLabel("Session routing override")],
-            [
-              overrideOption("auto", "Auto", "Let Overwatch decide: continue idle session, queue behind running, or start fresh"),
-              overrideOption("new", "New", "Start a new session from the thread handoff"),
-              overrideOption("here", "Here", "Send to the latest session on this thread"),
-            ],
-          ),
+          h.span([h.Class("send-hint")], [h.kbd([h.Class("kbd")], ["⇧↵"]), " new session"]),
           h.button(
             [h.Class("send-btn"), h.Type("submit"), h.Disabled(disabled || isSending(model) || !draftOf(model).trim())],
             [h.span([], ["Send"]), iconSend(h)],
@@ -983,7 +1071,7 @@ function searchModalView(model: Model, h: H): Html {
                 h.Id("search-input"),
                 h.Class("palette-input"),
                 h.Type("search"),
-                h.Placeholder("Search incidents, findings, archived items, or exact ID..."),
+                h.Placeholder("Search incidents, findings, prompts, or an exact ID..."),
                 h.Value(model.searchQuery),
                 h.OnInput((query) => Message.ChangedSearchQuery({ query })),
                 h.Autocomplete("off"),
@@ -999,7 +1087,7 @@ function searchModalView(model: Model, h: H): Html {
                 : model.searchLoading
                   ? h.p([h.Class("palette-state")], ["Searching event log..."])
                   : !model.searchQuery.trim()
-                    ? h.p([h.Class("palette-state")], ["Type keywords (like stripe, oom, archived, jwks) or an incident ID. Archived incidents are included."])
+                    ? h.p([h.Class("palette-state")], ["Type keywords (like stripe, oom, jwks) or an incident ID. Done, Later and Never incidents are included."])
                     : model.searchHits.length === 0
                       ? h.p([h.Class("palette-state")], [`No matches for "${model.searchQuery.trim()}".`])
                       : h.ul(
@@ -1178,8 +1266,14 @@ function shortcutsModalView(h: H): Html {
     ["j / ↓", "Focus next incident in inbox"],
     ["k / ↑", "Focus previous incident in inbox"],
     ["p / Enter", "Jump into the prompt bar for the focused incident"],
-    ["a / e", "Archive focused incident"],
-    ["/ or ⌘K", "Search incidents, findings, prompts, and archived threads"],
+    ["d", "Done: comes back if it happens again"],
+    ["l", "Later: until a time (2h, tomorrow, monday), until something changes, or until it gets worse"],
+    ["w", "Later until it gets worse, in one key"],
+    ["n", "Never: mute this in its environment, after showing what it would hide"],
+    ["u", "Undo the last way out, or put back the incident in focus"],
+    ["r", "Show the new rows waiting in each group, and sort"],
+    ["m", "What Never is hiding, with undo"],
+    ["/ or ⌘K", "Search incidents, findings and prompts, wherever they went"],
     ["1 / 2 / 3", "Filter inbox: All / Prod / Pre-prod"],
     ["t", "Toggle Night Watch / Daylight Chart theme"],
     ["?", "Toggle this keyboard reference"],
@@ -1214,6 +1308,96 @@ function shortcutsModalView(h: H): Html {
               h.div([h.Class("shortcut-row")], [h.dt([], [h.kbd([h.Class("kbd")], [keys])]), h.dd([], [desc])]),
             ),
           ),
+        ],
+      ),
+    ],
+  );
+}
+
+/** Later asks when; Never shows what it would have hidden and takes an optional reason. Enter confirms, Esc cancels. */
+function wayOutSheetView(model: Model, h: H): Html {
+  const sheet = model.sheet!;
+  const item = model.inbox.find((i) => i.incidentId === sheet.incidentId);
+  const title = item?.title ?? sheet.incidentId;
+  const body =
+    sheet._tag === "Later"
+      ? [
+          h.h2([h.Class("sheet-title")], ["Later"]),
+          h.p([h.Class("sheet-copy")], [title]),
+          h.form(
+            [h.Class("later-form"), h.OnSubmit(Message.ConfirmedSheet())],
+            [
+              h.label([h.Class("sheet-label"), h.For("later-input")], [
+                "Until when? 2h, 2d, tomorrow, monday; \"worse\" for until it gets worse; or empty for until something changes (a new finding or a deploy). Any Later comes back if it gets worse.",
+              ]),
+              h.input([h.Id("later-input"), h.Class("sheet-input"), h.Type("text"), h.Value(sheet.text), h.Autocomplete("off"), h.OnInput((text) => Message.ChangedLaterText({ text }))]),
+              ...(sheet.error ? [h.p([h.Class("sheet-error"), h.Role("alert")], [sheet.error])] : []),
+              h.button([h.Class("primary-btn"), h.Type("submit")], ["Later"]),
+            ],
+          ),
+        ]
+      : [
+          h.h2([h.Class("sheet-title")], ["Never"]),
+          h.p([h.Class("sheet-copy")], [`${title} — muted in ${item?.app ?? "its app"}/${item?.environment ?? "environment"}.`]),
+          h.p(
+            [h.Class("sheet-preview"), h.DataAttribute("would-hide", String(item ? wouldHide(item, model.status?.at ?? Date.now()) : 0))],
+            [`Over the last 14 days this would have hidden ${item ? wouldHide(item, model.status?.at ?? Date.now()) : 0} occurrence(s). It breaks through only if its severity rises above ${item?.severity ?? "today's"}.`],
+          ),
+          h.div(
+            [h.Class("segmented reason-chips"), h.Role("radiogroup"), h.AriaLabel("Reason (optional)")],
+            (["noise", "expected", "duplicate"] as const).map((reason) =>
+              h.button(
+                [
+                  h.Class(sheet.reason === reason ? "seg-option active" : "seg-option"),
+                  h.Type("button"),
+                  h.Role("radio"),
+                  h.AriaChecked(sheet.reason === reason),
+                  h.OnClick(Message.ChoseMuteReason({ reason: sheet.reason === reason ? null : reason })),
+                ],
+                [reason],
+              ),
+            ),
+          ),
+          h.button([h.Class("primary-btn"), h.Type("button"), h.OnClick(Message.ConfirmedSheet())], ["Never show this"]),
+        ];
+  return h.div(
+    [h.Class("overlay-backdrop"), h.OnClick(Message.ClosedOverlays())],
+    [h.div([h.Class("shortcuts-sheet way-sheet"), h.Role("dialog"), h.AriaModal(true), h.AriaLabel(sheet._tag), h.OnClick(Message.CompletedDomEffect(), { propagation: "Stop" })], body)],
+  );
+}
+
+/** The one list of what Never hides: each with its reason, what it hid this week and when last, and undo. */
+function mutedListView(model: Model, h: H): Html {
+  const rows = mutedRows(model, model.status?.at ?? Date.now());
+  return h.div(
+    [h.Class("overlay-backdrop"), h.OnClick(Message.ClosedOverlays())],
+    [
+      h.div(
+        [h.Class("shortcuts-sheet muted-sheet"), h.Role("dialog"), h.AriaModal(true), h.AriaLabel("Muted"), h.OnClick(Message.CompletedDomEffect(), { propagation: "Stop" })],
+        [
+          h.div(
+            [h.Class("sheet-head")],
+            [h.h2([h.Class("sheet-title")], ["Muted"]), h.button([h.Class("icon-btn"), h.Type("button"), h.OnClick(Message.ClosedOverlays()), h.AriaLabel("Close")], [iconClose(h)])],
+          ),
+          rows.length === 0
+            ? h.p([h.Class("sheet-copy")], ["Nothing is muted."])
+            : h.ul(
+                [h.Class("muted-list")],
+                rows.map(({ item, hiddenThisWeek, lastHiddenAt }) =>
+                  h.li(
+                    [h.Key(item.incidentId), h.Class("muted-row"), h.DataAttribute("incident", item.incidentId)],
+                    [
+                      h.div([h.Class("muted-main")], [
+                        h.span([h.Class("item-title")], [item.title]),
+                        h.span([h.Class("muted-meta")], [
+                          `${item.app}/${item.environment}${item.way?.label ? ` · ${item.way.label}` : ""} · hid ${hiddenThisWeek} this week${lastHiddenAt ? ` · last ${relativeAge(lastHiddenAt)}` : ""}`,
+                        ]),
+                      ]),
+                      h.button([h.Class("way-action way-restore"), h.Type("button"), h.OnClick(Message.ClickedRestore({ incidentId: item.incidentId }))], [iconUndo(h), h.span([], ["Undo"])]),
+                    ],
+                  ),
+                ),
+              ),
         ],
       ),
     ],

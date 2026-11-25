@@ -1,6 +1,6 @@
 /**
  * The page's logic, without a browser: the update function, routing preview, sorting/filtering, search hit
- * resolution, keyboard navigation, and offline/archived guards. What the page sends is the typed client's commands;
+ * resolution, keyboard navigation, the grouped inbox and the ways out. What the page sends is the typed client's commands;
  * the commands themselves are exercised against the service in service.test.ts.
  */
 import { IncidentId, ThreadId } from "../src/domain/ids.ts";
@@ -11,6 +11,8 @@ const inc1 = IncidentId.make("inc_1");
 const inc2 = IncidentId.make("inc_2");
 const inc3 = IncidentId.make("inc_3");
 const base = init({ session: "s" }).model;
+/** What the inbox view adds to every row: no way out taken, nothing running. */
+const row = { disposition: "inbox" as const, way: null, back: null, changedAt: 0, running: 0, failure: null, recent: [], hidden: [], returns: [] };
 
 const prodError = {
   incidentId: inc1,
@@ -23,6 +25,7 @@ const prodError = {
   occurrences: 2,
   verdict: null,
   cause: null,
+  ...row,
 };
 const stagingWarn = {
   incidentId: inc2,
@@ -35,6 +38,7 @@ const stagingWarn = {
   occurrences: 4,
   verdict: null,
   cause: null,
+  ...row,
 };
 const qaInfo = {
   incidentId: inc3,
@@ -47,6 +51,7 @@ const qaInfo = {
   occurrences: 1,
   verdict: "not_real",
   cause: "large batch",
+  ...row,
 };
 
 const withThread = (status: string): Model => ({
@@ -94,6 +99,7 @@ describe("the page", () => {
         lastAt: 200,
         occurrences: 2,
         disposition: "inbox" as const,
+        back: null,
         sample: null,
         query: null,
         timeline: [],
@@ -116,42 +122,53 @@ describe("the page", () => {
     expect(visibleInbox({ ...withAll, envFilter: "preprod" }).map((i) => i.incidentId)).toEqual([inc2, inc3]);
   });
 
-  test("archive sends the command with a fresh command id and advances focus (or clears when last)", () => {
-    const single = { ...base, inbox: [prodError], focus: inc1 };
-    const archivedLast = update(single, Message.ClickedArchive({ incidentId: inc1 }));
-    expect(archivedLast.model.focus).toBe(null);
-    expect(archivedLast.model.commandIds.sent).toBe(1);
-    expect(archivedLast.commands).toHaveLength(1);
+  test("Done sends the command with a fresh command id, says so with undo, and advances focus (or clears when last)", () => {
+    const single = update({ ...base, focus: inc1 }, Message.ReceivedInbox({ items: [prodError] })).model;
+    const doneLast = update(single, Message.ChoseWayOut({ incidentId: inc1, kind: "done" }));
+    expect(doneLast.model.focus).toBe(null);
+    expect(doneLast.model.commandIds.sent).toBe(1);
+    expect(doneLast.commands).toHaveLength(1);
+    expect(doneLast.model.notice).toBe("Done. Press u to undo.");
+    expect(doneLast.model.undo).toEqual({ incidentId: inc1, kind: "done" });
+    expect(update(doneLast.model, Message.PressedUndo()).commands).toHaveLength(1);
 
-    const multi = { ...base, inbox: [prodError, stagingWarn], focus: inc1 };
-    const archivedFirst = update(multi, Message.ClickedArchive({ incidentId: inc1 }));
-    expect(archivedFirst.model.focus).toBe(inc2);
-    expect(archivedFirst.commands).toHaveLength(1);
+    const multi = update({ ...base, focus: inc1 }, Message.ReceivedInbox({ items: [prodError, stagingWarn] })).model;
+    const doneFirst = update(multi, Message.ChoseWayOut({ incidentId: inc1, kind: "done" }));
+    expect(doneFirst.model.focus).toBe(inc2);
+    expect(doneFirst.commands).toHaveLength(1);
   });
 
-  test("keyboard focus navigation steps through the visible inbox", () => {
-    const populated = { ...base, inbox: [qaInfo, prodError] };
+  test("keyboard focus navigation steps through the rows as shown", () => {
+    // inc1 is new; inc3's finding says not real, so it is Quiet, collapsed to a count until opened.
+    const populated = update(base, Message.ReceivedInbox({ items: [qaInfo, prodError] })).model;
     const first = update(populated, Message.MovedFocus({ delta: 1 })).model;
     expect(first.focus).toBe(inc1);
-    const second = update(first, Message.MovedFocus({ delta: 1 })).model;
+    expect(update(first, Message.MovedFocus({ delta: 1 })).model.focus).toBe(inc1);
+    const opened = update(first, Message.ToggledGroup({ group: "quiet" })).model;
+    const second = update(opened, Message.MovedFocus({ delta: 1 })).model;
     expect(second.focus).toBe(inc3);
     const back = update(second, Message.MovedFocus({ delta: -1 })).model;
     expect(back.focus).toBe(inc1);
   });
 
-  test("the prompt bar sends nothing without focus, text, or on archived incidents, and previews routing", () => {
-    expect(update({ ...base, drafts: { none: "why?" } }, Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
+  test("the prompt bar sends nothing without focus or text, works on an incident marked Done, and previews routing", () => {
+    expect(update({ ...base, drafts: { none: "why?" } }, Message.SubmittedPrompt({})).commands ?? []).toHaveLength(0);
     expect(preview(base)).toContain("Put an incident in focus");
     expect(preview({ ...base, focus: inc1 })).toBe("new session: a new session");
     expect(preview(withThread("idle"))).toBe("continues ses_a: continues the idle session");
     expect(preview(withThread("running"))).toBe("continues ses_a: queued behind the session's current turn");
-    expect(preview({ ...withThread("idle"), override: "new" })).toBe("new session: a new session, as asked");
-    const sent = update({ ...withThread("idle"), drafts: { [inc1]: " why? " } }, Message.SubmittedPrompt());
+    // No session picker: Enter sends where the preview says; Shift+Enter sends in a new session.
+    const ask = (newSession?: boolean) =>
+      ((update({ ...withThread("idle"), drafts: { [inc1]: "why?" } }, Message.SubmittedPrompt(newSession ? { newSession } : {})).commands ?? [])[0] as unknown as { args: { input: { override: string } } }).args.input.override;
+    expect(ask()).toBe("auto");
+    expect(ask(true)).toBe("new");
+    const sent = update({ ...withThread("idle"), drafts: { [inc1]: " why? " } }, Message.SubmittedPrompt({}));
     expect(sent.commands).toHaveLength(1);
     // Kept until the send is acknowledged.
     expect(sent.model.drafts[inc1]).toBe(" why? ");
 
-    const archivedModel: Model = {
+    // An incident marked Done can still be asked about: its thread stays open.
+    const doneModel: Model = {
       ...withThread("idle"),
       drafts: { [inc1]: "retry?" },
       page: {
@@ -166,20 +183,21 @@ describe("the page", () => {
         firstAt: 100,
         lastAt: 200,
         occurrences: 2,
-        disposition: "archived",
+        disposition: "done",
+        back: null,
         sample: null,
         query: null,
         timeline: [],
         findings: [],
       },
     };
-    expect(preview(archivedModel)).toContain("archived");
-    expect(update(archivedModel, Message.SubmittedPrompt()).commands ?? []).toHaveLength(0);
+    expect(preview(doneModel)).toBe("continues ses_a: continues the idle session");
+    expect(update(doneModel, Message.SubmittedPrompt({})).commands ?? []).toHaveLength(1);
   });
 
   test("search resolves incident, finding, and thread hits to an IncidentId", () => {
     expect(
-      incidentIdFromHit({ kind: "incident", id: "inc_abc", title: "", snippet: "", app: null, environment: null, state: "archived", at: 0 }),
+      incidentIdFromHit({ kind: "incident", id: "inc_abc", title: "", snippet: "", app: null, environment: null, state: "done", at: 0 }),
     ).toBe(IncidentId.make("inc_abc"));
     expect(
       incidentIdFromHit({ kind: "prompt", id: "thr_inc_abc", title: "", snippet: "", app: null, environment: null, state: null, at: 0 }),

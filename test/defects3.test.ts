@@ -89,6 +89,31 @@ describe("2. what a source returned is its output, and an unknown label is never
   });
 });
 
+describe("2b. what a finding may claim", () => {
+  test("real and observed with no quote that matched is recorded as inferred, and the reply says so; a git_history quote counts", async () => {
+    const { fileFinding } = await import("../src/service/mcp.ts");
+    const { recordShown } = await import("../src/service/tables.ts");
+    const { service, ports } = await toolsHarness();
+    const recorded: any[] = [];
+    const recording = { ...ports, complete: async (_r: string, _s: string, finding: unknown) => void recorded.push(finding) };
+    try {
+      const reply = await fileFinding(recording, "ses_t", { token: "tok", finding: findingWith([{ source: "a-dashboard-i-saw", quote: "p99 latency 4s on checkout" }]) });
+      expect(reply).toContain('recorded as "inferred"');
+      expect(recorded[0].engineering.causeBasis).toBe("inferred");
+      expect(recorded[0].engineering.evidence[0].verified).toBe(false);
+      // A quote from git_history's own output is from a source Overwatch can read: it verifies, and observed stands.
+      await service.atomically((db) => recordShown(db, { sessionId: "ses_t", threadId: "thr_t", runId: "run_t", source: "git:log", text: "a1b2c3d raise payment timeout to 3000ms", at: Date.now() }));
+      await service.atomically((db) => db.prepare("UPDATE run_tokens SET token = 'tok2', run_id = 'run_t2' WHERE token = 'tok'").run());
+      const second = await fileFinding(recording, "ses_t", { token: "tok2", finding: findingWith([{ source: "git_history", quote: "raise payment timeout to 3000ms" }]) });
+      expect(second).toBe("Recorded. Stop now.");
+      expect(recorded[1].engineering.causeBasis).toBe("observed");
+      expect(recorded[1].engineering.evidence[0].verified).toBe(true);
+    } finally {
+      await service.stop();
+    }
+  });
+});
+
 describe("3. a thread follows the deployed commit across deploys", () => {
   test("after a second deploy the next session reads the new commit, the brief says the code changed, and each finding records exactly what it read", { timeout: 60_000 }, async () => {
     const { execFileSync } = await import("node:child_process");
@@ -301,14 +326,14 @@ describe("7. a send whose acknowledgement was lost is not asked twice", () => {
   test("the page: the prompt id is chosen with the draft and every retry of the same text carries it", async () => {
     const app = (await import("../web/src/app.ts")) as Record<string, any>;
     const a = "inc_a";
-    const item = { incidentId: a, title: a, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null };
+    const item = { incidentId: a, title: a, app: "x", environment: "production", severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null, disposition: "inbox", way: null, back: null, changedAt: 0, running: 0, failure: null, recent: [], hidden: [], returns: [] };
     let m = app.update(app.init({ session: "s" }).model, app.Message.ReceivedInbox({ items: [item] })).model;
     m = app.update(m, app.Message.ClickedItem({ incidentId: a })).model;
     m = app.update(m, app.Message.ChangedDraft({ text: "why" })).model;
     m = app.update(m, app.Message.ChangedDraft({ text: "why is A failing?" })).model;
     const chosen = m.draftIds[a].promptId;
     const send = () => {
-      m = app.update(m, app.Message.SubmittedPrompt()).model;
+      m = app.update(m, app.Message.SubmittedPrompt({})).model;
       const [commandId, entry] = Object.entries(m.sending as Record<string, { promptId: string }>).at(-1)!;
       return { commandId, promptId: entry.promptId };
     };
@@ -450,7 +475,7 @@ describe("8. every shape of secret is redacted on every way text enters", () => 
 describe("9. the page uses the tier the service reports, not the environment's name", () => {
   test("an environment called live with an explicit production tier stays under the production filter, and one called prod-like but staging does not", async () => {
     const app = (await import("../web/src/app.ts")) as Record<string, any>;
-    const item = (id: string, environment: string) => ({ incidentId: id, title: id, app: "shop-api", environment, severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null });
+    const item = (id: string, environment: string) => ({ incidentId: id, title: id, app: "shop-api", environment, severity: "error", firstAt: 0, lastAt: 0, occurrences: 1, verdict: null, cause: null, disposition: "inbox", way: null, back: null, changedAt: 0, running: 0, failure: null, recent: [], hidden: [], returns: [] });
     const env = (environment: string, tier: string) => ({ app: "shop-api", environment, tier, everyMs: 60_000, checkedThrough: null, lastError: null, expectsReadings: false, notReadyPods: null, memoryPctOfLimit: null });
     const model = {
       ...app.init({ session: "s" }).model,

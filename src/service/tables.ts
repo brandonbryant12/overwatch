@@ -35,6 +35,17 @@ export const SERVICE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS capacity (
     watcher TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (watcher, source)
   ) WITHOUT ROWID;
+  -- What each source last said is running, to notice a deploy.
+  CREATE TABLE IF NOT EXISTS revisions_seen (
+    watcher TEXT NOT NULL, source TEXT NOT NULL, revisions TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (watcher, source)
+  ) WITHOUT ROWID;
+  -- A connection (a kubectl context, a Datadog site, or one source) that has failed: the kind of failure, how many in a
+  -- row, when to try next, and since when it is suspended. No row is a healthy connection.
+  CREATE TABLE IF NOT EXISTS connections (
+    key TEXT PRIMARY KEY, kind TEXT NOT NULL, streak INTEGER NOT NULL, next_at INTEGER NOT NULL,
+    suspended_at INTEGER, first_failed_at INTEGER NOT NULL, last_error TEXT NOT NULL, fix TEXT NOT NULL,
+    config TEXT NOT NULL, updated_at INTEGER NOT NULL
+  ) WITHOUT ROWID;
   CREATE TABLE IF NOT EXISTS pending_reports (
     id INTEGER PRIMARY KEY, watcher TEXT NOT NULL, kind TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL
   );
@@ -76,7 +87,7 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
  * The version of the database's layout, written by the service and checked by restore. Bump it whenever a table or
  * column the service reads changes, and say in the commit how an older database is brought forward.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export function createServiceTables(db: DatabaseSync) {
   db.exec(SERVICE_SCHEMA);

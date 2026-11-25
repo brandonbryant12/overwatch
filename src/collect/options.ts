@@ -106,6 +106,27 @@ export interface Options {
   };
   readonly schedule: boolean;
   readonly notify: boolean;
+  /**
+   * When an incident that took a way out comes back (plan 5.1). Later: the rate reaches `multiple` times what it was,
+   * with `atLeast` more. Never: `neverMultiple` times. A Done that came back `offerAfter` times within `offerWithinMs`
+   * offers Later until it gets worse, or Never.
+   */
+  readonly comeBack: {
+    readonly multiple: number;
+    readonly atLeast: number;
+    readonly neverMultiple: number;
+    readonly offerAfter: number;
+    readonly offerWithinMs: number;
+  };
+  /** How Overwatch treats a source that keeps failing (plan 4.1). */
+  readonly failures: {
+    /** The first wait after a failure that may pass; it doubles each time. */
+    readonly backoffMs: number;
+    /** The longest wait between attempts, and how often a suspended source is probed. */
+    readonly ceilingMs: number;
+    /** Failures in a row, of a kind that may pass, before a source is suspended. */
+    readonly attempts: number;
+  };
   readonly dataDir: string;
   /** `provider/model` for investigation and fix sessions. Defaults to the server's default model. */
   readonly model?: { readonly providerID: string; readonly id: string };
@@ -368,6 +389,8 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
   const concurrency = isRecord(input.concurrency) ? input.concurrency : {};
   const permissions = isRecord(input.permissions) ? input.permissions : {};
   const redaction = isRecord(input.redaction) ? input.redaction : {};
+  const comeBack = isRecord(input.comeBack) ? input.comeBack : {};
+  const failures = isRecord(input.failures) ? input.failures : {};
   const options: Options = {
     apps,
     watchers,
@@ -399,6 +422,18 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
     schedule: input.schedule !== false,
     // The master switch; each environment's own `notify` decides within it. The notifier itself does nothing off macOS.
     notify: input.notify !== false,
+    comeBack: {
+      multiple: positiveInt(comeBack.multiple, 2, "comeBack.multiple", errors),
+      atLeast: positiveInt(comeBack.atLeast, 5, "comeBack.atLeast", errors),
+      neverMultiple: positiveInt(comeBack.neverMultiple, 10, "comeBack.neverMultiple", errors),
+      offerAfter: positiveInt(comeBack.offerAfter, 3, "comeBack.offerAfter", errors),
+      offerWithinMs: duration(comeBack.offerWithin, "14d", "comeBack.offerWithin", errors),
+    },
+    failures: {
+      backoffMs: duration(failures.backoff, "1m", "failures.backoff", errors),
+      ceilingMs: duration(failures.ceiling, "30m", "failures.ceiling", errors),
+      attempts: positiveInt(failures.attempts, 5, "failures.attempts", errors),
+    },
     dataDir: typeof input.dataDir === "string" ? expandPath(input.dataDir, base) : defaultDataDir(),
     ...(input.model !== undefined ? { model: parseModel(input.model, errors) } : {}),
     permissions: {
@@ -406,6 +441,7 @@ export function parseOptions(raw: unknown, base?: string): ParsedOptions {
       fixer: permissionRules(permissions.fixer, "permissions.fixer", errors),
     },
   };
+  if (options.failures.backoffMs > options.failures.ceilingMs) errors.push("failures.backoff cannot exceed failures.ceiling");
   if (options.lookback.initialMs > options.lookback.maxMs) errors.push("lookback.initial cannot exceed lookback.max");
   if (options.timeouts.sliceMs < options.timeouts.sourceMs) errors.push("timeouts.slice cannot be shorter than timeouts.source");
   return { options, errors };

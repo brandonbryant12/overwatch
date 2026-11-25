@@ -193,3 +193,31 @@ export const iconTerminal = <M>(h: H<M>): Html =>
     h.rect([h.X("1.8"), h.Y("2.6"), h.Width("12.4"), h.Height("10.8"), h.Rx("1.8"), h.Stroke("currentColor"), h.StrokeWidth("1.4")]),
     h.path([h.D("M4.5 6.2 L6.8 8.2 L4.5 10.2 M8.2 10.2 H11.5"), h.Stroke("currentColor"), h.StrokeWidth("1.45"), h.StrokeLinecap("round"), h.StrokeLinejoin("round")]),
   ]);
+
+/** Done: a check, plain. */
+export const iconDone = <M>(h: H<M>): Html =>
+  glyph(h, "icon-done", [
+    h.path([h.D("M3.2 8.4 L6.6 11.6 L12.8 4.6"), h.Stroke("currentColor"), h.StrokeWidth("1.7"), h.StrokeLinecap("round"), h.StrokeLinejoin("round")]),
+  ]);
+
+/** Later: a clock. */
+export const iconLater = <M>(h: H<M>): Html =>
+  glyph(h, "icon-later", [
+    h.circle([h.Cx("8"), h.Cy("8"), h.R("6"), h.Stroke("currentColor"), h.StrokeWidth("1.4")]),
+    h.path([h.D("M8 4.6 V8.2 L10.4 9.6"), h.Stroke("currentColor"), h.StrokeWidth("1.5"), h.StrokeLinecap("round"), h.StrokeLinejoin("round")]),
+  ]);
+
+/** Never: a bell struck through. */
+export const iconNever = <M>(h: H<M>): Html =>
+  glyph(h, "icon-never", [
+    h.path([h.D("M4.4 11 V7.6 C4.4 5.6 6 4 8 4 C10 4 11.6 5.6 11.6 7.6 V11 L12.6 12 H3.4 Z"), h.Stroke("currentColor"), h.StrokeWidth("1.35"), h.StrokeLinejoin("round")]),
+    h.path([h.D("M6.8 13.6 H9.2"), h.Stroke("currentColor"), h.StrokeWidth("1.35"), h.StrokeLinecap("round")]),
+    h.path([h.D("M2.6 2.6 L13.4 13.4"), h.Stroke("currentColor"), h.StrokeWidth("1.5"), h.StrokeLinecap("round")]),
+  ]);
+
+/** Undo: an arrow turning back. */
+export const iconUndo = <M>(h: H<M>): Html =>
+  glyph(h, "icon-undo", [
+    h.path([h.D("M5.6 3.6 L2.8 6.4 L5.6 9.2"), h.Stroke("currentColor"), h.StrokeWidth("1.5"), h.StrokeLinecap("round"), h.StrokeLinejoin("round")]),
+    h.path([h.D("M3 6.4 H9.6 C11.6 6.4 13.2 8 13.2 10 C13.2 12 11.6 13.4 9.6 13.4 H7"), h.Stroke("currentColor"), h.StrokeWidth("1.5"), h.StrokeLinecap("round")]),
+  ]);

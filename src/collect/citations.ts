@@ -11,6 +11,8 @@ import type { Finding } from "./report.ts";
  * - A quote attributed to a telemetry source must be in something that source returned to this session: a
  *   `query_telemetry` result, or an excerpt of that source in its context pack. Other parts of the context pack
  *   (Overwatch's description, the owner's question, earlier conclusions) are recorded as shown but are not evidence.
+ * - A quote attributed to `git_history` (or a `git:<operation>` label) must be in something that tool returned to
+ *   this session: Overwatch ran it, so its output is a source it can read.
  * - A quote attributed to anything else (a skill, a tool Overwatch cannot see, a mistyped name) cannot be checked.
  *   It is kept and marked not verified, even if the same words appear somewhere the session was shown.
  *
@@ -103,6 +105,7 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
     const path = label.replace(/:\d+(-\d+)?$/, "");
     const file = input.directory ? await codeFile(input.directory, path) : undefined;
     const fromSource = input.sources.includes(label);
+    const fromGit = label === "git_history" || label.startsWith("git:");
     let verified: boolean;
     if (file !== undefined) {
       verified = quoted(item.quote, file);
@@ -115,6 +118,9 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
           `engineering.evidence[${index}]: the quote is not in anything source "${label}" returned to this investigation. Copy a line exactly from an overwatch_query result or from the report you were given, or name where it really came from.`,
         );
       }
+    } else if (fromGit) {
+      verified = input.shown.some((shown) => (label.startsWith("git:") ? shown.source === label : shown.source.startsWith("git:")) && quoted(item.quote, shown.text));
+      if (!verified) errors.push(`engineering.evidence[${index}]: the quote is not in anything git_history returned to this investigation. Copy a line exactly from its output.`);
     } else {
       // Not a configured source and not a file: Overwatch cannot tell where it came from, so it is not verified,
       // whatever else the session was shown. It is kept, and shown as unverified.
@@ -123,4 +129,18 @@ export async function verifyCitations(finding: Finding, input: CitationInput): P
     evidence.push({ source: item.source, quote: item.quote, verified });
   }
   return { finding: { ...finding, engineering: { ...e, evidence } }, errors };
+}
+
+/**
+ * What a finding may claim. A verdict of "real" with the cause "observed" needs at least one quote that matched
+ * something Overwatch can read (a configured source's output, a file in the worktree, `git_history`'s output).
+ * Without one the cause is recorded as "inferred", and `note` says so to the agent.
+ */
+export function claimable(finding: Finding): { finding: Finding; note: string | null } {
+  const e = finding.engineering;
+  if (e.verdict !== "real" || e.causeBasis !== "observed" || e.evidence.some((x) => x.verified === true)) return { finding, note: null };
+  return {
+    finding: { ...finding, engineering: { ...e, causeBasis: "inferred" } },
+    note: 'The cause was recorded as "inferred", not "observed": a real verdict with an observed cause needs at least one quote that exactly matched a source\'s output, a file in the working directory, or git_history\'s output, and none did.',
+  };
 }

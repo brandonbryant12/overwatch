@@ -8,6 +8,21 @@
  * journal. A stretch the lookback cap cut off is a gap, recorded on the Watcher.
  */
 import { MetricPointRow, WindowCheckpointRow } from "./rows.ts";
+import { afterFailure, classifyFailure, connectionOf, fixFor, type FailureKind } from "../collect/failures.ts";
+
+/** A row of the connections table: a connection that has failed (plan 4.1). */
+export interface ConnectionRow {
+  readonly key: string;
+  readonly kind: string;
+  readonly streak: number;
+  readonly next_at: number;
+  readonly suspended_at: number | null;
+  readonly first_failed_at: number;
+  readonly last_error: string;
+  readonly fix: string;
+  readonly config: string;
+  readonly updated_at: number;
+}
 import type { DatabaseSync } from "node:sqlite";
 import type { WatcherConfig } from "../collect/options.ts";
 import { sourceContext, type Runtime } from "../collect/runtime.ts";
@@ -49,8 +64,15 @@ export interface CollectorPorts {
   readonly atomically: <A>(work: (db: DatabaseSync) => A) => Promise<A>;
   readonly read: <A>(work: (db: DatabaseSync) => A) => Promise<A>;
   readonly report: (report: SignalReport) => Promise<void>;
-  readonly recordGap: (watcher: string, gap: Gap) => Promise<void>;
+  /** Records what else a watcher noticed, on the Watcher: a gap, a deploy, a source suspended or resumed. */
+  readonly note: (watcher: string, note: WatcherNote, commandId: string) => Promise<void>;
 }
+
+export type WatcherNote =
+  | ({ readonly kind: "gap" } & Gap)
+  | { readonly kind: "deploy"; readonly source: string; readonly revisions: ReadonlyArray<string>; readonly previous: ReadonlyArray<string>; readonly at: number }
+  | { readonly kind: "suspended"; readonly source: string; readonly connection: string; readonly failure: string; readonly reason: string; readonly fix: string; readonly at: number }
+  | { readonly kind: "resumed"; readonly source: string; readonly connection: string; readonly at: number };
 
 export interface WatcherRunSummary {
   readonly watcher: string;
@@ -58,6 +80,8 @@ export interface WatcherRunSummary {
   readonly reported: number;
   readonly windows: ReadonlyArray<{ readonly source: string; readonly from: number; readonly to: number; readonly status: "ok" | "failed"; readonly note?: string }>;
   readonly gaps: ReadonlyArray<Gap>;
+  /** Sources not read this run because their connection is waiting after failures, or suspended. */
+  readonly skipped: ReadonlyArray<{ readonly source: string; readonly until: number; readonly suspended: boolean; readonly kind: FailureKind }>;
   readonly failed: ReadonlyArray<string>;
 }
 
@@ -144,11 +168,12 @@ export function evaluateMetrics(
 /** Sends a watcher's saved reports in order, removing each once the model has it. */
 export async function flushReports(ports: CollectorPorts, watcher: string): Promise<void> {
   const rows = await ports.read(
-    (db) => db.prepare("SELECT id, kind, payload FROM pending_reports WHERE watcher = ? ORDER BY id").all(watcher) as Array<{ id: number; kind: string; payload: string }>,
+    (db) => db.prepare("SELECT id, kind, command_id, payload FROM pending_reports WHERE watcher = ? ORDER BY id").all(watcher) as Array<{ id: number; kind: string; command_id: string; payload: string }>,
   );
   for (const row of rows) {
     if (row.kind === "signal") await ports.report(JSON.parse(row.payload) as SignalReport);
-    else await ports.recordGap(watcher, JSON.parse(row.payload) as Gap);
+    else if (row.kind === "gap") await ports.note(watcher, { kind: "gap", ...(JSON.parse(row.payload) as Gap) }, row.command_id);
+    else await ports.note(watcher, JSON.parse(row.payload) as WatcherNote, row.command_id);
     await ports.atomically((db) => db.prepare("DELETE FROM pending_reports WHERE id = ?").run(row.id));
   }
 }
@@ -162,10 +187,12 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
   const windows: Array<WatcherRunSummary["windows"][number]> = [];
   const gaps: Gap[] = [];
   const failed: string[] = [];
+  const skipped: Array<WatcherRunSummary["skipped"][number]> = [];
   let reported = 0;
 
   // Reports a previous run saved and did not get to send (it crashed, or the model was busy) go first.
   await flushReports(ports, watcher.id);
+  const limits = options.failures;
   for (const source of watcher.sources) {
     const config = env.sources[source]!;
     const type = sourceType(config.type);
@@ -173,6 +200,19 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       failed.push(source);
       continue;
     }
+    // A connection that keeps failing is not hammered: it waits its turn, or its slow probe when suspended.
+    const where = { watcher: watcher.id, source, ...(options.datadog ? { datadogSite: options.datadog.site } : {}) };
+    const keys = [connectionOf(config, where), `source:${watcher.id}/${source}`];
+    const configText = JSON.stringify(config);
+    const health = await ports.read((db) => keys.map((key) => (db.prepare("SELECT * FROM connections WHERE key = ?").get(key) as ConnectionRow | undefined) ?? null));
+    // A source suspended for its configuration is tried again as soon as its configuration changes.
+    const waiting = health.find((row) => row && !(row.kind === "config" && row.config !== configText) && row.next_at > now);
+    if (waiting) {
+      skipped.push({ source, until: waiting.next_at, suspended: waiting.suspended_at !== null, kind: waiting.kind as FailureKind });
+      continue;
+    }
+    let failure: string | undefined;
+    let revisions: ReadonlyArray<string> | undefined;
     const stored = await ports.read(
       (db) => {
         const found = db.prepare("SELECT at, seen FROM checkpoints WHERE watcher = ? AND source = ?").get(watcher.id, source);
@@ -208,6 +248,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         seen = deduped.seen;
         fresh.push(...deduped.fresh);
         if (result.capacity) capacity = redactText(result.capacity, { maxBytes: 2_000 });
+        if (result.revisions?.length) revisions = [...new Set(result.revisions.map((r) => redactText(r, { maxBytes: 200 })))].sort();
         samples.push(...result.samples);
         checkpoint = window.to;
         covered.push({ source, from: window.from, to: window.to, status: "ok", ...(result.notes.length ? { note: redactText(result.notes.join("; "), { maxBytes: 1000 }) } : {}) });
@@ -215,6 +256,7 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
         // The checkpoint stays at the end of the last slice that worked; the next run starts there.
         covered.push({ source, from: window.from, to: window.to, status: "failed", note: redactText((error as Error).message, { maxBytes: 500 }) });
         failed.push(source);
+        failure = redactText((error as Error).message, { maxBytes: 500 });
         break;
       }
     }
@@ -274,7 +316,43 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       });
     }
     const sourceGaps = gaps.filter((g) => g.source === source);
+    const notes: Array<{ commandId: string; note: WatcherNote }> = [];
     await ports.atomically((db) => {
+      // Failure handling, saved with the checkpoint: a failure moves the connection's next attempt (and may suspend it);
+      // a success clears it, and a suspended one is recorded as resumed.
+      if (failure !== undefined) {
+        const classified = classifyFailure(failure);
+        const key = classified.kind === "permission" || classified.kind === "config" ? keys[1]! : keys[0]!;
+        const before = db.prepare("SELECT * FROM connections WHERE key = ?").get(key) as ConnectionRow | undefined;
+        const next = afterFailure(before ? { kind: before.kind as FailureKind, streak: before.streak, nextAt: before.next_at, suspendedAt: before.suspended_at } : undefined, classified, now, limits);
+        const fix = fixFor(classified.kind, config, { app: watcher.app, environment: watcher.environment, source, ...(options.datadog ? { datadogKey: options.datadog.apiKey } : {}) });
+        db.prepare(
+          `INSERT INTO connections (key, kind, streak, next_at, suspended_at, first_failed_at, last_error, fix, config, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (key) DO UPDATE SET kind = excluded.kind, streak = excluded.streak, next_at = excluded.next_at, suspended_at = excluded.suspended_at,
+             last_error = excluded.last_error, fix = excluded.fix, config = excluded.config, updated_at = excluded.updated_at`,
+        ).run(key, next.kind, next.streak, next.nextAt, next.suspendedAt, before?.first_failed_at ?? now, failure, fix, configText, now);
+        if (next.suspendedAt !== null && before?.suspended_at == null) {
+          notes.push({ commandId: `suspend_${key}_${now}`, note: { kind: "suspended", source, connection: key, failure: next.kind, reason: failure, fix, at: now } });
+        }
+      } else {
+        for (const key of keys) {
+          const before = db.prepare("SELECT suspended_at FROM connections WHERE key = ?").get(key) as { suspended_at: number | null } | undefined;
+          if (!before) continue;
+          db.prepare("DELETE FROM connections WHERE key = ?").run(key);
+          if (before.suspended_at !== null) notes.push({ commandId: `resume_${key}_${now}`, note: { kind: "resumed", source, connection: key, at: now } });
+        }
+        // What is running changed since the last check: a deploy.
+        if (revisions) {
+          const seenBefore = db.prepare("SELECT revisions FROM revisions_seen WHERE watcher = ? AND source = ?").get(watcher.id, source) as { revisions: string } | undefined;
+          const text = JSON.stringify(revisions);
+          if (seenBefore?.revisions !== text) {
+            db.prepare("INSERT INTO revisions_seen (watcher, source, revisions, at) VALUES (?, ?, ?, ?) ON CONFLICT (watcher, source) DO UPDATE SET revisions = excluded.revisions, at = excluded.at").run(watcher.id, source, text, now);
+            if (seenBefore) {
+              notes.push({ commandId: `deploy_${watcher.id}_${source}_${now}`, note: { kind: "deploy", source, revisions, previous: JSON.parse(seenBefore.revisions) as string[], at: now } });
+            }
+          }
+        }
+      }
       if (checkpoint !== undefined) {
         db.prepare("INSERT INTO checkpoints (watcher, source, at, seen) VALUES (?, ?, ?, ?) ON CONFLICT (watcher, source) DO UPDATE SET at = excluded.at, seen = excluded.seen").run(
           watcher.id,
@@ -293,10 +371,11 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       const pending = db.prepare("INSERT OR IGNORE INTO pending_reports (watcher, kind, command_id, payload) VALUES (?, ?, ?, ?)");
       for (const report of reports) pending.run(watcher.id, "signal", report.commandId, JSON.stringify(report));
       for (const gap of sourceGaps) pending.run(watcher.id, "gap", `gap_${watcher.id}_${gap.source}_${gap.from}_${gap.to}`, JSON.stringify(gap));
+      for (const { commandId, note } of notes) pending.run(watcher.id, note.kind, commandId, JSON.stringify(note));
     });
     reported += reports.length;
     await flushReports(ports, watcher.id);
     windows.push(...covered);
   }
-  return { watcher: watcher.id, startedAt: now, reported, windows, gaps, failed };
+  return { watcher: watcher.id, startedAt: now, reported, windows, gaps, failed, skipped };
 }

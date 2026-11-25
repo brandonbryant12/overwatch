@@ -1,6 +1,7 @@
 /**
  * The real page in a headless browser: it shows a new incident without a reload, takes focus, keeps a prompt when
- * the send fails, sends it on retry, and archives.
+ * the send fails, sends it on retry; Never shows what it would hide and takes a reason; the muted list undoes it; a
+ * new arrival waits behind its group's "new" line while the rows stay put; Done by key.
  *
  * Uses an installed Chrome or Chromium through the DevTools protocol over Node's built-in WebSocket, with a
  * throwaway profile; no browser package is added. Set CHROME_BIN to choose the binary. Where none is found the test
@@ -63,9 +64,12 @@ async function launch(url: string) {
       waiting.set(id, resolve);
       socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
-  const { targetId } = await send("Target.createTarget", { url });
+  // Attach to a blank tab first, then navigate: a first-run browser can leave a tab created with a URL on about:blank.
+  const { targetId } = await send("Target.createTarget", { url: "about:blank" });
   const { sessionId } = await send("Target.attachToTarget", { targetId, flatten: true });
   const page = (method: string, params: object = {}) => send(method, params, sessionId);
+  await page("Page.enable");
+  await page("Page.navigate", { url });
   const evaluate = async (expression: string) => (await page("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result?.value;
   const until = async (what: string, expression: string, ms = 15_000) => {
     const deadline = Date.now() + ms;
@@ -93,10 +97,14 @@ describe("the page in a headless browser", () => {
     test("skipped: no Chrome or Chromium found (set CHROME_BIN to run it)", () => undefined);
     return;
   }
-  test("focus, a failed send keeps the prompt, a retry sends it, archive removes the incident", { timeout: 120_000 }, async () => {
+  test("focus, a failed send keeps the prompt, a retry sends it; Never, its undo, rows that stay put, and Done", { timeout: 120_000 }, async () => {
     if (!existsSync(join(WEB, "app.js"))) spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", fileURLToPath(new URL("../scripts/build-web.ts", import.meta.url))]);
     const { service, cluster } = await testService({ deps: { webDir: WEB } });
     const browser = await launch(service.url);
+    const errors: string[] = [];
+    browser.on("Runtime.exceptionThrown", (e) => errors.push(JSON.stringify(e.exceptionDetails).slice(0, 600)));
+    browser.on("Runtime.consoleAPICalled", (e) => e.type === "error" && errors.push(JSON.stringify(e.args).slice(0, 600)));
+    await browser.page("Runtime.enable");
     try {
       await browser.until("the page to load", "document.querySelector('.inbox-item, .empty-focus-title') !== null");
       cluster.log(Date.now() - 60_000, "ERROR payment 42 timed out after 300ms");
@@ -142,8 +150,49 @@ describe("the page in a headless browser", () => {
       await browser.until("the draft to clear once acknowledged", "document.querySelector('#prompt-input').value === ''");
       await browser.until("the prompt on the thread", "document.body.textContent.includes('why are payments timing out?')");
 
-      await browser.evaluate("document.querySelector('.archive-action').click()");
-      await browser.until("the incident to leave the inbox", "document.querySelectorAll('.inbox-item').length === 0");
+      const rows = "document.querySelectorAll('.inbox-item[data-incident]').length";
+      const showNew = async () => {
+        await browser.evaluate("document.querySelector('.pending-line').click()");
+        await browser.evaluate("document.querySelectorAll('.group-head.toggle[aria-expanded=\"false\"]').forEach((b) => b.click())");
+      };
+
+      // Never: before it is confirmed the page shows what it would have hidden, and takes an optional reason.
+      await browser.evaluate("document.querySelector('.focus-header .way-never').click()");
+      await browser.until("the Never sheet", "document.querySelector('.way-sheet .sheet-preview') !== null");
+      expect(await browser.evaluate("document.querySelector('.sheet-preview').dataset.wouldHide")).toBe("1");
+      await browser.evaluate("document.querySelector('.reason-chips .seg-option').click()");
+      await browser.until("the reason chosen", "document.querySelector('.reason-chips .seg-option.active')?.textContent === 'noise'");
+      await browser.evaluate("document.querySelector('.way-sheet .primary-btn').click()");
+      await browser.until("the incident to leave the inbox", `${rows} === 0`);
+      await browser.until("the notice with undo", "(document.querySelector('.notice-text')?.textContent ?? '').includes('Never (noise). Press u to undo.')");
+
+      // The one muted list: what it hides, with undo. Nothing else is shown, so the restored row cannot move anything:
+      // it is shown at once.
+      await browser.until("the muted count", "(document.querySelector('.rail-muted')?.textContent ?? '').includes('Muted 1')");
+      await browser.evaluate("document.querySelector('.rail-muted').click()");
+      await browser.until("the muted list", "document.querySelectorAll('.muted-row').length === 1 && document.querySelector('.muted-row').textContent.includes('noise')");
+      await browser.evaluate("document.querySelector('.muted-row .way-restore').click()");
+      await browser.until("the restored incident shown", `${rows} === 1 || document.querySelector('.group-head.toggle[aria-expanded="false"]') !== null`);
+      await browser.evaluate("document.querySelectorAll('.group-head.toggle[aria-expanded=\"false\"]').forEach((b) => b.click())");
+      await browser.until("the restored incident shown", `${rows} === 1`);
+
+      // A new arrival while the owner looks does not move anything: it waits behind its group's line.
+      cluster.log(Date.now() - 30_000, "ERROR cache miss storm on key prices");
+      await service.collect("shop-api/production");
+      await browser.until("the new arrival's line", "(document.querySelector('.pending-line')?.textContent ?? '').startsWith('1 new')");
+      expect(await browser.evaluate(rows)).toBe(1);
+      await showNew();
+      await browser.until("both shown once asked", `${rows} === 2`);
+
+      // Done by key, on the incident in focus.
+      await browser.evaluate("document.querySelector('.inbox-item[data-incident]').click()");
+      await browser.until("focus", "document.querySelector('.inbox-item.focused') !== null");
+      await browser.evaluate("document.activeElement?.blur(); document.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', bubbles: true }))");
+      await browser.until("one row left after Done", `${rows} === 1`);
+      await browser.until("the Done notice", "(document.querySelector('.notice-text')?.textContent ?? '').startsWith('Done. Press u to undo.')");
+    } catch (error) {
+      const body = await browser.evaluate("document.body.innerText.slice(0, 1500)").catch(() => "");
+      throw new Error(`${(error as Error).message}\n--- page ---\n${body}\n--- errors ---\n${errors.join("\n")}`);
     } finally {
       browser.close();
       await service.stop();

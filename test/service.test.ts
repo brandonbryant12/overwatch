@@ -94,11 +94,12 @@ describe("2. detect once", () => {
 });
 
 describe("3. live page and never twice", () => {
-  test("a collector run shows on an open watch without a reload; archive removes it; the same signal updates it silently", async () => {
+  test("a collector run shows on an open watch without a reload; Done takes it out of the inbox; one more of the same signal updates it silently", async () => {
     const webDir = tempDir("web");
     writeFileSync(join(webDir, "index.html"), "<!doctype html><title>Overwatch</title>");
     const { service, cluster, client } = await testService({ deps: { webDir } });
-    const seen: Array<{ state: { items: ReadonlyArray<{ incidentId: string; occurrences: number }> } | null }> = [];
+    const seen: Array<{ state: { items: ReadonlyArray<{ incidentId: string; occurrences: number; disposition: string }> } | null }> = [];
+    const inInbox = (items: ReadonlyArray<{ disposition: string }>) => items.filter((i) => i.disposition === "inbox");
     const watch = Effect.runFork(
       Effect.gen(function* () {
         const api = yield* OverwatchApi.client;
@@ -115,18 +116,18 @@ describe("3. live page and never twice", () => {
         throw new Error(`${(e as Error).message}; seen ${JSON.stringify(seen).slice(0, 500)}`);
       });
       const incidentId = IncidentId.make(shown[0]!.incidentId);
-      await client((api) => api.ArchiveIncident(incidentId, {}));
-      await until(async () => seen.at(-1)?.state?.items ?? [], (items) => items.length === 0);
+      await client((api) => api.MarkDone(incidentId, {}));
+      await until(async () => seen.at(-1)?.state?.items ?? [], (items) => inInbox(items).length === 0);
       cluster.log(Date.now() - 1_000, "ERROR payment 43 timed out after 300ms");
       await service.collect("shop-api/production");
       const updated = await until(
         () => client((api) => api.IncidentPage.get(incidentId)) as Promise<any>,
         (p) => p?.occurrences === 2,
       );
-      expect(updated.disposition).toBe("archived");
+      expect(updated.disposition).toBe("done");
       await new Promise((r) => setTimeout(r, 300));
-      expect(seen.at(-1)?.state?.items).toEqual([]);
-      expect(((await client((api) => api.Inbox.get("inbox"))) as any).items).toEqual([]);
+      expect(inInbox(seen.at(-1)?.state?.items ?? [])).toEqual([]);
+      expect(inInbox(((await client((api) => api.Inbox.get("inbox"))) as any).items)).toEqual([]);
     } finally {
       await Effect.runPromise(Fiber.interrupt(watch));
       await service.stop();
@@ -170,14 +171,16 @@ describe("7. restore", () => {
     first.cluster.log(now - 18 * MIN, "ERROR cache miss storm on key prices");
     await first.service.collect("shop-api/production");
     const inbox = await until(() => first.client((api) => api.Inbox.get("inbox")) as Promise<any>, (v) => v?.items.length === 2);
-    const archived = inbox.items.find((i: any) => i.title.includes("cache")).incidentId as string;
+    const done = inbox.items.find((i: any) => i.title.includes("cache")).incidentId as string;
     const kept = inbox.items.find((i: any) => i.title.includes("payment")).incidentId as string;
-    await first.client((api) => api.ArchiveIncident(IncidentId.make(archived), {}));
+    await first.client((api) => api.MarkDone(IncidentId.make(done), {}));
     // The triage runs are dispatched once.
     await until(async () => (await first.service.work(), calls.length), (n) => n >= 4);
     await first.service.work();
     expect(calls).toHaveLength(4);
     const dispatched = [...calls];
+    // Views lag their aggregates: the backup is taken once the thread page shows the run as sent.
+    await until(() => first.client((api) => api.ThreadPage.get(threadIdOf(IncidentId.make(kept)))) as Promise<any>, (t) => t?.prompts[0]?.status === "sent");
     const dataDir = first.dataDir;
     const file = join(tempDir("backup"), "overwatch.backup.sqlite");
     backup(join(dataDir, "overwatch.sqlite"), file);
@@ -197,9 +200,9 @@ describe("7. restore", () => {
       await second.service.work();
       expect(calls).toEqual([]);
       const after = (await second.client((api) => api.Inbox.get("inbox"))) as any;
-      expect(after.items.map((i: any) => i.incidentId)).toEqual([kept]);
+      expect(after.items.filter((i: any) => i.disposition === "inbox").map((i: any) => i.incidentId)).toEqual([kept]);
       const byWords = (await second.client((api) => api.Search({ text: "cache storm" }))) as any[];
-      expect(byWords.some((hit) => hit.kind === "incident" && hit.id === archived && hit.state === "archived")).toBe(true);
+      expect(byWords.some((hit) => hit.kind === "incident" && hit.id === done && hit.state === "done")).toBe(true);
       const byId = (await second.client((api) => api.Search({ text: kept }))) as any[];
       expect(byId[0]?.id).toBe(kept);
       const thread = (await second.client((api) => api.ThreadPage.get(threadIdOf(IncidentId.make(kept))))) as any;

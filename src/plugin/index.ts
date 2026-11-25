@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import type { Plugin } from "@opencode/plugin";
 
 /** The service Api version this plugin was built with. Kept equal to `API_VERSION` in src/domain/model.ts by a test. */
-export const API_VERSION = 1;
+export const API_VERSION = 2;
 export const INVESTIGATOR = "overwatch-investigator";
 export const MCP_SERVER = "overwatch";
 export const DEFAULT_URL = "http://127.0.0.1:7450";

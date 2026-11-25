@@ -6,6 +6,7 @@
  * loopback.
  */
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -27,24 +28,33 @@ import { sleep, type Runtime } from "../collect/runtime.ts";
 import { resolveSecret } from "../collect/secrets.ts";
 import { IncidentId, RunId, ThreadId, WatcherId } from "../domain/ids.ts";
 import { AskThread, Thread } from "../domain/thread.ts";
-import { Incident, ReportSignal } from "../domain/incident.ts";
+import { DEFAULT_COME_BACK, Incident, NoteChange, ReportSignal } from "../domain/incident.ts";
 import { API_VERSION, handlers, Overwatch, OverwatchApi } from "../domain/model.ts";
 import { CompleteRun, FailRun, MarkRunSent, NudgeRun, Run } from "../domain/run.ts";
 import { SearchStore } from "../domain/search.ts";
-import { IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
-import { ConfigureWatcher, RecordGap, Watcher } from "../domain/watcher.ts";
+import { INBOX, Inbox, IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
+import { ConfigureWatcher, NoteResumed, NoteSuspended, RecordDeploy, RecordGap, Watcher } from "../domain/watcher.ts";
 import { layerSqlite, SqliteHost } from "../host/sqlite.ts";
 import { CapacityRow, CheckpointRow, CodeBasisRow, CodeRow, MetricStateRow, WatcherRunRow } from "./rows.ts";
-import { runWatcher, type CollectorPorts, type WatcherRunSummary } from "./collector.ts";
+import { runWatcher, type CollectorPorts, type ConnectionRow, type WatcherNote, type WatcherRunSummary } from "./collector.ts";
 import type { ServiceConfig } from "./config.ts";
 import { mcpLayer, type McpPorts } from "./mcp.ts";
 import { deliverNotifications, macNotifier, recordNotificationIntents, type Notifier } from "./notify.ts";
 import { openCodePort, type OpenCodePort } from "./opencode.ts";
 import { catchUp, search } from "./search.ts";
 import { createServiceTables } from "./tables.ts";
+import { causesOf, suspendedEnvironments } from "./causes.ts";
 import { makeWorker } from "./worker.ts";
 import { commitContext, deployContext, resolveCommit, type DeployContext } from "./deploy.ts";
 import { codeForContinuedSession, codeForNewSession, removeWorktrees } from "./worktree.ts";
+
+/** Which network interfaces have which addresses: a change means the network changed (VPN up or down, new Wi-Fi). */
+const networkFingerprint = () =>
+  JSON.stringify(
+    Object.entries(networkInterfaces())
+      .flatMap(([name, list]) => (list ?? []).filter((a) => !a.internal).map((a) => `${name}:${a.address}`))
+      .sort(),
+  );
 
 export const VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version as string;
 
@@ -83,6 +93,8 @@ export interface ServiceHandle {
   readonly mcpPorts: McpPorts;
   /** The collector's ports, for tests that run a watcher with a crash in the middle. */
   readonly collectorPorts: CollectorPorts;
+  /** Try failing and suspended connections at the next poll, as after waking from sleep or a network change. */
+  readonly probeNow: (why: string) => Promise<void>;
   /** Deliver notifications that are due now (or at `now`). Runs on its own every 30 seconds. */
   readonly deliverNotifications: (options?: { readonly now?: number }) => Promise<number>;
 }
@@ -154,14 +166,39 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
         Effect.gen(function* () {
           const incidents = yield* Incident;
           const { incidentId, commandId, ...input } = report;
-          yield* incidents.send(Incident.ref(incidentId), new ReportSignal({ ...input, watcher: WatcherId.make(input.watcher) }), { commandId });
+          // Done ignores what was in flight: up to one polling interval of this watcher after it.
+          const graceMs = options.watchers.find((w) => w.id === input.watcher)?.everyMs ?? DEFAULT_COME_BACK.graceMs;
+          const { multiple, atLeast, neverMultiple } = options.comeBack;
+          yield* incidents.send(Incident.ref(incidentId), new ReportSignal({ ...input, watcher: WatcherId.make(input.watcher), comeBack: { graceMs, multiple, atLeast, neverMultiple } }), { commandId });
         }),
       ),
-    recordGap: (watcher: string, gap: { source: string; from: number; to: number; reason: string }) =>
+    note: (watcher: string, note: WatcherNote, commandId: string) =>
       run(
         Effect.gen(function* () {
           const watchers = yield* Watcher;
-          yield* watchers.send(Watcher.ref(WatcherId.make(watcher)), new RecordGap(gap), { commandId: `gap_${watcher}_${gap.source}_${gap.from}_${gap.to}` });
+          const ref = Watcher.ref(WatcherId.make(watcher));
+          switch (note.kind) {
+            case "gap":
+              yield* watchers.send(ref, new RecordGap({ source: note.source, from: note.from, to: note.to, reason: note.reason }), { commandId });
+              return;
+            case "deploy":
+              yield* watchers.send(ref, new RecordDeploy({ source: note.source, revisions: [...note.revisions], previous: [...note.previous], at: note.at }), { commandId });
+              return;
+            case "suspended":
+              yield* watchers.send(ref, new NoteSuspended({ source: note.source, connection: note.connection, kind: note.failure, reason: note.reason, fix: note.fix, at: note.at }), { commandId });
+              return;
+            case "resumed":
+              yield* watchers.send(ref, new NoteResumed({ source: note.source, connection: note.connection, at: note.at }), { commandId });
+              return;
+          }
+        }),
+      ),
+    /** Every incident in the inbox view, whatever its way out. */
+    inbox: () =>
+      run(
+        Effect.gen(function* () {
+          const views = yield* Inbox;
+          return Option.match(yield* views.get(INBOX), { onNone: () => [], onSome: (v) => v.items });
         }),
       ),
     pendingRuns: () =>
@@ -227,7 +264,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     );
     await atomically((db) => db.prepare("INSERT OR IGNORE INTO watcher_runs (watcher, next_at) VALUES (?, ?)").run(watcher.id, Date.now()));
   }
-  const collectorPorts = { runtime: collectRuntime, atomically, read, report: domain.report, recordGap: domain.recordGap };
+  const collectorPorts = { runtime: collectRuntime, atomically, read, report: domain.report, note: domain.note };
   const running = new Set<string>();
   const collect = async (watcherId: string) => {
     const watcher = options.watchers.find((w) => w.id === watcherId);
@@ -249,6 +286,14 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       throw error;
     } finally {
       running.delete(watcherId);
+    }
+  };
+  /** Failing and suspended connections are tried at the next poll, instead of waiting out their backoff. */
+  const probeNow = async (why: string) => {
+    const changed = await atomically((db) => db.prepare("UPDATE connections SET next_at = ? WHERE next_at > ?").run(Date.now(), Date.now()).changes);
+    if (changed > 0) {
+      log(`${why}: trying ${changed} failing connection(s) now`);
+      await atomically((db) => db.prepare("UPDATE watcher_runs SET next_at = ? WHERE next_at > ?").run(Date.now(), Date.now()));
     }
   };
   /** Runs each watcher that is due once, however many intervals it missed (a laptop asleep misses several). */
@@ -388,6 +433,40 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     await atomically((db) =>
       db.prepare("INSERT INTO projections (name, position, version) VALUES ('cleanup', ?, 1) ON CONFLICT (name) DO UPDATE SET position = excluded.position").run(archived.end),
     );
+    await bringBackOnDeploy();
+  };
+  /** A deploy in an environment brings back its incidents deferred until something changes, saying which deploy. */
+  const bringBackOnDeploy = async () => {
+    const deploys = await read((db) => {
+      const state = db.prepare("SELECT position FROM projections WHERE name = 'changes'").get() as { position: number } | undefined;
+      const rows = db.prepare("SELECT position, stream, data FROM journal WHERE position > ? AND type = 'DeployObserved' ORDER BY position").all(state?.position ?? 0) as Array<{ position: number; stream: string; data: string }>;
+      const end = (db.prepare("SELECT max(position) AS p FROM journal").get() as { p: number | null }).p ?? 0;
+      return { rows, end };
+    });
+    if (deploys.rows.length) {
+      const items = await domain.inbox();
+      for (const row of deploys.rows) {
+        const watcher = options.watchers.find((w) => w.id === row.stream.slice(row.stream.indexOf("/") + 1));
+        if (!watcher) continue;
+        const deploy = JSON.parse(row.data) as { revisions: string[] };
+        const waiting = items.filter((i) => i.app === watcher.app && i.environment === watcher.environment && i.disposition === "later" && i.way?.waitsFor === "change");
+        for (const item of waiting) {
+          await run(
+            Effect.gen(function* () {
+              const incidents = yield* Incident;
+              yield* incidents.send(
+                Incident.ref(item.incidentId),
+                new NoteChange({ cause: "deploy", reason: `Back: a deploy in ${watcher.environment} (now running ${deploy.revisions.join(", ").slice(0, 120)}).` }),
+                { commandId: `change_${item.incidentId}_${row.position}` },
+              );
+            }),
+          );
+        }
+      }
+    }
+    await atomically((db) =>
+      db.prepare("INSERT INTO projections (name, position, version) VALUES ('changes', ?, 1) ON CONFLICT (name) DO UPDATE SET position = excluded.position").run(deploys.end),
+    );
   };
   let reacting: Promise<void> | undefined;
   const unlisten = connection.afterCommit(() => {
@@ -435,6 +514,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     );
     const checkpoints = await read((db) => db.prepare("SELECT watcher, source, at FROM checkpoints ORDER BY watcher, source").all().map(CheckpointRow));
     const w = worker.status();
+    const connections = await read((db) => db.prepare("SELECT * FROM connections ORDER BY key").all() as unknown as ConnectionRow[]);
+    const suspended = suspendedEnvironments(options, connections);
     const value: ServiceStatus = {
       name: "overwatch",
       version: VERSION,
@@ -466,9 +547,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
             expectsReadings: w.sources.some((source) => env.sources[source]?.type === "kubernetes"),
             notReadyPods: reading("not_ready_pods"),
             memoryPctOfLimit: reading("memory_pct_of_limit"),
+            suspended: suspended.get(w.id) ?? null,
           };
         }),
       ),
+      causes: causesOf(options, connections, { connected: w.opencode !== undefined, waiting: w.waiting, checkedAt: w.checkedAt }),
+      offer: { after: options.comeBack.offerAfter, withinMs: options.comeBack.offerWithinMs },
       at: Date.now(),
     };
     // Checked against the same schema the page decodes with.
@@ -538,8 +622,19 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
   const timers: NodeJS.Timeout[] = [];
   if (deps.background !== false) {
     let polling = false;
+    let lastTick = Date.now();
+    let network = networkFingerprint();
     timers.push(
       setInterval(() => {
+        // Waking from sleep (the clock jumped past several ticks) or a network change probes failing connections at once.
+        const now = Date.now();
+        const woke = now - lastTick > tickMs * 4;
+        const nextNetwork = networkFingerprint();
+        lastTick = now;
+        if (woke || nextNetwork !== network) {
+          network = nextNetwork;
+          void probeNow(woke ? "woke from sleep" : "network changed");
+        }
         if (polling) return;
         polling = true;
         pollDue().finally(() => (polling = false));
@@ -565,6 +660,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     status,
     mcpPorts,
     collectorPorts,
+    probeNow,
     deliverNotifications: (options?: { readonly now?: number }) => deliverNow(options?.now),
     stop: async () => {
       for (const timer of timers) clearInterval(timer);

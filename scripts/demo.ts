@@ -1,7 +1,9 @@
 /**
  * Demo mode (`pnpm run demo`): starts the Overwatch service against a temporary data directory with fake sources
  * and seeds a varied, believable command-center state (no real cluster, Datadog, repository host or OpenCode
- * required). Stays running on loopback so you can explore the UI, archive items, and send prompts.
+ * required). Every inbox group is seeded (Needs you, New, Working, Quiet), with an incident marked Done, one deferred
+ * until it gets worse that came back with its reason, one deferred until something changes, a muted fingerprint with
+ * what it hid, and a suspended connection. Stays running on loopback so you can take ways out, undo them, and send prompts.
  *
  * Usage:
  *   pnpm run demo
@@ -12,8 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as Effect from "effect/Effect";
 import {
-  ArchiveIncident,
   AskThread,
+  Defer,
+  MarkDone,
+  Mute,
   CompleteRun,
   FailRun,
   Incident,
@@ -599,8 +603,17 @@ async function main() {
     }),
   );
 
-  // ------------------------------------------------------------------ 7. Archived incidents (out of inbox, searchable, one with quiet recurrence)
-  const archivedAuthStgId = await report({
+  // ------------------------------------------------------------------ 7. The ways out: Done, Done that came back, Later, Never
+  const wayOut = (id: Awaited<ReturnType<typeof report>>, command: MarkDone | Defer | Mute, commandId: string) =>
+    run(
+      Effect.gen(function* () {
+        const incidents = yield* Incident;
+        yield* incidents.send(Incident.ref(id), command, { commandId });
+      }),
+    );
+
+  // Done: dealt with. More of the same stays out of the inbox.
+  const doneJwksId = await report({
     app: "auth-gateway",
     environment: "staging",
     source: "pods",
@@ -611,20 +624,10 @@ async function main() {
     at: now - 4 * HOUR,
     count: 3,
     sample: "[pod/auth-gateway-stg-1/gateway] 2026-11-25T15:45:01Z WARN jwks cache miss kid=2026-11-a fetching synchronously",
-    commandId: "demo_archived_1_open",
+    commandId: "demo_done_1_open",
   });
-  await waitRunRequested(runIdOf(threadIdOf(archivedAuthStgId), "triage"));
-  await run(
-    Effect.gen(function* () {
-      const incidents = yield* Incident;
-      yield* incidents.send(
-        Incident.ref(archivedAuthStgId),
-        new ArchiveIncident({ reason: "Expected on staging cold boot; does not return to inbox.", actor: "owner (page)" }),
-        { commandId: "demo_archived_1_arc" },
-      );
-    }),
-  );
-  // Quiet recurrence after archive (updates occurrences/timeline, never re-enters inbox)
+  await waitRunRequested(runIdOf(threadIdOf(doneJwksId), "triage"));
+  await wayOut(doneJwksId, new MarkDone({ reason: "Expected on staging cold boot.", actor: "owner (page)" }), "demo_done_1_done");
   await report({
     app: "auth-gateway",
     environment: "staging",
@@ -634,10 +637,12 @@ async function main() {
     severity: "warn",
     at: now - 12 * MIN,
     count: 2,
-    commandId: "demo_archived_1_rec",
+    commandId: "demo_done_1_rec",
   });
 
-  const archivedWebhookId = await report({
+  // Later until it gets worse, and it did: the rate rose past twice what it was, with more than five new. It is back,
+  // saying why.
+  const backWebhookId = await report({
     app: "checkout-api",
     environment: "production",
     source: "pods",
@@ -648,18 +653,82 @@ async function main() {
     at: now - 3 * HOUR,
     count: 11,
     sample: "[pod/checkout-api-6d9f8-kx2m1/api] 2026-11-25T16:40:22Z INFO webhook v1 sunset notice partner=partner-legacy",
-    commandId: "demo_archived_2_open",
+    commandId: "demo_back_1_open",
   });
-  await waitRunRequested(runIdOf(threadIdOf(archivedWebhookId), "triage"));
-  await run(
-    Effect.gen(function* () {
-      const incidents = yield* Incident;
-      yield* incidents.send(
-        Incident.ref(archivedWebhookId),
-        new ArchiveIncident({ reason: "Partner migration tracked in Jira COMM-4812.", actor: "owner (page)" }),
-        { commandId: "demo_archived_2_arc" },
-      );
-    }),
+  await waitRunRequested(runIdOf(threadIdOf(backWebhookId), "triage"));
+  await wayOut(backWebhookId, new Defer({ waitsFor: "worse", label: "until it gets worse", actor: "owner (page)" }), "demo_back_1_later");
+  await report({
+    app: "checkout-api",
+    environment: "production",
+    source: "pods",
+    fingerprint: "deprecated-webhook-v1",
+    title: "INFO deprecated webhook v1 payload received from partner-legacy",
+    severity: "info",
+    at: now - 6 * MIN,
+    count: 26,
+    commandId: "demo_back_1_rec",
+  });
+
+  // Later, until something changes: a new finding or a deploy in its environment brings it back.
+  const laterId = await report({
+    app: "ledger-worker",
+    environment: "production",
+    source: "pods",
+    fingerprint: "ledger-rounding-drift",
+    title: "WARN ledger reconciliation rounding drift above 0.01 on batch close",
+    severity: "warn",
+    firstAt: now - 2 * HOUR,
+    at: now - 70 * MIN,
+    count: 4,
+    sample: "[pod/ledger-worker-7f8-a/worker] WARN reconcile drift=0.013 batch=88210",
+    commandId: "demo_later_1_open",
+  });
+  await waitRunRequested(runIdOf(threadIdOf(laterId), "triage"));
+  await wayOut(laterId, new Defer({ label: "until something changes", actor: "owner (page)" }), "demo_later_1_defer");
+
+  // Never: a noisy warning muted in its environment. More of it is counted as hidden.
+  const mutedId = await report({
+    app: "search-indexer",
+    environment: "staging",
+    source: "pods",
+    fingerprint: "indexer-refresh-slow",
+    title: "WARN index refresh took longer than 30s on shard rebalance",
+    severity: "warn",
+    firstAt: now - 9 * HOUR,
+    at: now - 8 * HOUR,
+    count: 17,
+    sample: "[pod/search-indexer-0/indexer] WARN refresh slow took=41s shard=3",
+    commandId: "demo_muted_1_open",
+  });
+  await waitRunRequested(runIdOf(threadIdOf(mutedId), "triage"));
+  await wayOut(mutedId, new Mute({ reason: "noise", actor: "owner (page)" }), "demo_muted_1_mute");
+  await report({
+    app: "search-indexer",
+    environment: "staging",
+    source: "pods",
+    fingerprint: "indexer-refresh-slow",
+    title: "WARN index refresh took longer than 30s on shard rebalance",
+    severity: "warn",
+    at: now - 25 * MIN,
+    count: 9,
+    commandId: "demo_muted_1_rec",
+  });
+
+  // A suspended connection: the QA cluster's sign-in expired. One item says how to fix it, and QA is not shown as quiet.
+  await service.atomically((db) =>
+    db
+      .prepare(
+        "INSERT OR REPLACE INTO connections (key, kind, streak, next_at, suspended_at, first_failed_at, last_error, fix, config, updated_at) VALUES (?, 'signin', 2, ?, ?, ?, ?, ?, '{}', ?)",
+      )
+      .run(
+        "kubernetes:qa-us-east",
+        now + 30 * MIN,
+        now - 40 * MIN,
+        now - 50 * MIN,
+        "error: You must be logged in to the server (Unauthorized)",
+        "Sign in to qa-us-east again in a terminal (your cluster's login command), then check with: kubectl --context qa-us-east -n finance get pods",
+        now - 2 * MIN,
+      ),
   );
 
   // Run one worker pass so /status records OpenCode as disconnected with accurate waitingRuns / runningRuns.
