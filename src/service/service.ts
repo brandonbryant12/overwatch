@@ -16,6 +16,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { ServiceStatus } from "../domain/status.ts";
 import * as References from "effect/References";
 import * as HttpEffect from "effect/http/HttpEffect";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -23,7 +25,7 @@ import { exec as defaultExec, type Exec } from "../collect/exec.ts";
 import { configureRedaction } from "../collect/redact.ts";
 import { sleep, type Runtime } from "../collect/runtime.ts";
 import { resolveSecret } from "../collect/secrets.ts";
-import { IncidentId, ThreadId, WatcherId } from "../domain/ids.ts";
+import { IncidentId, RunId, ThreadId, WatcherId } from "../domain/ids.ts";
 import { AskThread, Thread } from "../domain/thread.ts";
 import { Incident, ReportSignal } from "../domain/incident.ts";
 import { API_VERSION, handlers, Overwatch, OverwatchApi } from "../domain/model.ts";
@@ -110,7 +112,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
   const Quiet = Layer.succeed(References.MinimumLogLevel, "Warn" as const);
   const ServiceLayer = Model.pipe(Layer.provideMerge(Search), Layer.provideMerge(Host), Layer.provideMerge(Quiet));
   const runtime = ManagedRuntime.make(ServiceLayer);
-  const run = <A, E>(effect: Effect.Effect<A, E, any>) => runtime.runPromise(effect as Effect.Effect<A, E, never>);
+  /** Runs an effect with the service's services: the type says exactly what it may require. */
+  type Services = Layer.Success<typeof ServiceLayer>;
+  const run = <A, E>(effect: Effect.Effect<A, E, Services>) => runtime.runPromise(effect);
   const host = await run(Effect.service(SqliteHost));
   const connection = host.connection;
   await connection.runAtomically((db) => createServiceTables(db));
@@ -167,7 +171,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
         Effect.gen(function* () {
           const pages = yield* IncidentPage;
           const options = version ? { atLeast: { stream, version }, timeout: "15 seconds" as const } : {};
-          return Option.getOrNull(yield* pages.get(Incident.ref(id as never), options).pipe(Effect.orElseSucceed(() => Option.none()))) ?? null;
+          return Option.getOrNull(yield* pages.get(Incident.ref(IncidentId.make(id)), options).pipe(Effect.orElseSucceed(() => Option.none()))) ?? null;
         }),
       );
     },
@@ -175,7 +179,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       run(
         Effect.gen(function* () {
           const incidents = yield* Incident;
-          const state = yield* incidents.get(Incident.ref(id as never));
+          const state = yield* incidents.get(Incident.ref(IncidentId.make(id)));
           return state._tag === "Open" ? { app: state.app, environment: state.environment } : undefined;
         }),
       ),
@@ -183,7 +187,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       run(
         Effect.gen(function* () {
           const runs = yield* Run;
-          const state = yield* runs.get(Run.ref(runId as never));
+          const state = yield* runs.get(Run.ref(RunId.make(runId)));
           return state._tag === "Run" ? state.status : undefined;
         }),
       ),
@@ -191,7 +195,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       run(
         Effect.gen(function* () {
           const runs = yield* Run;
-          yield* (runs.send(Run.ref(runId as never), command as MarkRunSent, { commandId }) as Effect.Effect<unknown, { readonly _tag: string }>).pipe(
+          yield* (runs.send(Run.ref(RunId.make(runId)), command as MarkRunSent, { commandId }) as Effect.Effect<unknown, { readonly _tag: string }>).pipe(
             // A refused transition (unknown, closed, not sent, another session) changes nothing; it is logged.
             Effect.catchIf(
               (e) => ["RunUnknown", "RunClosed", "RunNotSent", "WrongSession"].includes(e._tag),
@@ -374,7 +378,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
         now: Date.now,
   };
   const mcp = HttpRouter.toWebHandler(
-    mcpLayer(mcpPorts, VERSION).pipe(Layer.provide(Layer.succeedContext(await run(Effect.context<any>())))) as never,
+    mcpLayer(mcpPorts, VERSION).pipe(Layer.provide(Layer.succeedContext(await run(Effect.context<Services>())))) as never,
     { disableLogger: true },
   );
 
@@ -382,8 +386,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
   const api = await run(
     Effect.gen(function* () {
       const served = yield* OverwatchApi;
-      const context = yield* Effect.context<never>();
-      return HttpEffect.toWebHandler((served as unknown as { fetch: Effect.Effect<any, never, any> }).fetch.pipe(Effect.provide(context)) as never);
+      const context = yield* Effect.context<Services>();
+      return HttpEffect.toWebHandler(served.fetch.pipe(Effect.provide(context)));
     }),
   );
 
@@ -393,15 +397,17 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     );
     const checkpoints = await read((db) => db.prepare("SELECT watcher, source, at FROM checkpoints ORDER BY watcher, source").all());
     const w = worker.status();
-    return {
+    const value: ServiceStatus = {
       name: "overwatch",
       version: VERSION,
       apiVersion: API_VERSION,
       configErrors: config.errors,
       opencode: { connected: w.opencode !== undefined, url: w.opencode ?? null, checkedAt: w.checkedAt, waitingRuns: w.waiting, runningRuns: w.running },
-      watchers: watchers.map((row) => ({ ...row })),
-      checkpoints: checkpoints.map((row) => ({ ...row })),
+      watchers: watchers.map((row) => ({ ...row })) as unknown as ServiceStatus["watchers"],
+      checkpoints: checkpoints.map((row) => ({ ...row })) as unknown as ServiceStatus["checkpoints"],
     };
+    // Checked against the same schema the page decodes with.
+    return Schema.encodeSync(ServiceStatus)(value);
   };
 
   // ------------------------------------------------------------ HTTP

@@ -15,6 +15,7 @@ import type { Document, HtmlBuilder } from "foldkit/html";
 import { defineMessageUnion } from "foldkit/message";
 import { IncidentId, ThreadId, threadIdOf } from "../../src/domain/ids.ts";
 import { OverwatchApi } from "../../src/domain/model.ts";
+import { ServiceStatus } from "../../src/domain/status.ts";
 import { routePrompt } from "../../src/domain/route.ts";
 import { SearchHit } from "../../src/domain/search.ts";
 import { IncidentPageState, InboxItem, ThreadPageState } from "../../src/domain/views.ts";
@@ -40,30 +41,7 @@ export type Theme = typeof Theme.Type;
 export const ConnectionState = Schema.Literals(["connecting", "live", "offline"]);
 export type ConnectionState = typeof ConnectionState.Type;
 
-export const WatcherStatus = Schema.Struct({
-  watcher: Schema.String,
-  next_at: Schema.Number,
-  last_started: Schema.NullOr(Schema.Number),
-  last_finished: Schema.NullOr(Schema.Number),
-  last_error: Schema.NullOr(Schema.String),
-  last_summary: Schema.NullOr(Schema.String),
-});
-export type WatcherStatus = typeof WatcherStatus.Type;
-
-export const ServiceStatus = Schema.Struct({
-  version: Schema.String,
-  apiVersion: Schema.Number,
-  configErrors: Schema.Array(Schema.String),
-  opencode: Schema.Struct({
-    connected: Schema.Boolean,
-    url: Schema.NullOr(Schema.String),
-    checkedAt: Schema.Number,
-    waitingRuns: Schema.Number,
-    runningRuns: Schema.Number,
-  }),
-  watchers: Schema.Array(WatcherStatus),
-});
-export type ServiceStatus = typeof ServiceStatus.Type;
+export { ServiceStatus, WatcherStatus } from "../../src/domain/status.ts";
 
 export const Model = Schema.Struct({
   commandIds: DomainFoldkit.CommandIds,
