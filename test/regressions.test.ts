@@ -697,3 +697,16 @@ describe("B4. environments at a glance", () => {
     }
   });
 });
+
+describe("B6. a finding's product summary can be copied as one paragraph", () => {
+  test("the copy button copies the same paragraph the notification sends, and says it was copied", async () => {
+    const app = (await import("../web/src/app.ts")) as Record<string, any>;
+    const { productSummary } = await import("../src/domain/finding.ts");
+    const product = { impact: "Some card payments fail at checkout", affected: "customers paying by card", since: "10:05 UTC", status: "ongoing" };
+    const text = productSummary(product);
+    expect(text).toBe("Some card payments fail at checkout. Affected: customers paying by card. Since: 10:05 UTC. Status: ongoing.");
+    const result = app.update(app.init({ session: "s" }).model, app.Message.ClickedCopySummary({ runId: "run_1", text }));
+    expect(result.model.copiedSummary).toBe("run_1");
+    expect(result.commands).toHaveLength(1);
+  });
+});

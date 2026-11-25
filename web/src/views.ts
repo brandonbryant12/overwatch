@@ -4,7 +4,7 @@
  */
 import * as Option from "effect/Option";
 import type { Document, Html, HtmlBuilder } from "foldkit/html";
-import type { Finding } from "../../src/domain/finding.ts";
+import { productSummary, type Finding } from "../../src/domain/finding.ts";
 import type { SearchHit } from "../../src/domain/search.ts";
 import type { IncidentPageState, InboxItem, ThreadPageState } from "../../src/domain/views.ts";
 import {
@@ -458,7 +458,7 @@ function focusView(model: Model, h: H): ReadonlyArray<Html> {
   return [
     focusHeaderView(page, h),
     signalEvidenceView(page, model.copiedQuery, h),
-    findingsSectionView(page, h),
+    findingsSectionView(page, h, model.copiedSummary),
     threadSectionView(model.thread, model.status?.opencode.connected ?? null, h),
     timelineSectionView(page, h),
   ];
@@ -593,7 +593,7 @@ function signalEvidenceView(page: IncidentPageState, copiedQuery: boolean, h: H)
   );
 }
 
-function findingsSectionView(page: IncidentPageState, h: H): Html {
+function findingsSectionView(page: IncidentPageState, h: H, copiedSummary: string | null): Html {
   const ordered = [...page.findings].reverse();
   return h.section(
     [h.Class("detail-section")],
@@ -609,13 +609,13 @@ function findingsSectionView(page: IncidentPageState, h: H): Html {
         ? h.p([h.Class("section-empty")], ["No finding filed yet. Citations are checked by code before any finding appears here."])
         : h.div(
             [h.Class("findings-list")],
-            ordered.map((entry, index) => findingView(entry.finding, entry.at, entry.sessionId, ordered.length - index, h)),
+            ordered.map((entry, index) => findingView(entry.finding, entry.at, entry.sessionId, ordered.length - index, h, entry.runId, copiedSummary === entry.runId)),
           ),
     ],
   );
 }
 
-function findingView(finding: Finding, at: number, sessionId: string, num: number, h: H): Html {
+function findingView(finding: Finding, at: number, sessionId: string, num: number, h: H, runId: string, copied: boolean): Html {
   const eng = finding.engineering;
   const prod = finding.product;
   const verdictIcon =
@@ -651,6 +651,28 @@ function findingView(finding: Finding, at: number, sessionId: string, num: numbe
           h.div([h.Class("product-cell")], [h.dt([], ["Status"]), h.dd([], [prod.status])]),
         ],
       ),
+      h.div(
+        [h.Class("product-copy-row")],
+        [
+          h.button(
+            [
+              h.Class(copied ? "copy-btn copied" : "copy-btn"),
+              h.Type("button"),
+              h.Title("Copy the product summary as one paragraph, for someone outside engineering"),
+              h.OnClick(Message.ClickedCopySummary({ runId, text: productSummary(prod) })),
+            ],
+            [copied ? iconVerified(h) : iconCopy(h), h.span([], [copied ? "Copied summary" : "Copy summary"])],
+          ),
+        ],
+      ),
+      ...(finding.code
+        ? [
+            h.p(
+              [h.Class(finding.code.deployed ? "finding-code-basis deployed" : "finding-code-basis not-deployed")],
+              [finding.code.deployed && finding.code.commit ? `Code read at the deployed commit ${finding.code.commit.slice(0, 12)}.` : finding.code.note],
+            ),
+          ]
+        : []),
       h.div(
         [h.Class("next-check-row")],
         [h.span([h.Class("next-check-label")], ["Next check"]), h.span([h.Class("next-check-text")], [eng.nextCheck])],

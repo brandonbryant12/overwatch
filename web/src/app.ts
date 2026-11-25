@@ -71,6 +71,8 @@ export const Model = Schema.Struct({
   searchError: Schema.NullOr(Schema.String),
   searchSelected: Schema.Number,
   copiedQuery: Schema.Boolean,
+  /** The finding (by run id) whose product summary was just copied. */
+  copiedSummary: Schema.NullOr(Schema.String),
   theme: Theme,
 });
 export type Model = typeof Model.Type;
@@ -103,6 +105,7 @@ export const Message = defineMessageUnion({
   PressedArchiveFocused: {},
   PressedJumpToPrompt: {},
   ClickedCopyQuery: { query: Schema.String },
+  ClickedCopySummary: { runId: Schema.String, text: Schema.String },
   CompletedCopyQuery: {},
   CompletedDomEffect: {},
   ReceivedResult: { result: Client.Message },
@@ -147,6 +150,7 @@ export const init = (flags: Flags): Return => ({
     searchError: null,
     searchSelected: 0,
     copiedQuery: false,
+    copiedSummary: null,
     theme: flags.theme ?? "dark",
   },
 });
@@ -364,7 +368,7 @@ function archiveIncident(model: Model, incidentId: IncidentId): Return {
     nextThread = null;
   }
   return {
-    model: { ...model, commandIds, focus: nextFocus, page: nextPage, thread: nextThread, notice: null, copiedQuery: false },
+    model: { ...model, commandIds, focus: nextFocus, page: nextPage, thread: nextThread, notice: null, copiedQuery: false, copiedSummary: null },
     commands: [
       Command.mapMessage(
         Client.ArchiveIncident({ target: incidentId, input: { actor: "owner (page)" }, commandId }),
@@ -518,6 +522,10 @@ export const update = (model: Model, message: Message): Return =>
       if (!model.focus || model.page?.disposition === "archived") return { model };
       return { model, commands: [FocusSelector({ selector: "#prompt-input" })] };
     },
+    ClickedCopySummary: ({ runId, text }) => ({
+      model: { ...model, copiedSummary: runId },
+      commands: [CopyText({ text })],
+    }),
     ClickedCopyQuery: ({ query }) => ({
       model: { ...model, copiedQuery: true },
       commands: [CopyText({ text: query })],

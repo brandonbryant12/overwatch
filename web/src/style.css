@@ -2110,6 +2110,18 @@ button:disabled, input:disabled {
 .env-chip.state-unchecked .env-chip-state,
 .env-chip.state-stale .env-chip-state { color: var(--state-unknown); }
 
+
+/* ---------- Finding: copy the product summary, and which code it read ---------- */
+.product-copy-row { display: flex; justify-content: flex-end; }
+.finding-code-basis { margin: 0; font-size: var(--text-sm); color: var(--ink-muted); }
+.finding-code-basis.not-deployed {
+  padding: 6px 10px;
+  color: var(--state-unknown);
+  border: 1px dashed var(--state-unknown-border);
+  border-radius: var(--radius-md);
+  background-image: var(--hatch-unknown);
+}
+
 @media (max-width: 860px) {
   .app {
     height: auto;
