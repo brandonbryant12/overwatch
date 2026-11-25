@@ -18,4 +18,5 @@ await build({
 });
 copyFileSync(join(web, "index.html"), join(out, "index.html"));
 copyFileSync(join(web, "src", "style.css"), join(out, "style.css"));
+copyFileSync(join(web, "src", "favicon.svg"), join(out, "favicon.svg"));
 console.log(`built ${out}`);

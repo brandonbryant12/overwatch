@@ -339,6 +339,44 @@ async function main() {
   );
   const checkoutFollowRun = runIdOf(checkoutThread, "p-followup-1");
   await waitRunRequested(checkoutFollowRun);
+  const checkoutFollowFinding: Finding = {
+    product: {
+      impact: "Staging uses a mock gateway (~12ms), so the 300ms timeout was never triggered before promotion.",
+      affected: "Production US-East card checkouts only (staging masked by stub)",
+      since: "52 minutes ago (deploy a4f91c2)",
+      status: "ongoing",
+    },
+    engineering: {
+      verdict: "real",
+      confidence: "high",
+      cause: "Deploy a4f91c2 lowered STRIPE_AUTHORIZE_TIMEOUT_MS from 2500ms to 300ms; staging points at stripe-stub (p99 18ms), hiding the regression.",
+      causeBasis: "observed",
+      evidence: [
+        {
+          source: "src/payments/stripe.ts",
+          quote: "export const STRIPE_AUTHORIZE_TIMEOUT_MS = 300 // tightened for fail-fast",
+          verified: true,
+        },
+        {
+          source: "config/staging.json",
+          quote: '"stripeBaseUrl": "http://stripe-stub.commerce.svc:8080"',
+          verified: true,
+        },
+        {
+          source: "datadog-apm",
+          quote: "stripe.authorize p95 latency 412ms steady over the last 6h (no upstream degradation)",
+          verified: false,
+        },
+      ],
+      codeLocation: "src/payments/stripe.ts:14",
+      notChecked: ["Stripe status page for EU-West", "whether client retry double-posts idempotency keys"],
+      nextCheck: "Revert STRIPE_AUTHORIZE_TIMEOUT_MS to 2500ms in prod, then add 350ms jitter to stripe-stub in staging.",
+    },
+    ruledOut: [
+      "Upstream Stripe outage (success latency distribution is unchanged since yesterday)",
+      "Environment-specific override in Helm values",
+    ],
+  };
   await run(
     Effect.gen(function* () {
       const runs = yield* Run;
@@ -347,27 +385,7 @@ async function main() {
         Run.ref(checkoutFollowRun),
         new CompleteRun({
           sessionId: checkoutSession,
-          finding: {
-            product: {
-              impact: "Staging uses a mock gateway (~12ms), so the 300ms timeout was never triggered before promotion.",
-              affected: "Production only",
-              since: "Deploy a4f91c2",
-              status: "confirmed",
-            },
-            engineering: {
-              verdict: "real",
-              confidence: "high",
-              cause: "Staging runs the same 300ms constant but points at stripe-stub (p99 18ms), hiding the regression.",
-              causeBasis: "observed",
-              evidence: [
-                { source: "config/staging.json", quote: '"stripeBaseUrl": "http://stripe-stub.commerce.svc:8080"', verified: true },
-              ],
-              codeLocation: "config/staging.json:9",
-              notChecked: ["Synthetic latency injection in staging"],
-              nextCheck: "Add 350ms jitter profile to stripe-stub in staging after reverting prod.",
-            },
-            ruledOut: ["Environment-specific override in Helm values"],
-          },
+          finding: checkoutFollowFinding,
         }),
         { commandId: "demo_checkout_f_done" },
       );

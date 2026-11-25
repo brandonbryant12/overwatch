@@ -75,7 +75,14 @@ export interface ServiceHandle {
 }
 
 const WEB_DIR = fileURLToPath(new URL("../../web/dist", import.meta.url));
-const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".map": "application/json" };
+const TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".map": "application/json",
+};
 
 export async function startService(config: ServiceConfig, deps: ServiceDeps = {}): Promise<ServiceHandle> {
   const log = deps.log ?? ((message: string) => console.log(`[overwatch] ${message}`));

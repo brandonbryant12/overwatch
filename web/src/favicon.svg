@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Overwatch">
+  <defs>
+    <linearGradient id="ow-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141e2b"/>
+      <stop offset="100%" stop-color="#090d12"/>
+    </linearGradient>
+    <linearGradient id="ow-lens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38d9c0"/>
+      <stop offset="55%" stop-color="#edf2f7"/>
+      <stop offset="100%" stop-color="#38d9c0"/>
+    </linearGradient>
+    <linearGradient id="ow-core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffd166"/>
+      <stop offset="55%" stop-color="#f5a623"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+  <!-- Chamfered octagonal instrument housing -->
+  <path d="M19 3 H45 L61 19 V45 L45 61 H19 L3 45 V19 Z" fill="url(#ow-bg)" stroke="#2b3d52" stroke-width="2.5"/>
+  <!-- Outer radar cardinal ticks -->
+  <path d="M32 7 V12 M32 52 V57 M7 32 H12 M52 32 H57" stroke="#38d9c0" stroke-width="2.5" stroke-linecap="square" opacity="0.8"/>
+  <!-- Watchful optical aperture -->
+  <path d="M11 32 C19.5 18 44.5 18 53 32 C44.5 46 19.5 46 11 32 Z" fill="#0b0f14" stroke="url(#ow-lens)" stroke-width="3.5" stroke-linejoin="round"/>
+  <!-- Focus reticle diamond core -->
+  <path d="M32 21.5 L42.5 32 L32 42.5 L21.5 32 Z" fill="url(#ow-core)"/>
+  <!-- Optical pinhole -->
+  <circle cx="32" cy="32" r="3.6" fill="#0b0f14"/>
+</svg>
