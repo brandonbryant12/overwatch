@@ -1,6 +1,7 @@
 export * from "./ids.ts";
 export * from "./budgets.ts";
 export * from "./config.ts";
+export * from "./detection.ts";
 export * from "./externals.ts";
 export * from "./aggregates/Incident.ts";
 export * from "./aggregates/Run.ts";
