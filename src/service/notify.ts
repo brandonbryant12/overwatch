@@ -3,6 +3,7 @@
  * default), and one when a finding arrives for it, once per incident per kind. The intent is recorded from the
  * journal, then delivered, then its result recorded; a failed delivery is tried again a bounded number of times.
  */
+import { errorText } from "../domain/redact.ts";
 import type { DatabaseSync } from "node:sqlite";
 import type { Exec } from "../collect/exec.ts";
 import type { Options } from "../collect/options.ts";
@@ -18,7 +19,9 @@ export const macNotifier =
   async (title, body) => {
     if (process.platform !== "darwin") return;
     const script = `display notification "${escape(body.slice(0, 240))}" with title "${escape(title.slice(0, 80))}"`;
-    await exec("osascript", ["-e", script], { timeoutMs: 10_000 }).catch(() => undefined);
+    // A non-zero exit is a failed delivery: it goes back to the retry queue with what osascript said.
+    const result = await exec("osascript", ["-e", script], { timeoutMs: 10_000 });
+    if (result.code !== 0) throw new Error(`osascript exited ${result.code}: ${result.stderr.trim().slice(0, 200)}`);
   };
 
 /**
@@ -60,6 +63,8 @@ export function recordNotificationIntents(db: DatabaseSync, options: Options, no
 /** Attempts before a notification is given up as failed, and the first wait between attempts (doubling). */
 export const NOTIFY_ATTEMPTS = 5;
 const FIRST_WAIT_MS = 30_000;
+/** How long a claimed notification is left to its delivery before another may try it (osascript times out at 10 s). */
+const CLAIM_MS = 5 * 60_000;
 
 /**
  * Sends what is due: intent first (recorded), then delivery, then the result (sent, or another attempt later with a
@@ -82,11 +87,20 @@ export async function deliverNotifications(
   );
   let sent = 0;
   for (const n of due) {
+    // Claimed before it is sent: only the delivery whose claim changed the row sends it, so overlapping ticks cannot
+    // both. A crash while sending leaves the claim to expire, and the notification is tried again.
+    const claimed = await ports.atomically(
+      (db) =>
+        Number(
+          db.prepare("UPDATE notified SET next_at = ? WHERE incident = ? AND kind = ? AND status = 'pending' AND next_at <= ?").run(now + CLAIM_MS, n.incident, n.kind, now).changes,
+        ) === 1,
+    );
+    if (!claimed) continue;
     let error: string | undefined;
     try {
       await ports.notify(n.title, n.body);
     } catch (e) {
-      error = (e as Error).message.slice(0, 300);
+      error = errorText(e, 300);
     }
     const attempts = n.attempts + 1;
     await ports.atomically((db) => {

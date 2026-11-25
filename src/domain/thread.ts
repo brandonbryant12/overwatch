@@ -3,6 +3,8 @@
  * sessions that served them, and the handoff the last one left. The handoff, not a transcript, is what a new
  * session starts from.
  */
+import { ExternalId } from "./safe.ts";
+import { SessionId } from "./ids.ts";
 import * as Domain from "@alchemy.run/domain";
 import * as Schema from "effect/Schema";
 import { IncidentId, messageIdOf, Mode, Origin, Override, RunId, runIdOf, sessionIdOf, ThreadId } from "./ids.ts";
@@ -57,15 +59,15 @@ export class AskThread extends Domain.Command("AskThread", {
   input: {
     subject: IncidentId,
     title: Schema.String,
-    /** Chosen by the caller, so a retried ask is the same ask. */
-    promptId: Schema.String,
+    /** Chosen by the caller, so a retried ask is the same ask. Refused unless it has the shape of an id (see safe.ts). */
+    promptId: ExternalId("promptId"),
     text: Schema.String,
     mode: Mode,
     origin: Origin,
     override: Override,
     hold: Schema.optionalKey(Schema.Boolean),
     /** The session the prompt was typed in, when the owner asked in OpenCode itself: it continues there. */
-    inSession: Schema.optionalKey(Schema.String),
+    inSession: Schema.optionalKey(SessionId),
   },
   events: [PromptAsked],
   rejects: [ThreadClosed],

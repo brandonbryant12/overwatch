@@ -4,11 +4,17 @@
  */
 import * as Schema from "effect/Schema";
 
-export const IncidentId = Schema.String.pipe(Schema.brand("IncidentId"));
+/** Ids Overwatch derives (`inc_<hash>`, `thr_inc_<hash>`, `run_<hash>`): anything else from outside is refused. */
+const derived = (prefix: string, what: string) =>
+  Schema.String.check(Schema.makeFilter((value: string) => (new RegExp(`^${prefix}_[${prefix === "ses" ? "A-Za-z" : "a-z"}0-9_-]{1,80}$`).test(value) ? undefined : `${what} must look like ${prefix}_<letters and digits>`)));
+
+export const IncidentId = derived("inc", "an incident id").pipe(Schema.brand("IncidentId"));
 export type IncidentId = typeof IncidentId.Type;
-export const ThreadId = Schema.String.pipe(Schema.brand("ThreadId"));
+export const ThreadId = derived("thr", "a thread id").pipe(Schema.brand("ThreadId"));
 export type ThreadId = typeof ThreadId.Type;
-export const RunId = Schema.String.pipe(Schema.brand("RunId"));
+/** A session id Overwatch chose (`ses_ow…`) or recorded from OpenCode for one of its own runs. */
+export const SessionId = derived("ses", "a session id");
+export const RunId = derived("run", "a run id").pipe(Schema.brand("RunId"));
 export type RunId = typeof RunId.Type;
 export const WatcherId = Schema.String.pipe(Schema.brand("WatcherId"));
 export type WatcherId = typeof WatcherId.Type;

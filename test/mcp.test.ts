@@ -36,14 +36,14 @@ async function setup() {
   const incident = await service.read((db) => (db.prepare("SELECT stream FROM journal WHERE type = 'IncidentOpened'").get() as { stream: string }).stream.split("/")[1]!);
   const worktree = tempDir("worktree");
   writeFileSync(join(worktree, "payments.ts"), "export const TIMEOUT_MS = 300\n");
-  const runs = new Map<string, string>([["run-a", "sent"], ["run-b", "sent"], ["run-done", "completed"]]);
+  const runs = new Map<string, string>([["run_a", "sent"], ["run_b", "sent"], ["run_done", "completed"]]);
   const completed: string[] = [];
   await service.atomically((db) => {
     const insert = db.prepare("INSERT INTO run_tokens (token, run_id, session_id, thread_id, subject, role, created_at) VALUES (?, ?, ?, ?, ?, 'investigator', 0)");
-    insert.run("tok-a", "run-a", "ses_a", "thr_a", incident);
-    insert.run("tok-b", "run-b", "ses_b", "thr_b", incident);
-    insert.run("tok-done", "run-done", "ses_a", "thr_a", incident);
-    recordShown(db, { sessionId: "ses_a", threadId: "thr_a", runId: "run-a", source: "brief", text: "Incident in shop-api/production", at: 0 });
+    insert.run("tok-a", "run_a", "ses_a", "thr_a", incident);
+    insert.run("tok-b", "run_b", "ses_b", "thr_b", incident);
+    insert.run("tok-done", "run_done", "ses_a", "thr_a", incident);
+    recordShown(db, { sessionId: "ses_a", threadId: "thr_a", runId: "run_a", source: "brief", text: "Incident in shop-api/production", at: 0 });
   });
   const ports: McpPorts = {
     options: (await import("./fixtures/service.ts")).testConfig(tempDir("x")).options,
@@ -69,9 +69,9 @@ describe("query_telemetry and file_finding are bound to the calling session and 
     try {
       expect(await queryTelemetry(ports, undefined, { token: "tok-a", source: "pods" })).toContain("carries no OpenCode session id");
       expect(await queryTelemetry(ports, "ses_a", { token: "made-up", source: "pods" })).toContain("unknown run token");
-      expect(await queryTelemetry(ports, "ses_a", { token: "tok-b", source: "pods" })).toContain("belongs to another session's run (run-b)");
+      expect(await queryTelemetry(ports, "ses_a", { token: "tok-b", source: "pods" })).toContain("belongs to another session's run (run_b)");
       expect(await fileFinding(ports, "ses_a", { token: "tok-b", finding: finding("x") })).toContain("belongs to another session's run");
-      expect(await queryTelemetry(ports, "ses_a", { token: "tok-done", source: "pods" })).toContain("run-done is finished");
+      expect(await queryTelemetry(ports, "ses_a", { token: "tok-done", source: "pods" })).toContain("run_done is finished");
     } finally {
       await service.stop();
     }
@@ -109,7 +109,7 @@ describe("query_telemetry and file_finding are bound to the calling session and 
       // Another session cannot use quotes this session was shown.
       expect(await fileFinding(ports, "ses_b", { token: "tok-b", finding: finding("ERROR payment 42 timed out after 300ms") })).toContain("Not recorded");
       expect(await fileFinding(ports, "ses_a", { token: "tok-a", finding: finding("ERROR payment 42 timed out after 300ms") })).toBe("Recorded. Stop now.");
-      expect(completed).toEqual(["run-a"]);
+      expect(completed).toEqual(["run_a"]);
       expect(await fileFinding(ports, "ses_a", { token: "tok-a", finding: finding("ERROR payment 42 timed out after 300ms") })).toContain("is finished");
     } finally {
       await service.stop();
@@ -179,7 +179,7 @@ describe("the MCP server over HTTP", () => {
           init.session ?? undefined,
         );
       // The session matched its token; this service has no aggregate for the hand-made run, so it counts as finished.
-      expect(JSON.stringify((await call({ "ai.opencode/sessionID": "ses_a" })).json)).toContain("Refused: run run-a is finished");
+      expect(JSON.stringify((await call({ "ai.opencode/sessionID": "ses_a" })).json)).toContain("Refused: run run_a is finished");
       expect(JSON.stringify((await call({ "ai.opencode/sessionID": "ses_b" })).json)).toContain("another session's run");
       expect(JSON.stringify((await call(undefined)).json)).toContain("no OpenCode session id");
     } finally {

@@ -199,3 +199,10 @@ export function redactValue<T>(value: T, options: RedactionOptions = {}): T {
   }
   return value;
 }
+
+/**
+ * An error's message, redacted: the one way text from an error is written anywhere (a table, a log line, a brief, an
+ * agent's reply). An error message can carry what a program printed, a URL or a header.
+ */
+export const errorText = (error: unknown, maxBytes = 500): string =>
+  redactText(error instanceof Error ? error.message : String(error), { maxBytes });

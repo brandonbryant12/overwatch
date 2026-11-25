@@ -1,4 +1,5 @@
 import { formatDuration, iso } from "../collect/duration.ts";
+import { errorText } from "../domain/redact.ts";
 import type { Exec } from "../collect/exec.ts";
 import { redactText } from "../collect/redact.ts";
 import { sourceContext, type Runtime } from "../collect/runtime.ts";
@@ -69,7 +70,7 @@ export async function deployContext(runtime: Runtime, appName: string, environme
   try {
     pods = parsePods(listed.stdout);
   } catch (error) {
-    notes.push(`deploy context not read from ${name} (${error instanceof Error ? error.message : String(error)})`);
+    notes.push(`deploy context not read from ${name} (${errorText(error, 200)})`);
     return { ...(ref ? { ref } : {}), lines, notes };
   }
 

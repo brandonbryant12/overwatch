@@ -5,6 +5,7 @@
  * session's directory), and is told when the deployment has moved on since. Each run records exactly which commit it
  * was given and whether that was the deployed one; its finding carries that record.
  */
+import { errorText } from "../domain/redact.ts";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -55,7 +56,7 @@ export async function codeForNewSession(
   } catch (error) {
     const path = join(root, "no-code");
     mkdirSync(path, { recursive: true });
-    return { path, commit: null, deployed: false, note: `No code is available: the checkout's commit could not be read (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
+    return { path, commit: null, deployed: false, note: `No code is available: the checkout's commit could not be read (${errorText(error, 200)}). Work from telemetry alone.` };
   }
   // A directory is the commit's code only when git says so: its HEAD is that commit and no tracked file differs. A
   // directory that exists is not taken on trust; one that fails the check is removed and made again.
@@ -78,7 +79,7 @@ export async function codeForNewSession(
       rmSync(path, { recursive: true, force: true });
       const fallback = join(root, "no-code");
       mkdirSync(fallback, { recursive: true });
-      return { path: fallback, commit: null, deployed: false, note: `No code is available: the worktree could not be made (${(error as Error).message.slice(0, 200)}). Work from telemetry alone.` };
+      return { path: fallback, commit: null, deployed: false, note: `No code is available: the worktree could not be made (${errorText(error, 200)}). Work from telemetry alone.` };
     }
   }
   await ports.atomically((db) =>
