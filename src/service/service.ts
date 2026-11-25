@@ -22,7 +22,7 @@ import * as References from "effect/References";
 import * as HttpEffect from "effect/http/HttpEffect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import { exec as defaultExec, type Exec } from "../collect/exec.ts";
-import { configureRedaction } from "../collect/redact.ts";
+import { configureRedaction, redactText } from "../collect/redact.ts";
 import { sleep, type Runtime } from "../collect/runtime.ts";
 import { resolveSecret } from "../collect/secrets.ts";
 import { IncidentId, RunId, ThreadId, WatcherId } from "../domain/ids.ts";
@@ -237,7 +237,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
       );
       return summary;
     } catch (error) {
-      await atomically((db) => db.prepare("UPDATE watcher_runs SET last_finished = ?, next_at = ?, last_error = ? WHERE watcher = ?").run(Date.now(), Date.now() + watcher.everyMs, (error as Error).message, watcherId));
+      await atomically((db) => db.prepare("UPDATE watcher_runs SET last_finished = ?, next_at = ?, last_error = ? WHERE watcher = ?").run(Date.now(), Date.now() + watcher.everyMs, redactText((error as Error).message, { maxBytes: 1_000 }), watcherId));
       throw error;
     } finally {
       running.delete(watcherId);
@@ -442,6 +442,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) return forward(api, url.pathname.slice(4) || "/");
     const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
     const path = join(webDir, name);
+    if (name === "index.html" && !existsSync(path)) {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      return void res.end(
+        `<!doctype html><title>Overwatch</title><p>The service is running, but the page has not been built: <code>${webDir}</code> has no index.html.</p><p>Run <code>pnpm run build:web</code>, or build <code>web/dist</code> on another machine and copy it here (docs/setup.md, "The native binary"). The Api, MCP and <a href="/status">/status</a> work without it.</p>`,
+      );
+    }
     if (!name.includes("..") && existsSync(path) && TYPES[extname(path)]) {
       res.writeHead(200, { "content-type": TYPES[extname(path)]!, "cache-control": "no-store" });
       return void res.end(readFileSync(path));

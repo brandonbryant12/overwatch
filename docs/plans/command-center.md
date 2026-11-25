@@ -1,7 +1,9 @@
 # Overwatch command center: plan
 
-Status: fifth revision, 2026-11-25. Phase 1A is built on the `command-center` branch: 110 tests and an end-to-end
-run against OpenCode 2.4.1 pass. The design pass is next. Section 11 lists what the second review changed.
+Status: fifth revision, 2026-11-25. Phase 1A is built on the `command-center` branch, the page has had its design
+pass (`docs/design.md`), and a second-pass review's defects have been fixed with regression tests
+(`test/regressions.test.ts`). `pnpm run check` and the end-to-end script are the measure of what passes. Section 11
+lists what the second plan review changed.
 
 This revision replaces the design that hosted everything inside OpenCode. That design was reviewed by two
 independent models; what they found, and why it led here, is in the appendix.

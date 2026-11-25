@@ -17,7 +17,7 @@ import type { Finding } from "./report.ts";
  * The first three are contradictions when they fail, and the finding is sent back with what was wrong.
  */
 export interface Shown {
-  /** `brief`, or the name of the source an `overwatch_query` result came from. */
+  /** The telemetry source the text came from, or `brief:<kind>` / `git:<operation>` for text that is not a source's. */
   readonly source: string;
   readonly text: string;
 }

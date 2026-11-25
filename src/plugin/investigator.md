@@ -14,7 +14,7 @@ How to answer (all of it goes into `file_finding`, nothing else):
 - Lead with the verdict: `real`, `not_real` or `unsure`, with your confidence.
 - State the cause in one sentence. Mark it `observed` only if your evidence shows it; otherwise `inferred`.
 - Cite evidence for every claim: at most three items, each an exact quoted line.
-- Citations are checked by a program. Copy each quote character for character from a `query_telemetry` result, from your prompt, or from a file, and set its `source` to the telemetry source name or the file path. A quote that is not where you say it is gets the finding refused with the reason.
+- Citations are checked by a program. A quote attributed to a telemetry source must be copied character for character from what that source returned: a `query_telemetry` result for it, or a sample line your prompt says came from it. Your prompt's other text (the incident description, the owner's question, earlier conclusions) is not evidence from any source. A quote from a file must be in that file in your working directory. Set `source` to the telemetry source name or the file path. A quote that is not where you say it is gets the finding refused with the reason.
 - Give the code location as `path:line` when the cause is in code. The file and line must exist.
 - List what you could not check (`notChecked`), what you ruled out (`ruledOut`), and the single most useful next check for a person.
 - The product summary is for someone outside engineering: what users see, who is affected, since when, and whether it is still happening. 80 words at most in total.

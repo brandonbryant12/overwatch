@@ -111,7 +111,16 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
       try {
         const context = sourceContext(runtime, watcher.app, watcher.environment, source, signal, { deadline, scratch });
         const result = await type.collect(config, { window, final: index === plan.windows.length - 1 }, context);
-        const deduped = dedupe(result.signals, seen, options.lookback.overlapMs);
+        // Redacted before anything about them is kept: the de-duplication keys, the report outbox, the events.
+        // Redaction is deterministic, so a redacted key still matches itself on the next run.
+        const signals = result.signals.map((sig) => ({
+          ...sig,
+          key: redactText(sig.key, { maxBytes: 400 }),
+          title: redactText(sig.title, { maxBytes: 400 }),
+          ...(sig.sample === undefined ? {} : { sample: redactText(sig.sample, { maxBytes: 2_000 }) }),
+          ...(sig.query === undefined ? {} : { query: redactText(sig.query, { maxBytes: 2_000 }) }),
+        }));
+        const deduped = dedupe(signals, seen, options.lookback.overlapMs);
         seen = deduped.seen;
         fresh.push(...deduped.fresh);
         if (result.capacity) capacity = redactText(result.capacity, { maxBytes: 2_000 });

@@ -64,5 +64,9 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   `web/src/style.css`. It reads through the typed client and `watch`.
 - **Loopback only.** The service binds `127.0.0.1` and refuses other host names and other origins. (`service.test.ts`)
 - **No spend tracking or caps**; only timeouts and concurrency limits.
-- **Text that reaches an agent or a store is redacted** (`src/collect/redact.ts`), by name and by how random it looks.
+- **Free text is redacted where it enters** (`src/domain/redact.ts`, by name and by how random it looks): the
+  aggregates redact prompts, signal titles, samples and queries, findings, handoffs and reasons in `decide`, before
+  their events exist; the collector redacts signals before de-duplication and the report outbox; what sessions are
+  shown, coverage notes and watcher errors are redacted on write. A new path for text must do the same, with a test
+  in `test/regressions.test.ts`. (`regressions.test.ts`, A1)
 - Tests use fakes for `kubectl`, `gh`, Datadog and the model. Never call a real cluster, Datadog or repository host.

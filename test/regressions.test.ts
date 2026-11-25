@@ -566,3 +566,36 @@ describe("the worker reads only new messages in Overwatch's sessions", () => {
     expect(firstRead).toBeLessThan(300);
   });
 });
+
+describe("A1. redaction also covers what the collector keeps outside the model", () => {
+  test("a secret in a log line reaches neither the de-duplication state, the report outbox, nor the events", async () => {
+    const { service, cluster } = await testService();
+    try {
+      cluster.log(Date.now() - 60_000, `ERROR upstream refused ${SECRET}`);
+      await service.collect("shop-api/production");
+      const everything = await service.read((db) =>
+        ["checkpoints", "coverage", "pending_reports", "journal", "objects", "search_docs", "search_terms", "watcher_runs"]
+          .map((t) => JSON.stringify(db.prepare(`SELECT * FROM ${t}`).all()))
+          .join("\n"),
+      );
+      expect(everything).toContain("upstream refused");
+      expect(everything).not.toContain(TOKEN);
+    } finally {
+      await service.stop();
+    }
+  });
+});
+
+describe("an unbuilt page is said, not served broken", () => {
+  test("without web/dist the service answers / with how to build it, and the rest still works", async () => {
+    const { tempDir } = await import("./fixtures/support.ts");
+    const { service } = await testService({ deps: { webDir: tempDir("noweb") } });
+    try {
+      const page = await (await fetch(`${service.url}/`)).text();
+      expect(page).toContain("pnpm run build:web");
+      expect((await fetch(`${service.url}/status`)).status).toBe(200);
+    } finally {
+      await service.stop();
+    }
+  });
+});

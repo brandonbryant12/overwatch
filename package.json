@@ -30,14 +30,13 @@
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "check": "pnpm run typecheck && pnpm test",
-    "build": "tsc -p tsconfig.build.json",
     "test:crash": "OVERWATCH_CRASH_SWEEP=full node --experimental-strip-types --no-warnings --test test/crash.test.ts",
     "serve": "node --experimental-strip-types --no-warnings src/service/main.ts serve",
     "overwatch": "node --experimental-strip-types --no-warnings src/service/main.ts",
     "e2e": "node --experimental-strip-types --no-warnings scripts/e2e.ts",
     "demo": "node --experimental-strip-types --no-warnings scripts/demo.ts",
     "build:web": "node --experimental-strip-types --no-warnings scripts/build-web.ts",
-    "prepare": "node --experimental-strip-types --no-warnings scripts/build-web.ts"
+    "prepare": "node --experimental-strip-types --no-warnings scripts/build-web.ts --optional"
   },
   "devDependencies": {
     "@opencode/plugin": "2.4.1",

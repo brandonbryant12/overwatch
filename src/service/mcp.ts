@@ -70,7 +70,7 @@ const QueryTelemetry = Tool.make("query_telemetry", {
 
 const FileFinding = Tool.make("file_finding", {
   description:
-    "File your run's finding, once, at the end. Lead with the verdict, cite evidence for every claim, stay within the limits. Each quote is checked by code against what you were shown (the brief, query_telemetry results) or the file it names in your working directory; a finding with a quote that is not there is refused with the reason. Nothing found is a valid answer (verdict unsure).",
+    "File your run's finding, once, at the end. Lead with the verdict, cite evidence for every claim, stay within the limits. Each quote attributed to a telemetry source is checked by code against what that source returned to your session (query_telemetry results, sample lines your prompt attributes to it), and a quote from a file against that file in your working directory; a finding with a quote that is not there is refused with the reason. Nothing found is a valid answer (verdict unsure).",
   // The schema the agent sees is the one the finding is decoded with: one definition, limits included.
   parameters: Schema.Struct({ token: Schema.String, finding: FindingInput }),
   success: Schema.String,

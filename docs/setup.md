@@ -47,8 +47,9 @@ If outbound HTTPS needs a proxy too, set `https-proxy=` in the same file, or `HT
 The `alchemy` package (a required peer of Alchemy Domain) brings `rolldown`, which has a platform binary package
 (`@rolldown/binding-darwin-arm64` on Apple silicon). pnpm installs it as an ordinary optional dependency; no install
 script runs. Overwatch uses rolldown only to bundle the page (`pnpm run build:web`). If your proxy blocks the binding
-package, the install still succeeds, but the page cannot be built on that machine: build `web/dist` elsewhere and
-copy it in. Whether the binding installs behind your proxy is one of the plan's phase 0 checks and has not been
+package, `pnpm install` still succeeds: its `prepare` step builds the page with `--optional`, prints why it could
+not, and carries on. The service then answers `/` with a short page saying the page is not built; the Api, MCP and
+`/status` work. Build `web/dist` on another machine with `pnpm run build:web` and copy the directory in. Whether the binding installs behind your proxy is one of the plan's phase 0 checks and has not been
 verified on a corporate machine.
 
 Check: `ls node_modules/.pnpm | grep rolldown` lists the binding, and `pnpm run build:web` prints `built …/web/dist`.
@@ -160,8 +161,12 @@ bin/overwatch restore ~/overwatch-2026-11-25.sqlite  # with the service stopped
 bin/overwatch rebuild-search                          # with the service stopped; rebuilt from the journal at start
 ```
 
-A backup is one consistent SQLite copy: incidents, threads, unfinished runs, schedules, checkpoints and the journal
-travel together, so after a restore nothing is reported or started twice.
+A backup is one consistent SQLite copy: incidents, threads, unfinished runs, schedules, checkpoints, unsent reports
+and the journal travel together. Restore copies the backup next to the database, checks it (it opens, it has
+Overwatch's tables, SQLite's integrity check passes) and only then replaces the database in one rename; it refuses
+while a service has the database open. The restore test (`test/service.test.ts`) shows the restored service sends
+nothing to OpenCode again and keeps archived incidents out of the inbox; that is what is tested, not a general
+guarantee about every kind of work.
 
 ## Troubleshooting by symptom
 
