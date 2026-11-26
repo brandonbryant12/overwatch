@@ -55,6 +55,18 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   backup runs, every value passes the writer and its constraints.
 - **Kubernetes is read-only by allowlist** (`checkKubectl`): only listed verbs, resources, flags and value shapes.
 
+## The page
+
+- `web/` is served as it is: plain ES modules, one stylesheet on `tokens.css`, no bundler, no framework, no build.
+- The service decides; the page shows. Groups, health, why something came back and where a prompt goes are computed
+  in `src/inbox.ts` and `src/snapshot.ts`. The page generates no identifiers (request keys come from `/v2/focus`).
+- Page decisions that are not the service's (which rows are shown, what waits behind "N new", focus movement, the
+  keyboard map, Later's words, staleness) live in pure modules (`web/model.mjs`, `web/freshness.mjs`) tested by
+  `test/page.test.ts`; `web/app.mjs` is the thin DOM around them.
+- A return is decided in the transaction that commits its cause, and only for causes with a later seq than the
+  action. A deadline is a wall time plus a stored delay, bounded on the monotonic clock (`passed` in `src/inbox.ts`).
+- Look at it: `test/real/screenshots.ts` renders the demo in dark, light, narrow, stale and down.
+
 ## Tests
 
 Use fakes for every outside system: the acceptance rig's fake `kubectl`, loopback Datadog and OpenCode. Never touch

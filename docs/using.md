@@ -1,6 +1,77 @@
 # Using Overwatch
 
-What milestone 1 does. There is no page yet; everything is the command line, the loopback API and the event log.
+What milestones 1 and 2 do: the service that watches and counts, and the page that shows it. Open the page at the
+address `serve` prints (`http://127.0.0.1:7331/` by default). `bin/overwatch demo` shows all of it with a seeded
+picture and contacts nothing.
+
+## The page
+
+One screen answers "is anything wrong, and what needs me":
+
+- **The environments strip** across the top: each environment is checked and quiet, needs a look, checked in part,
+  not checked recently, or signed out, with a glyph and words, never colour alone. Click one to put it in focus.
+- **The inbox** on the left, in four groups the service decides. *Needs you*: active errors in production that nobody
+  has decided about. *New*: everything else that is active. *Working*: problems with a request queued for an agent.
+  *Quiet*: problems that stopped by rule (three fully measured intervals with nothing new). Working and Quiet start
+  folded. Rows never move while you look: what arrives or changes group waits behind the **N new** button until you
+  press `r`. Your own actions take effect at once. A row's bars are its last 24 hours by the hour; `42+×` means the
+  count is a lower bound.
+- **The focus stage** in the middle: the problem's counts, why it came back, its findings with their evidence, and
+  its history; for an environment, its sources, their repair commands, gauges and coverage.
+- **The bar** at the bottom: with something in focus, Enter asks about it (Shift+Enter in a new request); with
+  nothing in focus, Enter finds. A prompt is stored and queued for an agent and shown under *Working*; agents
+  answering it come in milestone 3. The page shows where a prompt will go before you send it.
+
+**Its own clock.** A one-second timer compares the wall and monotonic clocks with the last time the page heard the
+service (a snapshot, a change or the five-second heartbeat). After 15 seconds: *Stale*, health unknown, nothing
+green. After 30: *Service not answering*, rows dimmed, actions off, your draft kept, and the command to start it.
+When the stream returns, everything is live again.
+
+Other states each say what to do: *Signed out* and every failing source show their repair command; *Collection
+paused for disk space* shows `pausedFix`; an empty inbox says *Nothing needs you*.
+
+### Keyboard
+
+| Key | Action |
+| --- | --- |
+| `j` / `↓`, `k` / `↑` | Next or previous row (folded groups are skipped) |
+| `d` | Done: dealt with; back if it happens again after one polling interval |
+| `l` | Later: a sheet. Empty is "until something changes"; or `2h`, `45m`, `tomorrow`, `monday`, `worse` |
+| `w` | Later, until it gets worse |
+| `n` | Never: a sheet with an optional reason (noise, expected, duplicate, or your words) |
+| `u` | Undo the last way out (also after its row left) |
+| `r` | Show what waits behind *N new* |
+| `p` / `Enter` | Ask about what is in focus |
+| `Shift+Enter` (in the bar) | Ask in a new request |
+| `/` or `⌘K` | Find anything: problems wherever they went, findings, evidence, prompts |
+| `t` | Dark or light |
+| `?` | This list |
+| `Esc` | Close a sheet or the finder, or leave the bar (the draft stays) |
+
+Keys typed into the bar, the finder or a sheet are text.
+
+## Ways out, and coming back
+
+Every way out is one event; `u` undoes the current one, and a stale undo (something else changed it since) is
+refused. Seen marks are stored by the service, so two tabs and two browsers agree.
+
+| Way | Comes back when | Stays away through |
+| --- | --- | --- |
+| Done | A new occurrence is admitted after a grace of one polling interval from the action | Replays, anything admitted inside the grace, deploys, the clock alone |
+| Later (until something changes) | A deploy of the same app and environment, a finding on it, worse, or more severe | Ordinary recurrence, other environments' deploys |
+| Later, a time | The first scheduler pass at or after that time; or worse, or more severe | A deploy alone |
+| Later, worse | Five new occurrences and a trailing day at least twice the day before the action; or more severe | Deploys and findings alone |
+| Never | More severe; or five new and a trailing day at least ten times the day before | Everything else |
+| Quiet (by rule) | Its first new occurrence (or a new gauge breach) | Replays and unmeasured intervals |
+
+A deadline (Done's grace, Later's time) is kept as a wall-clock time and the delay you chose, and is also counted on
+the service's monotonic clock, after a restart too: setting the wall clock back cannot postpone it beyond that delay.
+What comes back says why, in its row and in its history.
+
+**Search** is literal and case-insensitive over problem titles, retained evidence and findings of real work, and
+prompts; it finds things wherever they went (Done, Later, Never, Quiet). Trial work is not searched. Evidence that no
+finding cites leaves search after 14 days, when retention removes it; problems, findings and the evidence they cite
+stay searchable.
 
 ## What the service does by itself
 
@@ -111,16 +182,20 @@ busy, 4 a failed diagnostic or score gate, 5 an invalid or incompatible backup o
 
 - `check`: validates the configuration and its limits offline.
 - `serve`: runs the service; one readiness line `{version, url, pid}`.
-- `status`: the snapshot (environments, sources with their `fix`, incidents with `exact` and `active`, coverage,
-  metrics, deploys, causes, jobs, findings, and the trial's own jobs and findings under `trial`). From the running
-  service, or from the database directly when none runs (`live: false`).
+- `status`: the snapshot (environments and sources with their `subject`, sources with their `fix`, incidents with
+  `exact`, `active`, `group`, `way`, `returned` and their 24-hour `spark`, the `inbox`, coverage, metrics, deploys,
+  causes, real jobs and findings, and the trial's own under `trial`). From the running service, or from the database
+  directly when none runs (`live: false`).
 - `backup --to FILE`, `restore --from FILE`: see [setup.md](setup.md#6-back-up-and-restore).
 - `doctor`: every dependency with its fix.
 - `trial`: five seeded cases through your OpenCode model (below).
 - `demo`: serves a seeded picture from a new temporary data directory without contacting anything.
 
-The service's loopback API: `GET /v2/status`, `GET /v2/changes` (server-sent events: a snapshot, a change after each
-commit, a heartbeat every five seconds), `POST /v2/backup`, `/v2/doctor`, `/v2/trial`, and `POST /mcp`.
+The service's loopback API: `GET /` (the page), `GET /v2/status`, `GET /v2/changes` (server-sent events: a snapshot,
+a change after each commit, a heartbeat every five seconds), `GET /v2/inbox`, `GET /v2/items/:id`,
+`GET /v2/search?q=`, `GET /v2/focus?subject=`, `POST /v2/items/:id/action`, `POST /v2/ask` (with the
+`Idempotency-Key` that `/v2/focus` issued), `POST /v2/backup`, `/v2/doctor`, `/v2/trial`, and `POST /mcp`. The
+contract is `docs/plans/simple-core-interfaces.md`.
 
 ## The trial and the investigation tools
 
@@ -135,7 +210,8 @@ does not file is nudged once, retried once in a fresh session and nudged once, t
 has 8 tool calls and five minutes. The five minutes are one deadline on the service's clock, shared by the tools and
 the driver: when it passes, the session is interrupted and its slot released, whether or not OpenCode answers.
 
-Telemetry comes 50 pieces per call, so a run can read at most seven pages before its eighth call must file. The 400
+Telemetry comes 50 pieces per call, in a stable order, with a `nextCursor` to read the next page (bound to the run,
+the source and the filters). A run can read at most seven pages before its eighth call must file. The 400
 pieces per session is a storage ceiling, not a promise that one run can read or cite that many.
 
 The report gives, per case, the verdict, whether the filing was valid, tries, nudges and time; and in total valid

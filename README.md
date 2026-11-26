@@ -4,17 +4,20 @@ Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts w
 read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
 not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
 
-This is the **simple core, milestone 1**: the kernel and the tools for proving it on a real laptop and a real model.
+This is the **simple core, milestones 1 and 2**: the kernel, the tools for proving it on a real laptop and a real
+model, and the page.
 Specification: [docs/plans/simple-core.md](docs/plans/simple-core.md) with its
 [amendments](docs/plans/simple-core-amendments.md) and [interfaces](docs/plans/simple-core-interfaces.md).
-There is no page yet; that is milestone 2.
+Agents answering prompts from the page is milestone 3.
+
+![The demo, dark](docs/design/screenshots/v2/desktop-dark-all-groups.png)
 
 ## In one minute
 
 ```sh
 git clone <this repository> overwatch && cd overwatch     # Node 22.13 or newer; nothing to install
 bin/overwatch check  --config ~/.config/overwatch/config.json
-bin/overwatch serve  --config ~/.config/overwatch/config.json
+bin/overwatch serve  --config ~/.config/overwatch/config.json   # then open the address it prints
 bin/overwatch status --config ~/.config/overwatch/config.json
 bin/overwatch doctor --config ~/.config/overwatch/config.json
 bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isolated picture; contacts nothing
@@ -31,6 +34,9 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
   and the problems active now.
 - **Failures**: classified (sign-in, permission, rate limit, unreachable, configuration), backed off, suspended and
   probed; one cause per failure; "offline" only when several independent endpoints all fail.
+- **The page**: the environments strip, the inbox in four groups whose rows never move under you, Done, Later and
+  Never with undo and a reason for everything that comes back, a finder, and one bar that asks about what is in
+  focus. Everything is on the keyboard. It keeps its own clock and says stale or down by itself.
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
   cases before any automation is allowed for that model.
@@ -49,4 +55,6 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
 pnpm install          # dev dependencies only: typescript, fast-check, @types/node
 pnpm run check        # typecheck and the unit and property tests in test/
 pnpm run accept       # the milestone 1 acceptance suite in accept/m1 (M1_LONG=1 for the release run)
+node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs   # the page contract (uses system Chrome)
+node --experimental-strip-types --no-warnings test/real/screenshots.ts  # screenshots of the demo
 ```

@@ -13,6 +13,7 @@ Keys outside this grammar are refused by `check`.
 | `opencode.url`, `opencode.model`, `opencode.password` | registration file; none; none | Where OpenCode answers, the model sessions use, and its password reference. |
 | `readings` | `3` | Independent readings per investigation (1–3; used from milestone 3). |
 | `apps.<app>.checkout` | required | The app's git checkout, read only through git objects. |
+| `apps.<app>.problemPatterns` | `{error: [error, fatal, panic, exception, critical], warn: [warn, warning]}` | Literal whole words (any case) that make a log line an error or a warning, per class; a list replaces that class's defaults for this app, an empty list turns the class off, a missing class keeps its defaults. Error wins a tie. A provider's own severity (Datadog's status, a Kubernetes Warning event, a gauge rule) is not affected. |
 | `apps.<app>.environments.<env>.sources.<name>` | at least one | A source, below. |
 | `watchers[]` | required | `{app, environment, every}`; `every` defaults to `2m` for `prod`/`production`, else `10m`. |
 
@@ -35,7 +36,9 @@ bounds (see [using.md](using.md)). They are `LIMITS` in `src/config.ts`.
 | Overlap for late data | 2 min Kubernetes, 5 min Datadog, never below the 14-day floor | Older records are not counted |
 | Catch-up after sleep | 14 days, in half-open 6-hour slices, each committed with its checkpoint | Older time is a recorded `gap`; active totals become lower bounds |
 | Gauge problems | memory > 90 % of limit, pods not ready > 0; 2 measured samples to open, 2 to close | `METRIC_RULES` in `src/collect.ts`; an unmeasured sample breaks both runs |
-| Quiet | 3 ordinary, fully measured intervals with nothing new | The problem stops holding health in `attention`; its total stays |
+| Quiet | 3 ordinary, fully measured intervals with nothing new | The problem stops holding health in `attention` and moves to Quiet; its total stays |
+| Done's grace | One polling interval of its environment, on the service's own admission | Admissions inside it are counted but do not bring it back |
+| Rates for Later and Never | 5 new occurrences, and a trailing day 2× (Later) or 10× (Never) the day before the action (at least 1) | Hourly counts per problem by event time, kept 30 days |
 | Datadog rate limit | Retry-After up to 30 s, twice | Backs off; the checkpoint does not move |
 | Agent run | 8 tool calls (paging and filing together), 5 minutes on the service's clock; 2 sessions at once | Refused; the session is interrupted and its slot released; retried once, then parked |
 | Evidence | 16 KiB per piece; 50 per telemetry call, so at most 7 pages before filing; 400 pieces per session as a storage ceiling | Truncated with a marker |
