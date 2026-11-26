@@ -121,17 +121,19 @@ function investigated(store: Store) {
       const pieces = (kind === "code" ? [diff] : lines).map((text, k) => {
         const handle = `e_d0c4ab11${n}${k}0000000000000000`;
         w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, ?, ?, ?)", s(handle), s(run), s(session), s(kind === "code" ? "code" : "pods"), s(text), k + 1);
+        w.run("INSERT INTO origins (handle, origin) VALUES (?, ?)", s(handle), s(kind === "code" ? "code" : "telemetry"));
         return { handle, source: kind === "code" ? "code" : "pods", text };
       });
       const body = { cause, ruled_out: verdict === "real" ? ["provider outage (status page green)", "database latency"] : [], not_checked: ["the provider's own logs"], next_check: "Restore timeout_ms to 3000 and watch the rate", impact: "checkout payments fail", affected: ["shop/production"], since: null, status: "investigated" };
       w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES (?, ?, ?, ?, ?, ?)", s(finding), s(run), s(verdict), json([{ statement, pieces }]), json(code), json(body));
       w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, run_id, seq) VALUES (?, ?, 'reading', ?, 1, 'done', ?, ?)", s(`wk_d0c4ab11${n}`), s(job), n + 1, s(run), seq);
-      return { slot: n + 1, sessionId: session, verdict: verdict as "real" | "not_real", findingId: finding, reason: null, telemetry: kind !== "code" };
+      return { slot: n + 1, sessionId: session, verdict: verdict as "real" | "not_real", findingId: finding, reason: null, telemetry: kind !== "code", observed: kind === "code" ? [] : lines };
     });
     const challenge = { outcome: "upheld" as const, reason: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.", pieces: [{ handle: "e_d0c4ab11c00000000000000000", source: "pods", text: lines[0]! }] };
     const decided = adjudicate(3, readings, challenge);
     const at = w.next();
-    const result = { verdict: decided.verdict, observed: decided.observed, planned: 3, counts: decided.counts, readings: readings.map(({ telemetry: _, ...r }) => r), challenge, seq: at };
+    const observations = new Set(readings.filter((r) => r.verdict === decided.verdict).flatMap((r) => r.observed)).size;
+    const result = { verdict: decided.verdict, observed: decided.observed, planned: 3, counts: decided.counts, observations, readings: readings.map(({ telemetry: _, observed: __, ...r }) => r), challenge, seq: at };
     w.event("adjudicated", s(subject), { job, result });
     w.run("UPDATE jobs SET result = ? WHERE id = ?", json(result), s(job));
   });

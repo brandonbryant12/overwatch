@@ -189,9 +189,9 @@ export function verdictView(result) {
   const challenge = result.challenge ? (result.challenge.outcome ? `challenger ${result.challenge.outcome}` : "challenger did not file") : null;
   // Negative facts are stated in words: a real verdict telemetry did not confirm, and how many distinct observations
   // the agreeing readings cited (agreement on one line is one observation).
-  const n = result.observations ?? 0;
+  const n = result.observations;
   const evidence = result.verdict !== "real" ? null
-    : result.observed ? `observed in telemetry · ${n} distinct observation${n === 1 ? "" : "s"} cited`
+    : result.observed ? `observed in telemetry${typeof n === "number" ? ` · ${n} distinct observation${n === 1 ? "" : "s"} cited` : ""}`
     : "no telemetry confirmation: code only, not observed";
   return { label, tone, votes: parts.join(" · "), challenge, observed: Boolean(result.observed), evidence };
 }
