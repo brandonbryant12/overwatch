@@ -4,9 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 
-const fresh = "../web/freshness.mjs", model = "../web/model.mjs";
-const { freshness } = await import(fresh);
-const m = await import(model);
+import { freshness } from "../web/freshness.mjs";
+import * as m from "../web/src/model.ts";
 
 test("freshness ages by whichever clock moved more, and never by a clock that went back", () => {
   fc.assert(
@@ -19,7 +18,7 @@ test("freshness ages by whichever clock moved more, and never by a clock that we
   assert.equal(freshness(null, { wallMs: 0, monoMs: 0 }), "unknown");
 });
 
-const inbox = (groups: Record<string, string[]>) => ({ seq: 1, groups: { needsYou: [], new: [], working: [], quiet: [], ...groups } });
+const inbox = (groups: Record<string, Array<string>>) => ({ seq: 1, groups: { needsYou: [], new: [], working: [], quiet: [], ...groups } });
 
 test("rows stay put: arrivals and regroupings wait, own actions remove and restore at once in server order", () => {
   const shown = m.freeze(inbox({ needsYou: ["a", "c"], new: ["x"] }));
@@ -52,9 +51,10 @@ test("Later's words", () => {
   assert.deepEqual(m.later("", now), { action: "later" });
   assert.deepEqual(m.later("worse", now), { action: "later", when: "worse" });
   assert.deepEqual(m.later("2h", now), { action: "later", untilMs: now + 7_200_000 });
-  assert.equal(new Date(m.later("tomorrow", now).untilMs).getHours(), 9);
-  assert.ok(m.later("monday", now).untilMs > now);
-  assert.ok(m.later("soonish", now).error);
+  const until = (text: string) => (m.later(text, now) as m.WayOut).untilMs ?? 0;
+  assert.equal(new Date(until("tomorrow")).getHours(), 9);
+  assert.ok(until("monday") > now);
+  assert.ok("error" in m.later("soonish", now));
   assert.equal(m.shownHealth("quiet", "stale"), "unknown");
 });
 
@@ -77,7 +77,7 @@ test("class: what waits behind the line is counted once, and only arrivals ask f
 test("class: a cell is never shown as measured once any expected reading is older than it stays fresh", () => {
   const health = fc.constantFrom("quiet", "attention", "partial", "stale", "signed_out");
   fc.assert(
-    fc.property(health, fc.constantFrom("live", "stale", "down", "unknown"), fc.array(fc.option(fc.integer({ min: 0, max: 1000 }), { nil: null }), { minLength: 1, maxLength: 4 }), fc.integer({ min: 0, max: 2000 }), (h, connection, ages, now) => {
+    fc.property(health, fc.constantFrom<m.Connection>("live", "stale", "down", "unknown"), fc.array(fc.option(fc.integer({ min: 0, max: 1000 }), { nil: null }), { minLength: 1, maxLength: 4 }), fc.integer({ min: 0, max: 2000 }), (h, connection, ages, now) => {
       const env = { health: h, freshForMs: 300, readings: ages.map((a) => ({ okMs: a === null ? null : now - a })) };
       const shown = m.cellHealth(env, connection, now);
       if (connection !== "live") assert.equal(shown, "unknown");

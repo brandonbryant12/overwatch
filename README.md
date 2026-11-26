@@ -65,9 +65,10 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 ## Tests
 
 ```sh
-pnpm install          # dev dependencies only: typescript, fast-check, @types/node
-pnpm run check        # typecheck and the unit and property tests in test/
+pnpm install          # the tools, and the page built into web/dist
+pnpm run build:web    # build the page again after changing web/src
+pnpm run check        # typecheck (service and page) and the tests in test/ and web/test/
 pnpm run accept       # the milestone 1 acceptance suite in accept/m1 (M1_LONG=1 for the release run)
-node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs   # the page contract (uses system Chrome)
+node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs   # the page contract (system Chrome; build first)
 node --experimental-strip-types --no-warnings test/real/screenshots.ts  # screenshots of the demo
 ```

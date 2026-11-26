@@ -140,12 +140,20 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 
 ## The page
 
-- `web/` is served as it is: plain ES modules, one stylesheet on `tokens.css`, no bundler, no framework, no build.
+- The page is an Effect UI application on Effect 4 (`web/src/`), bundled by rolldown into `web/dist/`
+  (`pnpm run build:web`; `prepare` runs it), which is all the service serves. One stylesheet on `tokens.css`.
+  Each part (strip, banners, inbox, stage, finder, bar, sheets) is an `Html.component` with a Schema Model, a
+  `UiSchema.TaggedEnum` of messages and a pure `update`; HTTP goes through `HttpClient` in `web/src/services/`,
+  reads through `Query`, effects through Commands, the change stream, clock and keys through Subscriptions.
 - The service decides; the page shows. Groups, health, why something came back and where a prompt goes are computed
   in `src/inbox.ts` and `src/snapshot.ts`. The page generates no identifiers (request keys come from `/v2/focus`).
 - Page decisions that are not the service's (which rows are shown, what waits behind "N new", focus movement, the
-  keyboard map, Later's words, staleness) live in pure modules (`web/model.mjs`, `web/freshness.mjs`) tested by
-  `test/page.test.ts`; `web/app.mjs` is the thin DOM around them.
+  keyboard map, Later's words, staleness) live in pure modules (`web/src/model.ts`, `web/freshness.mjs`) tested by
+  `test/page.test.ts`; `web/test/` tells the root's transitions as stories. `web/freshness.mjs` stays plain
+  JavaScript: the acceptance suite imports it.
+- The page is pinned by `accept/m2`, `accept/m3` and `accept/m4` in Chrome: selectors, data attributes, keys, timing
+  and clipboard text. A key that moves the caret (p, Enter, Esc in the bar) acts in the key press itself, and a group
+  button shows its new state on the press: scripts type and loop straight after them.
 - A return is decided in the transaction that commits its cause, and only for causes with a later seq than the
   action. Every disposition has one position, `decided_seq` (the action's, undo's or return's event seq, named
   inside the event by `Writer.next()`); an action given `basisSeq` is refused unless it matches.

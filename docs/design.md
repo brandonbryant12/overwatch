@@ -1,11 +1,11 @@
 # Overwatch Design Language
 
-> **Historical implementation paths.** This guide was written for an earlier build (Foldkit, `web/src/`, a build
-> script and `web/dist/`). None of those exist now. The visual guidance (tokens, states, type, spacing, motion, logo,
-> keyboard map) is current and is what the page uses; where this guide names a file or a framework, read the current
-> place instead: tokens in `web/tokens.css`, styles in `web/page.css`, page logic in `web/model.mjs` and
-> `web/freshness.mjs` (tested in `test/page.test.ts`), the DOM in `web/app.mjs`, the logo in `web/logo.svg`. The
-> keyboard map that holds today is in `docs/using.md`.
+> **Historical implementation paths.** This guide was written for an earlier build (Foldkit and a different
+> `web/src/`). The visual guidance (tokens, states, type, spacing, motion, logo, keyboard map) is current and is what
+> the page uses; where this guide names a file or a framework, read the current place instead: tokens in
+> `web/tokens.css`, styles in `web/page.css`, page logic in `web/src/model.ts` and `web/freshness.mjs` (tested in
+> `test/page.test.ts`), the Effect UI components in `web/src/components/`, the logo in `web/logo.svg`. The keyboard
+> map that holds today is in `docs/using.md`.
 
 
 Overwatch is one engineer's personal, all-day command center. It is not a marketing product or a multi-tenant SaaS dashboard. Every screen exists to answer two questions in seconds: **what needs my attention right now?** and **what happens when I prompt on what is in focus?**
