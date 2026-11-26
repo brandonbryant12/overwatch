@@ -38,3 +38,15 @@ A fixture never imports the application, old tests or plugin. The normal startup
 The test descriptor replaces clocks, space readings and scheduling, and exposes statement/commit cut points. It cannot manufacture an incident, a filing, a successful read or a transaction. An explicit poll awaits the real due-work path. If the implementation changes its statement count, the crash oracle adjusts. Source/field names, CLI exit codes, readiness line, trial scores, fixtures, and effective tool/session identities are fixed in the interfaces document.
 
 Every successful citation must resolve to the redacted bytes returned in that attempt. The trial uses local, labeled cases and a harmless compliance marker. It must pass through the configured OpenCode boundary. The fake's ledger counts actual sessions and messages independently of the program's report. The single-writer stand-in tests OS-level exclusion today. A distinct release, owner's GLM endpoint, corporate proxy/launchd, two-day laptop run and M2 browser disconnect remain separate acceptance gates. A finite generated suite cannot establish correctness for every history or recover an upstream event that left no distinct observation.
+
+## Independent kernel review and page acceptance
+
+The release suite now includes three additional M1 files. `collection-edges.test.mjs` observes provider coverage, event-time admission, gauge problems and recovery through status. `storage-edges.test.mjs` exercises concurrent startup, clock rollback, logical restore invariants, pressure during maintenance and real file reclamation. `adapter-edges.test.mjs` covers both Basic credential sources, scoped catalogs, effective diagnostics, elapsed budgets, concurrent trial driving and the model gate. Set M1_OTHER_BIN to the executable of a compatible checkout to exercise both ownership directions. Expected outcomes on the assessed commit are in the milestone assessment.
+
+Run the page contract independently:
+
+```sh
+node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs
+```
+
+Use the shared heavy-command prefix on the iMac. M2 adds no packages. Server tests use the existing temporary rig. The pure module test imports the public page freshness function. Rendered tests start a separate temporary Chrome profile over a debugging pipe. They use the installed system Chrome or CHROME_BIN, and print a skip reason if neither exists. The clock fixture cuts the actual event stream and holds status open while Chrome advances its own timers. Two fixture tests can pass before there is a page. Product tests that first encounter a missing route or module fail there; their later assertions become reachable during implementation.
