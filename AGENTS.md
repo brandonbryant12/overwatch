@@ -12,7 +12,9 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   `node:http`, `fetch`, `node:child_process`). Dev dependencies are `typescript`, `fast-check`, `@types/node`.
 - `pnpm run check` (typecheck and `test/`) before every commit; `pnpm run accept` for the acceptance suite. Never
   edit `accept/`: if a test there looks wrong, say so with evidence.
-- Size budget: about 5,000 lines of service code. Count nonblank, noncomment lines of `src/`.
+- Size budget: at most 5,500 lines of service code (nonblank, noncomment lines of `src/`). It was 5,000 until
+  milestone 4: acting on Git (deriving, checking, verifying and publishing a fix) and looking ahead could not fit
+  inside the old number without dropping a safety check, so the owner raised it once, and no further.
 
 ## Rules that hold because of how the data is shaped
 
@@ -82,6 +84,24 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 - **Restore rebuilds rows** into the owned database in one transaction: no file is moved into place, no SQL from a
   backup runs, every value passes the writer and its constraints.
 - **Kubernetes is read-only by allowlist** (`checkKubectl`): only listed verbs, resources, flags and value shapes.
+
+- **A model selects; code derives.** A fixer files one `ow_proposal` from options code computed (`Options` in
+  `src/tools.ts`): a commit of the rollout to revert, a JSON scalar to restore, or abstain. Any other field, value,
+  path or commit is refused and ends the attempt. `derive()` (`src/fixes.ts`) builds the commit from Git objects on the
+  base tip in a private mirror and `check()` judges the whole tree (allowlisted existing regular files, same mode,
+  not a verify input or a build, CI, lock or credential file, at most 3 files and 80 lines, 16 KiB).
+- **Publishing takes the verified commit.** An attempt's head is written before any ref changes and it is the only
+  thing pushed, to `ow/fix/<attempt>`, never forced; a moved base or a different commit on the branch voids it.
+  After a restart, publication is reconciled by branch and PR marker. Nothing merges. A real verify failure revokes
+  the fix gate. Verify runs under `sandbox-exec` with no network and writes only in its checkout; without it, it fails
+  closed.
+- **Onset is the provider's.** A problem qualifies only if its first line's provider time is strictly after its
+  deployment's rollout: the replica set's creation time when the cluster gives one, else the interval between the
+  last observation of the previous revision and the first of the new one (never first-seen as an onset), with a
+  clean, ordinary, fully measured interval before it.
+- **Looking ahead never guesses.** A forecast needs six fresh, distinct, consistent provider samples (`forecast()` in
+  `src/outlook.ts`); a staging comparison needs two aligned, ordinary, fully measured intervals on both sides.
+  Otherwise the answer is unknown, with the reason.
 
 ## The page
 

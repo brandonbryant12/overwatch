@@ -91,7 +91,11 @@ Overwatch has no plugin. OpenCode loads it from its own configuration (`~/.confi
       { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
       { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
       { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
-      { "action": "ow_ow_history", "resource": "*", "effect": "allow" } ] }
+      { "action": "ow_ow_history", "resource": "*", "effect": "allow" } ] },
+    "ow-fixer": { "mode": "primary", "permissions": [
+      { "action": "*", "resource": "*", "effect": "deny" },
+      { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_proposal", "resource": "*", "effect": "allow" } ] }
   },
   "mcp": { "servers": { "ow": { "type": "remote", "url": "http://127.0.0.1:7331/mcp",
     "headers": { "Authorization": "Bearer <the value of mcpToken>" }, "oauth": false, "codemode": false } } }
@@ -166,7 +170,50 @@ Both ask the running service. `doctor` also inspects the launchd job `dev.overwa
 proxy it runs with (`launchd`, `launchd.paths`, `launchd.proxy`); if one fails, run `install` again from a terminal
 that has them.
 
-## 6. Back up and restore
+## 6. Opt an app in to fix proposals (optional)
+
+Overwatch can open a **draft** pull request for a confirmed problem that began after one deployment: the revert of
+one commit of that deployment, or one JSON setting restored to its previous value. A model only selects among options
+Overwatch computed; Overwatch derives the change from Git, checks it and verifies it. It never merges.
+
+**Requirements.** `git` 2.40 or newer (for `git merge-tree --merge-base`), and `gh` signed in to the host of the
+app's remote (`gh auth status`) from a terminal where the service's PATH finds it. The app's checkout must have the
+remote configured (`git -C <checkout> remote get-url origin`). Overwatch never writes to that checkout: it fetches
+into its own mirror under `<dataDir>/fixes/` and pushes only `ow/fix/<attempt>` branches. Make sure no protection
+rule covers `ow/fix/*`, and that your base branch is protected as usual.
+
+**Verification is macOS only.** The verify commands run in a fresh checkout of the candidate under `sandbox-exec`
+(`/usr/bin/sandbox-exec`): no network, writes only inside that checkout and a temporary folder, one process group
+at a time, 60 s per command and 180 s in all. Without `sandbox-exec`, verification fails closed and no draft is
+published; the item says why. A fork on another system has to supply an OS-enforced equivalent with the same
+guarantees (no network, no writes outside the checkout, no host credentials, a killable process group), for example
+a rootless container or `bwrap` on Linux, as `verify()` in `src/fixes.ts`.
+
+**Configure** the app (only these files may change, and only these commands verify):
+
+```json
+"apps": { "shop": { "checkout": "~/src/shop",
+  "fixes": { "remote": "origin", "base": "main", "paths": ["config/payments.json"], "verify": [["npm", "test", "--", "config"]] },
+  "environments": { … } } }
+```
+
+Verify commands must pass with no network, from a fresh checkout without `node_modules` or other untracked files;
+choose commands that test the allowed files directly. Add the `ow-fixer` agent (step 3) and restart.
+
+**Calibrate** the model for fixes, with the service running:
+
+```sh
+bin/overwatch trial --fixes    # the five investigation cases, then a revert, a setting restoration and a refusal control
+```
+
+Fix proposals are on only if both parts pass (`Fix calibration: 2/2 verified; fix proposals on`). Changing the model,
+the app's `fixes` settings or the fixer's tools turns them off until the trial passes again, and so does a real
+verification failure. Check: `bin/overwatch doctor` reports `agent:fixer`.
+
+**Time left and staging checks** need no trial: add `capacity` to a Datadog metric source and `promotion` to the app
+(see [customizing.md](customizing.md)).
+
+## 7. Back up and restore
 
 ```sh
 bin/overwatch backup  --to ~/overwatch-backup.sqlite   # while running or not; never overwrites a file

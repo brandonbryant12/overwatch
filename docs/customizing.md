@@ -15,12 +15,16 @@ Keys outside this grammar are refused by `check`.
 | `apps.<app>.checkout` | required | The app's git checkout, read only through git objects. |
 | `apps.<app>.problemPatterns` | `{error: [error, fatal, panic, exception, critical], warn: [warn, warning]}` | Literal whole words (any case) that make a log line an error or a warning, per class; a list replaces that class's defaults for this app, an empty list turns the class off, a missing class keeps its defaults. Error wins a tie. A provider's own severity (Datadog's status, a Kubernetes Warning event, a gauge rule) is not affected. |
 | `apps.<app>.environments.<env>.sources.<name>` | at least one | A source, below. |
+| `apps.<app>.fixes` | none (no proposals) | Opt in to draft fixes: `{remote, base, paths, verify}`. `remote` and `base` are Git names in the checkout (`origin`, `main`). `paths` are 1–10 exact repository-relative files a fix may change; build, dependency, lock, CI, hook and credential files are refused. `verify` is 1–4 argv lists run in an isolated checkout (`[["npm", "test"]]`); a file they name cannot also be in `paths`. |
+| `apps.<app>.promotion` | none | `{staging, production}`: two watched environments of this app, polled at the same interval, compared after each staging release. |
 | `watchers[]` | required | `{app, environment, every}`; `every` defaults to `2m` for `prod`/`production`, else `10m`. |
 
 A Kubernetes source: `type: "kubernetes"`, `context`, `namespace`, `selector`, `readings` (any of `logs`,
 `events`, `workloads`, `usage`; all by default). A Datadog source: `type: "datadog"`, `baseUrl` (https), `apiKey`,
 `appKey` (secret references), `query`, `metric` (when `metrics` is read), `readings` (any of `logs`, `monitors`,
-`metrics`). A reading you leave out is disabled and shown as not measured; it never counts for or against health.
+`metrics`), and `capacity` on a source that reads `metrics`: `{resource: "disk"|"memory"|"quota", unit:
+"bytes"|"units", limit}` when the metric measures used capacity against a fixed ceiling (for time left). A reading
+you leave out is disabled and shown as not measured; it never counts for or against health.
 
 ## Operating limits
 
@@ -50,6 +54,12 @@ bounds (see [using.md](using.md)). They are `LIMITS` in `src/config.ts`.
 | Freshness | 3 polling intervals | `stale` |
 | Disk | 1 GiB in use; 256 MiB free; both checked before every write, by every path | Old events go, then what age allows (never a finding or its cited evidence); if not enough, every write waits (`paused: "disk"`, with `pausedFix`) and the checkpoint stays |
 | Giving space back | 16 MiB per scheduler pass, any page size | Free pages are reused meanwhile |
+| A fix's change | One commit of the deployment reverted (against its first parent), or one top-level JSON scalar restored; existing regular files of `paths` only, same mode; at most 3 files, 80 changed lines, 16 KiB | Refused with the reason; nothing is pushed |
+| A fix's verification | At most 4 commands, 60 s each, 180 s in all, 64 KiB of output; no network; writes only in its checkout and temporary folder | Fails closed (`verify_failed`), and the fix gate is revoked until a new `trial --fixes` passes |
+| Fix eligibility | 3 of 3 readings real, challenger upheld, observed in telemetry, exact count, first line strictly after the rollout, a clean interval before it, fresh telemetry, both trials passed | No proposal; the first rule that fails is the one line shown |
+| Following a draft | The host is asked at most once a minute per draft | Merged → waiting for a release containing it → 3 quiet intervals → Done by rule, unless you decided first |
+| Time left | 6 distinct provider samples since the last gap, ceiling change or decrease, at least 5 intervals end to end, each step positive and at most 2 intervals, the newest at most 1 interval old, every step within 25 % of the median slope; shown only within 24 hours | No estimate, with the reason |
+| Staging against production | Two aligned, ordinary, fully measured intervals after a staging release; a staging-only problem new since the release, seen in both, at least 3 times, none in production | `no_signal` or `unknown` (with the side and interval) |
 
 ## Playbooks
 

@@ -50,5 +50,5 @@ model on seeded cases before any automation is turned on.
 
 ## Small, and nothing to install
 
-One process, one file, Node's standard library, no build step. About 5,000 lines for the service. A fork can read
+One process, one file, Node's standard library, no build step. At most 5,500 lines for the service (5,000 until fixes and forecasting arrived in milestone 4). A fork can read
 all of it.

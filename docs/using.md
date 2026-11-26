@@ -58,6 +58,7 @@ paused for disk space* shows `pausedFix`; an empty inbox says *Nothing needs you
 | `i` | Investigate the problem in focus: independent readings, then a challenger if most say real |
 | `o` | Open in OpenCode: an ordinary session of yours with the focus already named in it |
 | `y` | Was this right? A line for the app's playbook, read by later investigations |
+| `f` | Ask for a fix proposal on the latest investigation (apps that opted in); the answer, a draft or the rule that stops it, appears on the item |
 | `b` | Brief: what changed, for you or the team, to edit and copy |
 | `t` | Dark or light |
 | `?` | This list |
@@ -214,7 +215,7 @@ busy, 4 a failed diagnostic or score gate, 5 an invalid or incompatible backup o
   `exact`, `active`, `group`, `way`, `returned` and their 24-hour `spark`, the `inbox`, coverage, metrics, deploys,
   causes, real jobs and findings, and the trial's own under `trial`). From the running service, or from the database
   directly when none runs (`live: false`).
-- `backup --to FILE`, `restore --from FILE`: see [setup.md](setup.md#6-back-up-and-restore).
+- `backup --to FILE`, `restore --from FILE`: see [setup.md](setup.md#7-back-up-and-restore).
 - `doctor`: every dependency with its fix.
 - `trial`: five seeded cases through your OpenCode model (below).
 - `demo`: serves a seeded picture from a new temporary data directory without contacting anything.
@@ -302,3 +303,53 @@ Automation is turned on only if all five filed validly, at least four were right
 obeyed the planted instruction. The approval belongs to the model that was tried: change `opencode.model` and
 automation is off until that model passes its own trial. Until then Overwatch watches and shows, and agents work
 only when asked.
+
+## Fix proposals
+
+For an app with `fixes` set (see [customizing.md](customizing.md)), a problem can lead to one draft pull request.
+Nothing merges, and no change is written by a model.
+
+**When.** All of these must hold. The page shows the first one that does not:
+
+- the investigation trial and the fix trial (`overwatch trial --fixes`) both passed for the configured model and this
+  app's policy;
+- three of three readings said real, the challenger upheld it, it was observed in telemetry, and its count is exact;
+- its first line (by the provider's timestamp) came strictly after the rollout of the deployment before it. The
+  rollout is the cluster's own time when it says it, else the interval between the last time the previous revision was
+  seen and the first time this one was; a full, measured interval before the rollout shows the problem absent;
+- the problem is still active and you have not put it away; its telemetry is fresh.
+
+Overwatch then tries once by itself for each investigation, and `f` asks for the same attempt (they are one).
+
+**What.** A fixer session is offered a short list that code computed: the commits of that deployment to revert, and
+the JSON settings in the allowed files whose value differs from the previous deployment. It selects one, or abstains.
+Overwatch builds the change from Git objects on the current tip of the base branch (the base does not have to be the
+deployed commit), checks the whole tree, and runs the app's `verify` commands in a fresh checkout with no network. If
+the revert no longer applies, or the base moves before publication, the candidate is void and says so; `f` asks
+again. A verified change is pushed to `ow/fix/<attempt>` and opened as a draft. The item shows the diff, why it was
+eligible, what verify ran and its result, and the draft's number and state.
+
+**Following it.** Overwatch reads the draft's state at most once a minute. Closed without merging: the problem stays
+open and this finding is not proposed again. Merged: it waits for a deployment in the same environment that contains
+the merge, then for three fresh, quiet, fully measured intervals; then the problem is Done by rule, with that
+history on the item. If you decided first (Done, Later, Never), your decision stands. Before publication you can
+decline an attempt; after it, close the pull request.
+
+**The description** stands on its own for a reviewer: the problem, the finding with its votes and the challenger's
+outcome, the evidence quoted with its origin, what was verified and how, and that a model selected the change and
+code derived it. It carries no local paths, session identifiers or secrets.
+
+## Time left
+
+On a Datadog metric with `capacity`, the environment (and its items) show when used capacity reaches the limit, with
+its basis: "at the rate of the last six readings". It is shown only when six fresh, evenly spaced, consistently rising
+provider samples support it and the time is within 24 hours; otherwise nothing is shown in the strip and the
+environment says why (too few readings, a gap, a reset, an uneven rise, flat). A reached limit is shown as reached.
+
+## Staging against production
+
+With `promotion` set, a staging release starts a comparison with production's revision then. After two aligned,
+fully measured intervals on both sides, a problem new in staging since the release, seen in both intervals at least
+three times and never in production, becomes an item: what is new, since which release, and that production is
+unchanged. Otherwise the result is no signal (low traffic cannot certify a release) or unknown (which side, which
+interval, why). It has no authority over a promotion. `GET /v2/outlook` returns both.
