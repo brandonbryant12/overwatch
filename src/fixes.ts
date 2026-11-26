@@ -440,7 +440,7 @@ interface Git {
   run(args: string[], env?: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }>;
   out(args: string[], what: string, env?: NodeJS.ProcessEnv): Promise<string>;
 }
-function gitAt(dir: string): Git {
+export function gitAt(dir: string): Git {
   const run = (args: string[], env?: NodeJS.ProcessEnv) => exec("git", ["-C", dir, ...args], { timeoutMs: 120_000, env: { GIT_TERMINAL_PROMPT: "0", ...env } });
   return {
     run,
@@ -477,7 +477,7 @@ function rewrite(text: string, value: Record<string, unknown>, key: string, old:
 }
 
 /** The candidate commit, derived by code from Git objects on the base tip, and checked as a whole tree. */
-async function derive(git: Git, row: Pick<Row, "id" | "previous" | "base">, policy: Policy, p: Proposal) {
+export async function derive(git: Git, row: Pick<Row, "id" | "previous" | "base">, policy: Policy, p: Proposal) {
   if (p.kind === "abstain") throw new Refused("the fixer abstained: no change it may select would answer this problem");
   const base = row.base!;
   const author = { GIT_AUTHOR_NAME: "Overwatch", GIT_AUTHOR_EMAIL: "overwatch@localhost", GIT_COMMITTER_NAME: "Overwatch", GIT_COMMITTER_EMAIL: "overwatch@localhost", GIT_AUTHOR_DATE: `${Math.floor(clock.now() / 1000)} +0000`, GIT_COMMITTER_DATE: `${Math.floor(clock.now() / 1000)} +0000` };
