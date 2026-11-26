@@ -271,10 +271,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     await atomically((db) => db.prepare("UPDATE watcher_runs SET last_started = ? WHERE watcher = ?").run(started, watcherId));
     try {
       const summary = await runWatcher(collectorPorts, watcher);
+      // A source skipped while it waits after failures is still failing: a skipped poll changes nothing that is known.
+      const failing = [...summary.failed, ...summary.skipped.map((x) => `${x.source} (waiting after failures)`)];
       await atomically((db) =>
         db
           .prepare("UPDATE watcher_runs SET last_finished = ?, next_at = ?, last_error = ?, last_summary = ? WHERE watcher = ?")
-          .run(Date.now(), Date.now() + watcher.everyMs, summary.failed.length ? `failed: ${summary.failed.join(", ")}` : null, JSON.stringify({ reported: summary.reported, gaps: summary.gaps.length }), watcherId),
+          .run(Date.now(), Date.now() + watcher.everyMs, failing.length ? `failed: ${failing.join(", ")}` : null, JSON.stringify({ reported: summary.reported, gaps: summary.gaps.length }), watcherId),
       );
       return summary;
     } catch (error) {
@@ -539,10 +541,22 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
             return found ? CheckpointRow(found).at : undefined;
           });
           const runRow = db.prepare("SELECT last_error FROM watcher_runs WHERE watcher = ?").get(w.id) as { last_error: string | null } | undefined;
+          // Every source that measures is expected to: the environment's reading is the least known of theirs, so one
+          // source's measurement never hides another's gap. Missing beats unknown beats stale beats a breach.
+          const measuring = w.sources.filter((source) => env.sources[source]?.type === "kubernetes");
           const reading = (metric: string) => {
-            const found = db.prepare("SELECT state, observed, limit_value, sampled_at FROM metric_state WHERE watcher = ? AND metric = ? ORDER BY checked_at DESC LIMIT 1").get(w.id, metric);
-            const row = found ? MetricStateRow(found) : undefined;
-            return row ? { value: row.observed, limit: row.limit_value, state: row.state, sampledAt: row.sampled_at } : null;
+            const rows = measuring.map((source) => {
+              const found = db.prepare("SELECT state, observed, limit_value, sampled_at FROM metric_state WHERE watcher = ? AND source = ? AND metric = ?").get(w.id, source, metric);
+              const row = found ? MetricStateRow(found) : undefined;
+              return row ? { value: row.observed, limit: row.limit_value, state: row.state, sampledAt: row.sampled_at } : null;
+            });
+            if (rows.length === 0 || rows.some((x) => x === null)) return null;
+            const known = rows as Array<NonNullable<(typeof rows)[number]>>;
+            const unknown = known.find((x) => x.state === "unknown" || x.value === null || x.sampledAt === null);
+            if (unknown) return unknown;
+            const oldest = known.reduce((a, b) => (b.sampledAt! < a.sampledAt! ? b : a));
+            if (Date.now() - oldest.sampledAt! > 3 * w.everyMs) return oldest;
+            return known.find((x) => x.state === "breach") ?? known.reduce((a, b) => (b.sampledAt! > a.sampledAt! ? b : a));
           };
           return {
             app: w.app,

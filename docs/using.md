@@ -36,8 +36,10 @@ glyph: `Checked, quiet`, `N open` (needs a look), `Over a limit`, `Check failing
 for Kubernetes, the latest readiness and memory against limit.
 
 "Quiet", on the strip or as the inbox's all-clear, comes from one rule: never while any environment is suspended,
-failing, not yet checked, stale, over a limit, missing a reading it should have, or has something open, and never
-while a cause is waiting on you. An empty inbox with something unchecked says "Inbox empty", not "All quiet".
+failing (a source waiting out its back-off still counts as failing), not yet checked, stale, over a limit, missing a
+reading it should have from any of its sources (a reading older than three polling intervals counts as missing), or
+has something open; never while a cause is waiting on you; and never on a status the page received more than 30
+seconds ago by its own clock (a tab that slept, a service that stopped answering), which the strip says. An empty inbox with something unchecked says "Inbox empty", not "All quiet".
 
 ## The inbox
 

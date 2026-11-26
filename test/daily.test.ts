@@ -186,7 +186,15 @@ function random(seed: number) {
 describe("the all-quiet rule", () => {
   test("over generated states: nothing is called quiet while anything is stale, failing, suspended, unchecked, over a limit or missing a reading", () => {
     const reading = (r: ReturnType<typeof random>) =>
-      r.pick([null, { value: null, limit: null, state: "unknown" }, { value: 0, limit: 0, state: "clear" }, { value: 3, limit: 0, state: "breach" }, { value: 50, limit: 90, state: "measured" }, { value: null, limit: 90, state: "no_data" }]);
+      r.pick([
+        null,
+        { value: null, limit: null, state: "unknown", sampledAt: NOW - 30_000 },
+        { value: 0, limit: 0, state: "clear", sampledAt: NOW - 30_000 },
+        { value: 0, limit: 0, state: "clear", sampledAt: NOW - 3 * HOUR },
+        { value: 3, limit: 0, state: "breach", sampledAt: NOW - 30_000 },
+        { value: 50, limit: 90, state: "measured", sampledAt: NOW - 30_000 },
+        { value: null, limit: 90, state: "no_data", sampledAt: NOW - 30_000 },
+      ]);
     for (let seed = 1; seed <= 2000; seed++) {
       const r = random(seed);
       const environments = Array.from({ length: 1 + Math.floor(r.next() * 4) }, (_, i) =>
@@ -202,18 +210,25 @@ describe("the all-quiet rule", () => {
         }),
       );
       const inbox = r.next() < 0.3 ? [item("inc_x", { environment: r.pick(environments).environment, disposition: r.pick(["inbox", "done"]) })] : [];
-      const model = { status: status(environments, { causes: r.next() < 0.1 ? [{ id: "c", title: "t", fix: "f", since: 0, updatedAt: 0, environments: [] }] : [] }), inbox };
+      // The page's own clock: a status that arrived long ago is not a current picture.
+      const outdated = r.next() < 0.15;
+      const model = {
+        status: status(environments, { causes: r.next() < 0.1 ? [{ id: "c", title: "t", fix: "f", since: 0, updatedAt: 0, environments: [] }] : [] }),
+        inbox,
+        statusReceivedAt: NOW,
+        clock: outdated ? NOW + 40 * 60_000 : NOW + 5_000,
+      };
       const chips = environmentChips(model);
       for (const e of environments) {
         const chip = chips.find((c) => c.environment === e.environment)!;
-        const missing = e.expectsReadings && [e.notReadyPods, e.memoryPctOfLimit].some((m) => m === null || m.state === "unknown" || m.value === null);
+        const missing = e.expectsReadings && [e.notReadyPods, e.memoryPctOfLimit].some((m: any) => m === null || m.state === "unknown" || m.value === null || NOW - m.sampledAt > 3 * e.everyMs);
         const breach = [e.notReadyPods, e.memoryPctOfLimit].some((m) => m?.state === "breach");
         const stale = e.checkedThrough !== null && NOW - e.checkedThrough > 3 * e.everyMs;
         const open = inbox.some((i) => i.environment === e.environment && i.disposition === "inbox");
-        const bad = e.suspended !== null || e.lastError !== null || e.checkedThrough === null || stale || missing || breach || open;
+        const bad = outdated || e.suspended !== null || e.lastError !== null || e.checkedThrough === null || stale || missing || breach || open;
         if (bad && chip.state === "quiet") throw new Error(`seed ${seed}: ${e.environment} shown quiet: ${JSON.stringify(e)}`);
         if (!bad && chip.state !== "quiet") throw new Error(`seed ${seed}: ${e.environment} not shown quiet though nothing is wrong: ${chip.label}`);
-        expect(notQuietBecause(e, NOW, open ? 1 : 0) === null).toBe(!bad);
+        if (!outdated) expect(notQuietBecause(e, NOW, open ? 1 : 0) === null).toBe(!bad);
       }
       const anyBad = chips.some((c) => c.state !== "quiet") || model.status.causes.length > 0 || inbox.some((i) => i.disposition === "inbox");
       if (allQuiet(model) === anyBad) throw new Error(`seed ${seed}: allQuiet is ${allQuiet(model)} with ${JSON.stringify(chips.map((c) => c.label))}`);

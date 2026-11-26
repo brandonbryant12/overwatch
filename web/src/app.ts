@@ -66,6 +66,9 @@ export const Model = Schema.Struct({
   draftIds: Schema.Record(Schema.String, Schema.Struct({ promptId: Schema.String, sent: Schema.NullOr(Schema.String) })),
   notice: Schema.NullOr(Schema.String),
   status: Schema.NullOr(ServiceStatus),
+  /** When the status on screen arrived, and the page's clock at its latest poll (failed or not), to judge its age. */
+  statusReceivedAt: Schema.NullOr(Schema.Number),
+  clock: Schema.Number,
   statusError: Schema.NullOr(Schema.String),
   statusOpen: Schema.Boolean,
   shortcutsOpen: Schema.Boolean,
@@ -103,8 +106,8 @@ export const Message = defineMessageUnion({
   ReceivedInbox: { items: Schema.Array(InboxItem) },
   ReceivedPage: { page: Schema.NullOr(IncidentPageState) },
   ReceivedThread: { thread: Schema.NullOr(ThreadPageState) },
-  ReceivedStatus: { status: ServiceStatus },
-  FailedStatus: { reason: Schema.String },
+  ReceivedStatus: { status: ServiceStatus, at: Schema.optionalKey(Schema.Number) },
+  FailedStatus: { reason: Schema.String, at: Schema.optionalKey(Schema.Number) },
   FailedRead: { reason: Schema.String },
   ClickedItem: { incidentId: IncidentId },
   /** A way out, from a key or a row's button: Done, Later or Never. Later and Never ask one thing first. */
@@ -179,6 +182,8 @@ export const init = (flags: Flags): Return => ({
     draftIds: {},
     notice: null,
     status: null,
+    statusReceivedAt: null,
+    clock: 0,
     statusError: null,
     statusOpen: false,
     shortcutsOpen: false,
@@ -345,10 +350,21 @@ export const STALE_INTERVALS = 3;
 
 type EnvStatus = ServiceStatus["environments"][number];
 
-/** The readings an environment is expected to have and does not: never quiet while any is missing. */
-export const missingReadings = (env: EnvStatus): string[] => {
+/** A status older than this, by the page's own clock, is not a current picture: nothing is called quiet on it. */
+export const STATUS_FRESH_MS = 30_000;
+
+/** Whether the status on screen is old by the page's clock (a tab that slept, a service that stopped answering). */
+export const statusOutdated = (model: Partial<Pick<Model, "statusReceivedAt" | "clock">>): number | null =>
+  model.statusReceivedAt != null && model.clock != null && model.clock - model.statusReceivedAt > STATUS_FRESH_MS ? model.clock - model.statusReceivedAt : null;
+
+/**
+ * The readings an environment is expected to have and does not: never quiet while any is missing. A reading sampled
+ * longer ago than the stale window is not a current measurement, whatever the checkpoint says.
+ */
+export const missingReadings = (env: EnvStatus, statusAt: number): string[] => {
   if (!env.expectsReadings) return [];
-  const notMeasured = (m: EnvStatus["notReadyPods"]) => m === null || m.state === "unknown" || m.value === null;
+  const notMeasured = (m: EnvStatus["notReadyPods"]) =>
+    m === null || m.state === "unknown" || m.value === null || m.sampledAt === null || statusAt - m.sampledAt > STALE_INTERVALS * env.everyMs;
   return [...(notMeasured(env.notReadyPods) ? ["readiness"] : []), ...(notMeasured(env.memoryPctOfLimit) ? ["memory"] : [])];
 };
 
@@ -364,7 +380,7 @@ export function notQuietBecause(env: EnvStatus, statusAt: number, open: number):
   if (statusAt - env.checkedThrough > STALE_INTERVALS * env.everyMs) return "stale";
   if (open > 0) return "open";
   if ([env.notReadyPods, env.memoryPctOfLimit].some((m) => m?.state === "breach")) return "over a limit";
-  if (missingReadings(env).length > 0) return "missing a reading";
+  if (missingReadings(env, statusAt).length > 0) return "missing a reading";
   return null;
 }
 
@@ -375,17 +391,19 @@ const openIn = (model: Pick<Model, "inbox">, env: { app: string; environment: st
  * Whether the page may say "all quiet" (the all-clear). Only with a status in hand, no configuration errors, no cause
  * waiting on the owner, nothing in the inbox, and every environment quiet by `notQuietBecause`.
  */
-export function allQuiet(model: Pick<Model, "status" | "inbox">): boolean {
+export function allQuiet(model: Pick<Model, "status" | "inbox"> & Partial<Pick<Model, "statusReceivedAt" | "clock">>): boolean {
   const status = model.status;
+  if (statusOutdated(model) !== null) return false;
   if (!status || status.configErrors.length > 0 || status.causes.length > 0 || status.environments.length === 0) return false;
   if (model.inbox.some((i) => (i.disposition ?? "inbox") === "inbox")) return false;
   return status.environments.every((env) => notQuietBecause(env, status.at, openIn(model, env)) === null);
 }
 
 /** The fleet strip: one chip per watched environment, production first, from the service's status and the live inbox. */
-export function environmentChips(model: Pick<Model, "status" | "inbox">): ReadonlyArray<EnvChip> {
+export function environmentChips(model: Pick<Model, "status" | "inbox"> & Partial<Pick<Model, "statusReceivedAt" | "clock">>): ReadonlyArray<EnvChip> {
   const status = model.status;
   if (!status) return [];
+  const outdated = statusOutdated(model);
   const tierRank: Record<string, number> = { production: 0, staging: 1, development: 2 };
   return [...status.environments]
     .sort((a, b) => (tierRank[a.tier] ?? 3) - (tierRank[b.tier] ?? 3) || a.app.localeCompare(b.app) || a.environment.localeCompare(b.environment))
@@ -393,10 +411,14 @@ export function environmentChips(model: Pick<Model, "status" | "inbox">): Readon
       const open = openIn(model, env);
       const since = env.checkedThrough === null ? null : status.at - env.checkedThrough;
       const breaching = [env.notReadyPods, env.memoryPctOfLimit].some((m) => m?.state === "breach");
-      const missing = missingReadings(env);
+      const missing = missingReadings(env, status.at);
       let state: EnvState;
       let label: string;
-      if (env.suspended) {
+      if (outdated !== null) {
+        // What is shown is old: it says how old, and nothing on it is quiet.
+        state = "stale";
+        label = `Status not refreshed for ${age(outdated)}`;
+      } else if (env.suspended) {
         // Not being read: never quiet, and its incidents neither resolve nor come back on data that was not read.
         state = "suspended";
         const last = env.checkedThrough ?? env.suspended.since;
@@ -710,11 +732,11 @@ export const update = (model: Model, message: Message): Return =>
     ReceivedPage: ({ page }) => ({ model: { ...model, page } }),
     ReceivedThread: ({ thread }) => ({ model: { ...model, thread } }),
     // The first status brings the tiers (and any causes): the one moment, at start, that rows are arranged again.
-    ReceivedStatus: ({ status }) => {
-      const next = { ...model, status, statusError: null };
+    ReceivedStatus: ({ status, at }) => {
+      const next = { ...model, status, statusError: null, statusReceivedAt: at ?? status.at, clock: at ?? status.at };
       return { model: model.status === null && model.layout !== null ? { ...next, layout: layoutOf(next) } : next };
     },
-    FailedStatus: ({ reason }) => ({ model: { ...model, statusError: reason } }),
+    FailedStatus: ({ reason, at }) => ({ model: { ...model, statusError: reason, clock: at ?? model.clock } }),
     FailedRead: ({ reason }) => ({
       model: { ...model, live: false, connection: "offline", notice: `Live updates stopped: ${reason}` },
     }),
@@ -953,9 +975,9 @@ const pollStatusOnce: Effect.Effect<Message> = Effect.tryPromise(async () => {
   const raw = await response.json();
   return decodeStatus(raw);
 }).pipe(
-  Effect.map((status): Message => Message.ReceivedStatus({ status })),
+  Effect.map((status): Message => Message.ReceivedStatus({ status, at: Date.now() })),
   Effect.catch((error) =>
-    Effect.succeed(Message.FailedStatus({ reason: error instanceof Error ? error.message : "Service status unavailable" })),
+    Effect.succeed(Message.FailedStatus({ reason: error instanceof Error ? error.message : "Service status unavailable", at: Date.now() })),
   ),
 );
 
