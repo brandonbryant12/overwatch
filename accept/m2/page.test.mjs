@@ -141,6 +141,11 @@ test("page ages under a hanging status request and reconnects with draft and foc
   const subject = await b.evaluate(focused)
   await b.key("p")
   await b.type("keep this draft")
+  const connection = "document.querySelector('[data-connection]')"
+  const ink = () => b.evaluate("getComputedStyle(" + connection + ").color")
+  const caption = () => b.evaluate(connection + ".innerText")
+  const liveInk = await ink()
+  assert.match(await caption(), /live/i)
   wire.cut()
   const until = Date.now() + 5000
   while (!wire.hanging() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 25))
@@ -149,11 +154,16 @@ test("page ages under a hanging status request and reconnects with draft and foc
   await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 16000 })
   await b.wait(state + "==='stale'", "stale after 15 seconds")
   assert.equal(await b.evaluate("document.querySelectorAll('[data-env][data-health=quiet]').length"), 0)
-  assert.match(await b.evaluate("document.body.innerText"), /stale/i)
+  assert.match(await caption(), /stale/i)
+  assert.notEqual(await ink(), liveInk)
+  const staleInk = await ink()
   await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 15000 })
   await b.wait(state + "==='down'", "service down after 30 seconds")
   assert.ok(wire.hanging())
-  assert.match(await b.evaluate("document.body.innerText"), /service not answering/i)
+  assert.match(await caption(), /not answering/i)
+  assert.notEqual(await ink(), staleInk)
+  assert.notEqual(await ink(), liveInk)
+  assert.match(await b.evaluate("document.querySelector('[role=alert]').innerText"), /service not answering/i)
   assert.match(await b.evaluate("document.body.innerText"), /overwatch (restart|serve)/i)
   assert.ok(await b.evaluate("document.querySelector('[data-action=done]')?.matches(':disabled,[aria-disabled=true]')"))
   assert.equal(await b.evaluate(prompt + ".value"), "keep this draft")
@@ -212,4 +222,116 @@ test("Chrome fixture can keep status pending while the page timer crosses both d
   await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 31000 })
   await b.wait("window.beats >= " + (ticks + 30), "page timer fires despite pending status")
   assert.ok(wire.hanging())
+})
+
+test("P11 healthy heartbeats during a hung collector must age the green strip", optional, async t => {
+  const x = await rig(t, { both: true }), s = x.cfg.apps.shop.environments.prod.sources
+  delete s.pods; s.dd.readings = ["logs"]; x.save(); await x.start(); await x.poll()
+  const b = await open(t, x)
+  await b.wait(cell("prod") + "==='quiet'")
+  // Observe the same heartbeat independently, then allow the page's next one-second repaint.
+  await b.evaluate("window.beatSeq=null;window.obs=new EventSource('/v2/changes');obs.addEventListener('heartbeat',e=>beatSeq=JSON.parse(e.data).atMs)")
+  const started = Promise.withResolvers(), release = Promise.withResolvers()
+  x.p.holdDD = { started, promise: release.promise }
+  await x.advance(60000)
+  const pending = x.poll()
+  try {
+    await started.promise; await x.advance(181000)
+    assert.equal((await x.status()).environments[0].health, "stale")
+    await b.wait("window.beatSeq===" + x.now(), "healthy transport still delivers heartbeat")
+    await b.evaluate("new Promise(r=>setTimeout(r,1150))")
+    assert.notEqual(await b.evaluate(cell("prod")), "quiet")
+  } finally { release.resolve(); await pending }
+})
+
+test("P12 a double Enter while focus lookup is pending queues one page draft", optional, async t => {
+  const x = await live(t), b = await open(t, x)
+  await b.evaluate(`window.gate=Promise.withResolvers();window.focusCalls=0;
+    const originalFetch=window.fetch;window.fetch=async(...args)=>{
+      if(String(args[0]).includes('focus?')){window.focusCalls++;await window.gate.promise}
+      return originalFetch(...args)
+    };true`)
+  await b.key("j"); await b.key("p"); await b.type("investigate twice")
+  await b.key("Enter"); await b.key("Enter")
+  await b.evaluate("gate.resolve();true")
+  await b.wait("document.querySelector('[data-toast]').innerText.includes('Queued') || document.querySelector('[data-toast]').innerText.includes('Added')")
+  await b.evaluate("new Promise(r=>setTimeout(r,250))")
+  const d = await item(x, (await x.status()).incidents[0].id)
+  assert.equal(d.history.filter(e => e.kind === "asked").length, 1)
+})
+
+test("P13 a delayed ask response preserves the next draft already in the bar", optional, async t => {
+  const x = await live(t), b = await open(t, x)
+  await b.key("j"); await b.key("p"); await b.type("first question")
+  await b.evaluate(`window.gate=Promise.withResolvers();window.saved=false;const f=fetch;
+    window.fetch=async(...a)=>{const r=await f(...a);if(String(a[0]).endsWith('/ask')){window.saved=true;await gate.promise}return r};true`)
+  await b.key("Enter"); await b.wait("saved"); await b.evaluate("document.querySelector('[data-prompt]').select()")
+  await b.type("second draft"); await b.evaluate("gate.resolve();true")
+  await b.wait("document.querySelector('[data-toast]').innerText.includes('Queued')")
+  assert.equal(await b.evaluate(prompt + ".value"), "second draft")
+})
+test("P14 literal markup, long text and a tab stay readable as text on the focused page", optional, async t => {
+  const word = "ERROR <em>billing</em>\t" + "x".repeat(1500)
+  const x = await live(t, [word]), b = await open(t, x)
+  await b.key("j"); const heading = "document.querySelector('[data-stage] h2')"
+  assert.equal(await b.evaluate(heading + ".querySelector('em')"), null)
+  assert.match(await b.evaluate(heading + ".textContent"), /<em>billing<\/em>/)
+  const [width, viewport] = await b.evaluate("[document.documentElement.scrollWidth,innerWidth]")
+  assert.ok(width <= viewport, `focused page width ${width} at viewport ${viewport}`)
+})
+test("P15 a second tab can see a disposition without silently replacing it from its old sheet", optional, async t => {
+  const x = await live(t), a = await open(t, x), b = await open(t, x)
+  await b.key("j"); await b.key("l")
+  await b.wait("!!document.querySelector('[role=dialog]')")
+  await a.key("j"); await a.key("n"); await a.key("Enter")
+  await a.wait("document.querySelector('[data-toast]').innerText.includes('Never')")
+  await b.key("Enter")
+  // A changed sheet must either dismiss or ask the owner to confirm the new context.
+  await b.evaluate("new Promise(r=>setTimeout(r,250))")
+  assert.equal((await item(x, (await x.status()).incidents[0].id)).incident.way.kind, "never")
+})
+test("P16 a failed or delayed status read cannot re-green disconnected health after a wall-clock jump", optional, async t => {
+  for (const outcome of ["reject", "late"]) {
+    const x = await rig(t); await x.start("demo")
+    const wire = await link(t, x), b = await open(t, x, wire.url)
+    await b.evaluate(`window.gate=Promise.withResolvers();window.asked=false;const f=fetch;const good=f('/v2/status');
+      window.fetch=async(...args)=>{if(String(args[0]).endsWith('/status')){window.asked=true;await gate.promise;
+      if(${JSON.stringify(outcome)}==='reject')throw Error('fixture unavailable');return good}return f(...args)};true`)
+    wire.cut(); await b.wait("asked")
+    await b.evaluate("const wall=Date.now.bind(Date);Date.now=()=>wall()+31000;gate.resolve();true")
+    await b.wait(state + "==='down'", "wall sleep advances the page clock")
+    assert.equal(await b.evaluate(cell("staging")), "unknown")
+  }
+})
+
+test("P17 source listed in the environment can itself be focused for a question", optional, async t => {
+  const x = await live(t), s = await x.status(), b = await open(t, x)
+  await b.evaluate("document.querySelector('[data-env]').click()")
+  const source = s.sources[0]
+  await b.evaluate("Array.from(document.querySelectorAll('[data-stage] *')).find(e=>e.textContent===" + JSON.stringify(source.id) + " && !e.children.length).click()")
+  assert.equal(await b.evaluate(focused), source.subject)
+  await b.key("p"); await b.type("Review this source"); await b.key("Enter")
+  await b.wait("document.querySelector('[data-toast]').innerText.includes('Queued')")
+  assert.equal((await x.status()).jobs.at(-1).subject, source.subject)
+})
+test("P18 a queued question appears in the open item's history without reselecting it", optional, async t => {
+  const x = await live(t), b = await open(t, x)
+  await b.key("j"); await b.wait("document.querySelector('[data-route]').innerText.includes('Queues')")
+  await b.key("p"); await b.type("Explain this sample"); await b.key("Enter")
+  await b.wait("document.querySelector('[data-toast]').innerText.includes('Queued')")
+  await b.wait("document.querySelector('[data-stage] .history')?.innerText.includes('Explain this sample')", "queued question absent from open history")
+})
+test("P19 a regrouping alone is not labelled as a new arrival", optional, async t => {
+  const x = await live(t), b = await open(t, x)
+  await tick(x); await tick(x); await tick(x)
+  await b.wait("document.querySelector('[data-pending-count]').dataset.pendingCount==='1'")
+  const label = await b.evaluate("document.querySelector('[data-pending-count]').innerText")
+  assert.doesNotMatch(label, /1 new/i)
+  assert.match(label, /chang|mov|quiet|updat/i)
+})
+
+test("P20 Enter with nothing in focus opens the finder advertised by the dock", optional, async t => {
+  const x = await live(t), b = await open(t, x)
+  await b.key("Enter")
+  assert.equal(await b.evaluate("document.activeElement.matches('[data-search]')"), true)
 })

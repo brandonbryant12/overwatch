@@ -67,7 +67,7 @@ const pods = Array.from({ length: state.pods ?? 1 }, (_, i) => {
           ready: true,
           restartCount: restart,
           containerID: state.missingIdentity ? undefined : "containerd://" + id + "-" + restart,
-          lastState: restart
+          lastState: restart && !state.lostPrevious
             ? { terminated: { containerID: "containerd://" + id + "-" + (restart - 1), exitCode: 0 } }
             : {},
           state: { running: { startedAt: "2020-01-01T00:00:00Z" } },
@@ -113,7 +113,7 @@ else if (verb === "top") {
     fs.writeFileSync(path.join(root, "world.json"), JSON.stringify({ ...state, restartDuringLogs: false, restart: (state.restart ?? 0) + 1 }))
   }
   const previous = args.includes("--previous") || args.includes("-p")
-  for (const [stamp, text, pod = 0] of (previous ? state.previous : state.lines) ?? [])
+  for (const [stamp, text, pod = 0] of (previous ? state.previous : state.namespaceLines?.[option("-n")] ?? state.lines) ?? [])
     if (pod === idx) emit(stamp, text)
   if (!previous && state.burst) {
     const { count, stamp, distinct } = state.burst

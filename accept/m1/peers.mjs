@@ -147,6 +147,7 @@ export async function peers(world) {
       if (path.startsWith("/api/") && !path.startsWith("/api/v") && w.ocPassword &&
           req.headers.authorization !== "Basic " + Buffer.from("opencode:" + w.ocPassword).toString("base64")) return send({}, 401)
       if (path.startsWith("/api/v")) {
+        if (w.refusedAppKey && w.refusedAppKey === req.headers["dd-application-key"]) return send({}, 403)
         if (w.ddFailure) return send({ errors: ["fixture " + w.ddFailure] }, w.ddFailure)
         if (path.includes("logs/events/search")) {
           if (p.holdDD) {
@@ -189,7 +190,7 @@ export async function peers(world) {
           data: [
             {
               id: "ow-investigator",
-              permissions: [
+              permissions: w.agentRules ?? [
                 { action: "*", resource: "*", effect: "deny" },
                 ...(w.noAgentTools ? [] : ["ow_telemetry", "ow_history", "ow_code_search", "ow_code_read", "ow_finding"]).map(
                   (n) => ({ action: "ow_" + n, resource: "*", effect: "allow" }),

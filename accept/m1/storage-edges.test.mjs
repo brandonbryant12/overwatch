@@ -83,7 +83,7 @@ test("a legacy compatible file migrates to incremental vacuum on startup, preser
   assert.deepEqual(inspect(), [2, 0])
 })
 
-for (const page of [4096, 16384]) test("reclaim is positive and bounded to 16 MiB with page size " + page, async t => {
+for (const page of [4096, 16384, 65536]) test("reclaim is positive and bounded to 16 MiB with page size " + page, async t => {
   const { x, size, inspect } = await storageFixture(t, page, "incremental")
   assert.ok(inspect()[1] * page > 16 * 1024 ** 2)
   const first = size()
