@@ -1,49 +1,50 @@
 # Overwatch
 
-Overwatch watches your apps' logs and telemetry on a schedule, keeps an event-sourced record of what it finds, and
-has OpenCode agents investigate it read-only, with every citation in an answer checked by code. It is a tool for one
-person on a laptop.
+Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts what goes wrong exactly inside
+limits it writes down, says honestly when it does not know, and lets an OpenCode model investigate with evidence
+it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
 
-It is two programs:
-
-- **The Overwatch service** (Node, one process, one SQLite file). It polls every watcher whether or not OpenCode is
-  open, keeps every fact as an event, serves a typed Api, an MCP server and a web page on loopback, and drives agent
-  runs into OpenCode.
-- **OpenCode 2**, which runs every agent session, reached through a thin plugin that registers the investigator agent,
-  a skill, and the service's MCP server.
-
-This is the plan in [docs/plans/command-center.md](docs/plans/command-center.md) built through its first daily loop:
-collectors for Kubernetes (read-only `kubectl`) and Datadog, an inbox grouped by why it needs you with three ways out
-(Done, Later, Never) and undo, focus and a prompt bar, failure handling that suspends and resumes connections by
-itself, and one investigator. Much of the plan is not built yet; the documents below say what is.
-
-## Documentation
-
-- [docs/setup.md](docs/setup.md): prerequisites, install (including behind a proxy), the plugin, starting the service,
-  launchd, and troubleshooting.
-- [docs/using.md](docs/using.md): what the service does by itself, the inbox, prompting on an incident, sessions, and
-  what happens when OpenCode is closed.
-- [docs/customizing.md](docs/customizing.md): every configuration option, adding apps, sources and model changes,
-  prompts and permissions, and the tests.
-- [docs/design-philosophy.md](docs/design-philosophy.md): the principles it is built on and what each rules out.
-- [AGENTS.md](AGENTS.md): rules for people and agents working on the code.
+This is the **simple core, milestone 1**: the kernel and the tools for proving it on a real laptop and a real model.
+Specification: [docs/plans/simple-core.md](docs/plans/simple-core.md) with its
+[amendments](docs/plans/simple-core-amendments.md) and [interfaces](docs/plans/simple-core-interfaces.md).
+There is no page yet; that is milestone 2.
 
 ## In one minute
 
 ```sh
-pnpm install                                   # Node 22.13+ and pnpm; no Bun
-cp examples/config.json ~/.config/overwatch/config.json   # then edit it
-bin/overwatch check                            # validate the configuration
-bin/overwatch serve                            # the service, on http://127.0.0.1:7450
+git clone <this repository> overwatch && cd overwatch     # Node 22.13 or newer; nothing to install
+bin/overwatch check  --config ~/.config/overwatch/config.json
+bin/overwatch serve  --config ~/.config/overwatch/config.json
+bin/overwatch status --config ~/.config/overwatch/config.json
+bin/overwatch doctor --config ~/.config/overwatch/config.json
+bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isolated picture; contacts nothing
 ```
 
-Add the plugin to the global OpenCode configuration (see [setup](docs/setup.md#4-the-plugin)), open
-`http://127.0.0.1:7450`, and prompt on an incident.
+## What exists
 
-## Checking it
+- **Storage**: one SQLite file owned by one process through SQLite's own exclusive lock; every change is one
+  transaction that appends to an append-only event log; text is stored only after redaction.
+- **Collection**: Kubernetes through read-only `kubectl` (logs, events, workloads, usage) and Datadog (logs, monitors,
+  a metric), counted by keys made from each source's own data, so replay, crash and late data never count twice.
+- **Health**: each environment is quiet, needs a look, partial, stale or signed out, from the least-known reading.
+- **Failures**: classified (sign-in, permission, rate limit, unreachable, configuration), backed off, suspended and
+  probed; one cause per failure; "offline" only when several independent endpoints all fail.
+- **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
+- **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
+  cases before any automation is allowed.
+
+## Documentation
+
+- [docs/setup.md](docs/setup.md): install, configure, connect OpenCode, run, back up.
+- [docs/using.md](docs/using.md): what the service does, health, failures, the commands and their output.
+- [docs/customizing.md](docs/customizing.md): the configuration grammar and the operating limits.
+- [docs/design-philosophy.md](docs/design-philosophy.md): why it is shaped this way.
+- [AGENTS.md](AGENTS.md): rules for people and agents changing the code.
+
+## Tests
 
 ```sh
-pnpm run check                                 # typecheck and every test
-OPENCODE_BIN=/path/to/opencode pnpm run e2e    # against a real, isolated OpenCode 2 server
-pnpm run test:crash                            # every kill point of the host's crash scenario (about 10 minutes)
+pnpm install          # dev dependencies only: typescript, fast-check, @types/node
+pnpm run check        # typecheck and the unit and property tests in test/
+pnpm run accept       # the milestone 1 acceptance suite in accept/m1 (M1_LONG=1 for the release run)
 ```
