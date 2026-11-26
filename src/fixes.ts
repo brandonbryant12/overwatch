@@ -102,10 +102,12 @@ export class Fixes {
     const a = admission(this.store, this.config, incident, jobId);
     const id = attemptId(incident, jobId, a.deployed, a.policy);
     const prior = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", id);
-    if (prior && prior.state !== "blocked" && prior.state !== "ineligible") return id; // automatic and owner requests coalesce
+    // Automatic and owner requests coalesce. An owner may ask again after a decision that did not reach a model's
+    // proposal being judged on its merits (blocked, ineligible) or after a void candidate (stale); nothing else revives.
+    if (prior && !(["blocked", "ineligible"].includes(prior.state) || (prior.state === "stale" && origin === "manual"))) return id;
     const seq = w.event("fix", incident as Clean, { id, state: a.state, reason: a.reason, origin });
     w.run(`INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, reason, previous, deployed, seq, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (id) DO UPDATE SET state = excluded.state, reason = excluded.reason, previous = excluded.previous, deployed = excluded.deployed`,
+      ON CONFLICT (id) DO UPDATE SET state = excluded.state, reason = excluded.reason, previous = excluded.previous, deployed = excluded.deployed, base = NULL, candidate = NULL, head = NULL, diff = NULL, run_id = NULL, data = excluded.data`,
       id as Clean, incident as Clean, jobId as Clean, a.inc.app as Clean, a.inc.environment as Clean, origin as Clean, a.state as Clean, a.reason as Clean | null, a.previous as Clean | null, a.deployed as Clean | null, seq, json({ title: a.inc.title }));
     return id;
   }
