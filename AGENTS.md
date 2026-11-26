@@ -39,19 +39,35 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   pass and a failed one alike (a failure gives every gauge an unmeasured sample). An interval counts toward Quiet
   only when it is new, ordinary and fully measured (`quietStep`).
 - **One identity per connection.** `endpoint()` includes every field in `IDENTITY` (context; site, API key and
-  application key); refusals are shared only by equal identities.
+  application key); refusals are shared only by equal identities. `IDENTITY`, `Collector.reader` and `fixFor` are
+  exhaustive over source kinds by type and throw at run time for a kind they lack: a new kind borrows nothing.
+- **A reading is an observation.** Each reading in a slice is one `Reading`: what was observed, whether it is
+  complete, and (unless failed) when the provider observed it, required by type. An adapter returns complete only
+  after recognising the reply's shape (`searchLogs`, `monitors`, `metric`); anything else is a gap. Both times stored
+  for a reading are the provider's, so freshness everywhere (health, Quiet, the snapshot, the page) is the provider's
+  observation time; nothing stores the time Overwatch asked. A monitor's count is its transitions into alerting.
+- **Evidence has an origin.** `origins` records what each piece is (telemetry, code, history, generated), apart from
+  what its source is called; a piece without one is not telemetry. "Observed" is decided only from it.
 - **One write path.** `Store.tx` runs `Store.guard` before every transaction (the collector installs the disk check),
-  so slices, failure records, deadlines, page actions and tool writes are admitted by the same rule; only maintenance
-  (`expire`, `retain`) bypasses it. Foreign keys are deferred to commit in every transaction.
-- **References are declared.** SQL `REFERENCES` where the database must enforce them (cited evidence: `citations`, kept
-  by a trigger on findings, RESTRICTs deleting it); every reference is also listed once in `REFERENCES`
-  (`src/store.ts`), which restore checks. A new table is covered by adding its line.
+  so slices, failure records, deadlines, page actions and tool writes are admitted by the same rule. Maintenance
+  (`expire`, `retain`) is the only write without admission, and it is private to the store (`#maintain`), as is the
+  connection. A `Writer` lives for one transaction; one kept past it throws. Foreign keys are deferred to commit.
+- **References are derived.** SQL `REFERENCES` where the database must enforce them (cited evidence: `citations`, kept
+  by a trigger on findings, RESTRICTs deleting it). Restore also checks every column whose name is in the reference
+  vocabulary (`run_id`, `job_id`, `incident`, `finding`, `handle`; `references()` in `src/store.ts`) against its parent,
+  read from the schema itself: a new table with such a column is covered without a list, and the class property in
+  `test/classes.test.ts` fails until a row of it is seeded. Name a reference column from the vocabulary.
+- **One receipt per owner write.** Every keyed owner write (ask, investigate, correction, handoff, notification
+  retry) goes through `receipt()` (`src/inbox.ts`): the receipt and its change commit in one transaction; the same key
+  with another subject or body is 409. Anything that leaves the process (a prompt, a handoff, a notice) has its intent
+  written first and is reconciled by that intent after a restart; a committed filing is final.
 - **Age, then pressure.** `Store.expire` removes by age on every pass; `Store.retain` adds old events under
   pressure. Neither can remove a finding or its cited evidence.
   `Store.reclaim` frees at most `LIMITS.reclaimBytes` per pass for any page size and truncates the WAL. Never run a
   full `VACUUM` while serving: it copies the whole file and holds the only connection until done.
-- **Schema changes within version 1 are additive.** A new column has a default and an entry in `ADDED`
-  (`src/store.ts`), so an older file gains it on open and an older backup restores into it. Restore checks the
+- **Schema changes within version 1 are additive.** A new column has a default and an entry in `ADDED`, a new table
+  an entry in `ADDED_TABLES` (`src/store.ts`), so an older file gains it on open and an older backup restores into
+  it. Prefer a new table to a new column on a table that backups are edited against. Restore checks the
   staged rows against `INVARIANTS` before it commits.
 - **Limits are declared** in `LIMITS` (`src/config.ts`), mirrored in `docs/customizing.md`. Beyond one, behave as the
   specification says (capped coverage, a lower-bound count, an overflow row, a gap) and keep going.
