@@ -193,3 +193,53 @@ test("reserve falling during a pending Datadog read rolls back the whole slice",
   const s = await x.status()
   assert.deepEqual([s.paused, s.sources[0].checkpointMs, total(s, "reserve")], ["disk", T, 0])
 })
+
+test("Kubernetes EventSeries uses its cumulative count across replay and restart", async t => {
+  const x = await setup(t, ["events"])
+  const event = count => ({ metadata: { uid: "series-fixture" }, type: "Warning", reason: "BackOff",
+    message: "retrying", eventTime: stamp, series: { count, lastObservedTime: iso(x.now() - 1) } })
+  x.world({ events: [event(4)] })
+  await x.poll()
+  await sample(x, {})
+  await x.stop()
+  await x.start()
+  const s = await sample(x, { events: [event(7)] })
+  assert.equal(total(s, "backoff"), 7)
+})
+
+test("the end of a half-open Kubernetes window belongs to the next slice", async t => {
+  const x = await setup(t, ["logs"])
+  x.world({ lines: [[iso(T), "ERROR boundary"]] })
+  await x.poll()
+  const first = total(await x.status(), "boundary")
+  const second = total(await sample(x, {}), "boundary")
+  assert.deepEqual([first, second], [0, 1])
+})
+
+test("inside a second Kubernetes catch-up transaction, SIGKILL exposes only complete slice prefixes", async t => {
+  // First measure both transactions through the external trace. A cut near the end of the second
+  // leaves the first slice committed. Check before retrying, so replay cannot conceal partial state.
+  async function scenario() {
+    const x = await setup(t, ["logs"])
+    await x.poll()
+    await x.advance(12 * hour)
+    x.world({ lines: [[iso(T + hour), "ERROR first"], [iso(T + 7 * hour), "ERROR second"]] })
+    return x
+  }
+  const base = await scenario()
+  await base.control("trace", { killAfter: null })
+  const { writes } = await base.poll()
+  assert.ok(writes > 3)
+  await base.stop()
+  const x = await scenario()
+  await x.control("trace", { killAfter: writes - 1 })
+  await assert.rejects(x.poll(), /exited/)
+  const prefix = await x.json("status")
+  assert.deepEqual([prefix.sources[0].checkpointMs, total(prefix, "first"), total(prefix, "second")],
+    [T + 6 * hour, 1, 0])
+  await x.start()
+  await x.advance(minute)
+  await x.poll()
+  const end = await x.status()
+  assert.deepEqual([end.sources[0].checkpointMs, total(end, "first"), total(end, "second")], [x.now(), 1, 1])
+})

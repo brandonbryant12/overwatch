@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import { DatabaseSync } from "node:sqlite"
 import fc from "fast-check"
-import { rig, stamp } from "./rig.mjs"
+import { rig, stamp, trialRows } from "./rig.mjs"
 import { expected, filing } from "./peers.mjs"
 
 test(
@@ -73,7 +73,7 @@ test(
     await x.poll()
     const s = await x.status()
     assert.ok(s.incidents.length)
-    assert.ok(s.findings.length)
+    assert.ok(trialRows(s).findings.length)
     const messages = [
       JSON.stringify(captured),
       JSON.stringify(s),

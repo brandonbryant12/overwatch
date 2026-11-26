@@ -125,3 +125,14 @@ test("restart after the wall clock moves backwards cannot postpone a probe beyon
   await x.poll()
   assert.equal((await x.status()).sources[0].failure, null)
 })
+
+test("current version also yields when the compatible predecessor acquired ownership first",
+  { skip: process.env.M1_OTHER_BIN ? false : "set M1_OTHER_BIN to a compatible checkout" }, async t => {
+    const x = await rig(t)
+    await x.start("serve", process.env.M1_OTHER_BIN)
+    const contender = await x.cli("serve")
+    assert.equal(contender.code, 3, contender.out)
+    await x.stop("SIGKILL")
+    await x.start()
+    assert.equal((await x.status()).live, true)
+  })

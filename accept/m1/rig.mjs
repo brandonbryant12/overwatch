@@ -224,8 +224,8 @@ export async function rig(t, { both = false, baseline = true } = {}) {
       }
     },
   }
-  x.start = async (command = "serve") => {
-    const c = spawn(BIN, [command, "--config", dir("config.json"), "--json"], {
+  x.start = async (command = "serve", exe = BIN) => {
+    const c = spawn(exe, [command, "--config", dir("config.json"), "--json"], {
       env: { ...env, OW_TEST_FD: "3" },
       cwd: root,
       stdio: ["ignore", "pipe", "pipe", "pipe"],
@@ -307,3 +307,6 @@ export async function rig(t, { both = false, baseline = true } = {}) {
 }
 export const byTitle = (s, word) => s.incidents.filter((i) => i.title.toLowerCase().includes(word))
 export const total = (s, word) => byTitle(s, word).reduce((n, i) => n + i.count, 0)
+
+// M1 exposed trial rows at the root. M2 gives them a separate namespace.
+export const trialRows = snapshot => snapshot.trial ?? snapshot

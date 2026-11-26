@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs"
 import fc from "fast-check"
 import { setTimeout as delay } from "node:timers/promises"
-import { rig } from "./rig.mjs"
+import { rig, trialRows } from "./rig.mjs"
 import { expected, filing, mcp } from "./peers.mjs"
 
 for (const mode of ["good", "bad", "malformed", "empty", "obey", "wrong", "ramble"])
@@ -176,13 +176,13 @@ test(
       for (let i = 0; i < 12; i++) {
         await x.poll()
         if (
-          !(await x.status()).jobs.some((j) => j.sessionId === sid && ["queued", "running"].includes(j.state))
+          !trialRows(await x.status()).jobs.some((j) => j.sessionId === sid && ["queued", "running"].includes(j.state))
         )
           break
         await delay(20)
       }
       const state = await x.status()
-      assert.ok(state.jobs.some((j) => j.sessionId === sid && ["completed", "parked"].includes(j.state)))
+      assert.ok(trialRows(state).jobs.some((j) => j.sessionId === sid && ["completed", "parked"].includes(j.state)))
       const later = x.p.requests.slice(n)
       assert.ok(
         later.some((r) => r.method === "GET" && r.path.includes(sid)),

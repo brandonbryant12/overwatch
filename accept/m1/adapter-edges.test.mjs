@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import { setTimeout as delay } from "node:timers/promises"
-import { rig } from "./rig.mjs"
+import { rig, trialRows } from "./rig.mjs"
 
 for (const mode of ["registered", "configured"]) test("2.4.1 trial through " + mode + " Basic auth and location-scoped catalogs", async t => {
   const x = await rig(t)
@@ -84,4 +84,35 @@ test("demo reading renewal is fresh, isolated and has an explaining sequence", a
   assert.equal(after.environments.find(e => e.environment === "qa").health, "signed_out")
   assert.equal(x.p.requests.length + x.calls().length, 0)
   assert.ok(after.seq > before.seq, "renewal changed health at the same sequence " + after.seq)
+})
+
+test("reconciliation and a concurrent trial request leave the two live drivers and queued jobs alone", async t => {
+  const x = await rig(t)
+  await x.start()
+  const release = Promise.withResolvers(), entered = Promise.withResolvers()
+  let started = 0
+  const { expected, filing } = await import("./peers.mjs")
+  x.p.script = async ({ id, tool }) => {
+    if (++started === 2) entered.resolve()
+    await release.promise
+    const data = await tool("ow_telemetry", { source: "pods" })
+    await tool("ow_finding", filing(expected[id], [data.pieces[0].handle]))
+    return "filed"
+  }
+  const request = () => fetch(x.url + "/v2/trial", { method: "POST" }).then(r => r.json())
+  const first = request()
+  let second
+  try {
+    await Promise.race([entered.promise, first.then(() => { throw Error("trial ended before two sessions opened") })])
+    second = request()
+    await x.poll()
+    const jobs = trialRows(await x.status()).jobs
+    assert.deepEqual(jobs.map(j => j.state).sort(), ["queued", "queued", "queued", "running", "running"])
+  } finally {
+    release.resolve()
+    await first
+  }
+  assert.deepEqual(await second, await first)
+  assert.equal(x.p.sessions.size, 5)
+  assert.equal(x.p.deliveries.length, 5)
 })
