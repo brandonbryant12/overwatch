@@ -427,3 +427,5 @@ body[data-link="down"] .groups, body[data-link="down"] .stage { opacity: 0.55; f
 .fix .verification li { display: flex; gap: 12px; justify-content: space-between; }
 .fix .verification li.ok span { color: var(--state-ok); }
 .fix .verification li.failed span { color: var(--state-error); }
+.finding header .said { margin-left: auto; color: var(--ink-secondary); font-size: var(--text-sm); font-style: normal; }
+.fix .next { color: var(--ink-secondary); }

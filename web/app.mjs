@@ -182,7 +182,7 @@ function renderStrip() {
       return `<button type="button" class="env ${h}${state.focus === e.subject ? " focused" : ""}" data-env="${esc(e.environment)}" data-app="${esc(e.app)}" data-health="${h}" data-subject="${esc(e.subject)}">
         <span class="glyph">${GLYPH[h] ?? GLYPH.unknown}</span>
         <span class="env-name"><b>${esc(e.environment)}</b><span>${esc(e.app)}</span></span>
-        <span class="env-state"><b>${esc(m.HEALTH_LABEL[h])}</b><span>${esc(detail)}</span>${left ? `<span class="ahead" title="${esc(left.long)}">${esc(left.short)}</span>` : ""}${signal?.state === "regression" ? `<span class="ahead warn">new problem in staging</span>` : ""}</span>
+        <span class="env-state"><b>${esc(m.HEALTH_LABEL[h])}</b><span>${esc(detail)}</span>${left ? `<span class="ahead" title="${esc(left.long)}">${esc(left.short)}</span>` : ""}${signal?.state === "regression" ? `<span class="ahead warn" title="A comparison of this staging release with production, separate from this environment's health reading">staging check: a new problem since its release</span>` : ""}</span>
       </button>`;
     })
     .join("");
@@ -196,8 +196,8 @@ function ahead(e) {
 }
 function outlookPanels(e) {
   const { forecasts, signal } = ahead(e), now = serverNow() ?? state.snap.atMs;
-  const lines = forecasts.map((f) => { const t = m.timeLeft(f, now); return `<li class="${t ? "breach" : ""}"><span>${esc(f.source)} · ${esc(f.resource)}</span><b>${t ? esc(t.short) : "no estimate"}</b><em>${esc(t ? t.long : f.reason ?? "")}</em></li>`; }).join("");
-  return `${lines ? `<section class="panel"><h3>Time left</h3><ul class="gauges">${lines}</ul></section>` : ""}${signal ? `<section class="panel"><h3>Staging against production</h3><p class="note${signal.state === "regression" ? " warn" : ""}">${esc(m.comparisonText(signal))}</p></section>` : ""}`;
+  const lines = forecasts.map((f) => { const t = m.timeLeft(f, now); return `<li class="${t ? "breach" : ""}"><span>${esc(f.source)} · ${esc(f.resource)}</span><b>${t ? esc(t.short) : "no estimate"}</b><em>${esc(t ? t.long : m.outlookNext(f.state === "forecast" ? { ...f, state: "unknown", reason: "The newest reading is older than one interval" } : f) ?? "")}</em></li>`; }).join("");
+  return `${lines ? `<section class="panel"><h3>Time left</h3><ul class="gauges">${lines}</ul></section>` : ""}${signal ? `<section class="panel"><h3>Staging against production (a comparison, not a health reading)</h3><p class="note${signal.state === "regression" ? " warn" : ""}">${esc(m.comparisonText(signal))}</p>${m.outlookNext(signal) ? `<p class="note">${esc(m.outlookNext(signal))}</p>` : ""}</section>` : ""}`;
 }
 
 /** A fix attempt: its state, the one rule that stopped it or why it is eligible, the change, its verification, the draft. */
@@ -208,10 +208,12 @@ function fixPanel(i, d) {
   return `<section class="panel fixes"><h3>Fix proposal</h3>${list.map((f, n) => `<article class="fix ${m.fixTone(f.state)}" data-fix="${esc(f.id)}">
     <header><b>${esc(m.FIX_LABEL[f.state] ?? f.state)}</b>${f.pr ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener">#${f.pr.number}${f.pr.draft ? " · draft" : ""} · ${esc(String(f.pr.state).toLowerCase())}</a>` : ""}${m.fixTone(f.state) === "working" ? `<button type="button" data-decline="${esc(f.id)}">Decline</button>` : ""}</header>
     ${f.reason ? `<p class="note">${esc(f.reason)}</p>` : ""}
+    <p class="note next">${esc(f.next ?? m.FIX_NEXT[f.state] ?? "")}</p>
+    ${f.host && !["draft"].includes(f.state) ? `<p class="note warn">On the host: ${esc(f.host)}</p>` : ""}
     ${n === 0 && f.diff ? `<p class="eligible">Eligible: three of three readings said real, the challenger upheld it, it was observed in telemetry, and it began strictly after the rollout of <code>${esc(String(f.deployed).slice(0, 12))}</code> (previously <code>${esc(String(f.previous).slice(0, 12))}</code>). A model selected this change; Overwatch derived it from Git and checked it.</p>
       <pre class="diff">${diff(f.diff)}</pre>` : ""}
     ${f.verification.length ? `<ul class="verification">${f.verification.map((v) => `<li class="${v.exitCode === 0 ? "ok" : "failed"}"><code>${esc(v.argv.join(" "))}</code><span>${v.exitCode === null ? "did not finish" : `exit ${v.exitCode}`} · ${v.elapsedMs} ms</span></li>`).join("")}</ul>` : ""}
-    ${f.state === "draft" ? `<p class="note">To decline, close the pull request; the problem stays open and this finding is not proposed again.</p>` : ""}
+    ${f.state === "draft" ? `<p class="note">To withdraw it, close the pull request on the host; the problem stays open and this finding is not proposed again.</p>` : ""}
   </article>`).join("")}</section>`;
 }
 
@@ -346,11 +348,18 @@ function claimsPanel(d) {
   const findings = (d?.findings ?? []).filter((f) => (!ids || ids.has(f.id)) && !f.body?.challenge);
   if (!findings.length) return "";
   const list = (title, items) => (items?.length ? `<div class="aside"><h4>${title}</h4><ul>${items.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : "");
-  return `<section class="panel"><h3>${!inv ? "Findings" : inv.verdict === "unsure" ? "What each reading claimed" : "Why"}</h3>${findings.map((f) => `<article class="finding ${esc(f.verdict)}">
-      <header><b>${esc(VERDICT[f.verdict] ?? f.verdict)}</b><span>${esc(f.body?.cause ?? "")}</span></header>
-      ${(f.claims ?? []).map((c) => `<p class="claim">${esc(c.statement)}</p>${piecesHtml(c.pieces)}`).join("")}
-      <div class="asides">${list("Ruled out", f.body?.ruled_out)}${list("Not checked", f.body?.not_checked)}</div>
-    </article>`).join("")}</section>`;
+  // Readings that say the same thing are one entry: how many said it, the claims once, each piece of evidence once.
+  const groups = [...Map.groupBy(findings, (f) => `${f.verdict}|${f.body?.cause ?? ""}`).values()];
+  const seen = new Set();
+  const pieces = (ps) => piecesHtml((ps ?? []).filter((p) => !seen.has(p.handle) && seen.add(p.handle)));
+  return `<section class="panel"><h3>${!inv ? "Findings" : inv.verdict === "unsure" ? "What each reading claimed" : "Why"}</h3>${groups.map((g) => {
+    const f = g[0], claims = [...new Map(g.flatMap((x) => x.claims ?? []).map((c) => [c.statement, c])).values()];
+    return `<article class="finding ${esc(f.verdict)}">
+      <header><b>${esc(VERDICT[f.verdict] ?? f.verdict)}</b><span>${esc(f.body?.cause ?? "")}</span>${g.length > 1 ? `<em class="said">${g.length} readings said this</em>` : ""}</header>
+      ${claims.map((c) => `<p class="claim">${esc(c.statement)}</p>${pieces(c.pieces)}`).join("")}
+      <div class="asides">${list("Ruled out", [...new Set(g.flatMap((x) => x.body?.ruled_out ?? []))])}${list("Not checked", [...new Set(g.flatMap((x) => x.body?.not_checked ?? []))])}</div>
+    </article>`;
+  }).join("")}</section>`;
 }
 
 function incidentView(i, d) {
@@ -386,7 +395,7 @@ function incidentView(i, d) {
       <button type="button" data-action="investigate"${off}>Investigate <kbd>i</kbd></button>
       <button type="button" data-action="open"${off}>Open in OpenCode <kbd>o</kbd></button>
       ${done ? `<button type="button" data-action="correct"${off}>Was this right? <kbd>y</kbd></button>` : ""}
-      ${done && d?.fixable ? `<button type="button" data-action="fix"${off}>Propose fix <kbd>f</kbd></button>` : ""}
+      ${done && d?.fixable && !(d.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "publishing", "draft", "awaiting_deploy", "released_quiet"].includes(f.state)) ? `<button type="button" data-action="fix"${off}>Propose fix <kbd>f</kbd></button>` : ""}
     </div>
     ${d?.comparison ? `<section class="panel"><h3>Staging against production</h3><p class="note warn">${esc(m.comparisonText(d.comparison))}</p></section>` : ""}
     ${verdictPanel(d)}

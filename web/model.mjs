@@ -207,7 +207,8 @@ export const shortHandle = (h) => (typeof h === "string" && h.length > 10 ? `${h
 
 /** Time left in words, only from a forecast the service made; otherwise null (the reason is shown when asked). */
 export function timeLeft(f, nowMs) {
-  if (!f || f.state !== "forecast") return null;
+  // Aged on the page's own clock like every reading: a forecast whose newest sample is older than one interval is gone.
+  if (!f || f.state !== "forecast" || nowMs - f.asOfMs > f.intervalMs) return null;
   const at = f.asOfMs + f.etaMinutes * 60_000;
   const left = Math.max(0, at - nowMs), h = Math.floor(left / 3_600_000), mins = Math.ceil((left % 3_600_000) / 60_000);
   const span = h ? `${h} h ${mins} min` : `${mins} min`;
@@ -240,4 +241,20 @@ export function bytes(v) {
   let i = 0;
   while (Math.abs(v) >= 1000 && i < units.length - 1) (v /= 1000), i++;
   return `${Number(v.toPrecision(3))} ${units[i]}`;
+}
+
+/** What each fix state waits for: the next observation that would change it. */
+export const FIX_NEXT = {
+  queued: "Next: the rules are checked, then a model selects a change.", proposing: "Next: the fixer's selection.", verifying: "Next: the verify commands finish in isolation.",
+  publishing: "Next: the host answers, one step at a time.", draft: "Next: the draft is merged or closed (checked once a minute).",
+  awaiting_deploy: "Next: a deployment that contains the merge, then three quiet intervals.", released_quiet: "Closed by rule; nothing further.",
+  closed_unmerged: "The problem stays open; a new investigation can lead to a new proposal.", blocked: "Next: pass overwatch trial --fixes, then press f.",
+  ineligible: "Next: a new investigation or deployment; f checks again.", refused: "Nothing further for this finding.", verify_failed: "Next: a passing overwatch trial --fixes, then f.",
+  stale: "Next: press f to try again on the current base.", declined: "Nothing further.", unresolved: "Next: press f once the host answers.",
+};
+/** A forecast or comparison without an answer, and what would give one. */
+export function outlookNext(x) {
+  if (!x) return null;
+  if (x.samples !== undefined) return x.state === "forecast" ? null : x.state === "reached" ? "Reached: free or raise capacity." : `${x.reason ?? "No estimate"}. Next: ${x.state === "outside_horizon" ? "a faster rise would bring it inside 24 hours" : `${Math.max(1, 6 - (x.samples ?? 0))} more fresh, rising readings`}.`;
+  return x.state === "unknown" ? `${x.reason ?? "Unknown"}. Next: two aligned, fully measured intervals after the next staging release.` : null;
 }
