@@ -15,36 +15,37 @@ export interface Message {
   readonly outcome: string | null;
 }
 
-/** The server's address: configured, or the registration file OpenCode writes when it serves. */
-export function discover(configured: string | null): string | null {
-  if (configured) return configured;
-  for (const dir of [process.env.XDG_STATE_HOME && join(process.env.XDG_STATE_HOME, "opencode"), join(homedir(), ".local", "state", "opencode")]) {
-    if (!dir) continue;
-    try {
-      const value = JSON.parse(readFileSync(join(dir, "server.json"), "utf8")) as { url?: string };
-      if (typeof value.url === "string") return value.url.replace(/\/+$/, "");
-    } catch {
-      // Not registered there.
-    }
+/**
+ * Where OpenCode answers and the password it requires. OpenCode always requires Basic `opencode:<password>`; its
+ * service mode registers both in `$XDG_STATE_HOME/opencode/service.json` (mode 0600). A configured URL and password
+ * reference win; under plain `opencode serve` set `opencode.password` to the OPENCODE_PASSWORD it runs with.
+ */
+export function registration(): { url: string; password: string | null } | null {
+  try {
+    const file = join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "opencode", "service.json");
+    const value = JSON.parse(readFileSync(file, "utf8")) as { url?: string; password?: string };
+    return typeof value.url === "string" ? { url: value.url.replace(/\/+$/, ""), password: typeof value.password === "string" ? value.password : null } : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 export class OpenCode {
   readonly url: string;
   private readonly password: string | null;
-  constructor(url: string, password: string | null = null) {
+  private readonly registered: string | null;
+  /** `password` is a secret reference; `registered` a password read from OpenCode's own registration. */
+  constructor(url: string, password: string | null = null, registered: string | null = null) {
     this.url = url;
     this.password = password;
+    this.registered = registered;
   }
 
   private async call(path: string, init: { method?: string; body?: unknown } = {}): Promise<unknown> {
     const headers: Record<string, string> = { accept: "application/json" };
     if (init.body !== undefined) headers["content-type"] = "application/json";
-    if (this.password) {
-      const value = await secret(this.password);
-      if (value) headers.authorization = "Basic " + Buffer.from(`opencode:${value}`).toString("base64");
-    }
+    const value = this.password ? await secret(this.password) : this.registered;
+    if (value) headers.authorization = "Basic " + Buffer.from(`opencode:${value}`).toString("base64");
     const response = await fetch(this.url + path, {
       method: init.method ?? "GET",
       headers,
@@ -63,27 +64,28 @@ export class OpenCode {
     const v = (await this.call(path)) as { data?: unknown };
     return Array.isArray(v.data) ? (v.data as Array<Record<string, unknown>>) : [];
   };
-  agents = () => this.data("/api/agent");
-  mcp = () => this.data("/api/mcp");
-  skills = () => this.data("/api/skill");
+  /** Catalogs are per location: ask about the folder Overwatch's sessions work in. */
+  private at = (path: string, directory: string) => this.data(`${path}?location[directory]=${encodeURIComponent(directory)}`);
+  agents = (directory: string) => this.at("/api/agent", directory);
+  mcp = (directory: string) => this.at("/api/mcp", directory);
+  skills = (directory: string) => this.at("/api/skill", directory);
 
   createSession(input: { id: string; title: string; agent: string | null; model: string | null; directory: string }) {
+    const slash = input.model?.indexOf("/") ?? -1;
+    const model = input.model && slash > 0 ? { providerID: input.model.slice(0, slash), id: input.model.slice(slash + 1) } : null;
     return this.call("/api/session", {
       method: "POST",
-      body: { id: input.id, title: input.title, location: { directory: input.directory }, ...(input.agent ? { agent: input.agent } : {}), ...(input.model ? { model: input.model } : {}) },
+      body: { id: input.id, title: input.title, location: { directory: input.directory }, ...(input.agent ? { agent: input.agent } : {}), ...(model ? { model } : {}) },
     });
   }
 
-  prompt(session: string, input: { id: string; text: string; agent: string | null; model: string | null }) {
-    return this.call(`/api/session/${encodeURIComponent(session)}/prompt`, {
-      method: "POST",
-      body: { id: input.id, text: input.text, ...(input.agent ? { agent: input.agent } : {}), ...(input.model ? { model: input.model } : {}) },
-    });
+  prompt(session: string, input: { id: string; text: string }) {
+    return this.call(`/api/session/${encodeURIComponent(session)}/prompt`, { method: "POST", body: { id: input.id, text: input.text } });
   }
 
   /** The session's history, oldest first. */
   async messages(session: string): Promise<Message[]> {
-    const rows = await this.data(`/api/session/${encodeURIComponent(session)}/message`);
+    const rows = await this.data(`/api/session/${encodeURIComponent(session)}/message?order=desc&limit=200`);
     return rows
       .map((m) => ({
         id: String(m.id ?? ""),
@@ -105,7 +107,9 @@ export class OpenCode {
   }
 }
 
-export async function connect(config: { url: string | null; password: string | null }): Promise<OpenCode | null> {
-  const url = discover(config.url);
-  return url ? new OpenCode(url, config.password) : null;
+/** The OpenCode to use: the configured one, or the one that registered itself. */
+export function connect(config: { url: string | null; password: string | null }): OpenCode | null {
+  const found = registration();
+  if (config.url) return new OpenCode(config.url, config.password, config.password ? null : found?.url === config.url ? found.password : null);
+  return found ? new OpenCode(found.url, config.password, found.password) : null;
 }

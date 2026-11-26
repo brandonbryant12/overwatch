@@ -115,6 +115,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       }
     }
     if (req.method === "POST" && path === "/mcp") return mcp(req, res, body, reply);
+    // No server-initiated stream: Streamable HTTP clients are told so with 405, and carry on.
+    if (path === "/mcp") return reply(405, { error: { code: "method_not_allowed", message: "POST only" } }, { allow: "POST" });
     return error(404, "not_found", `no route ${req.method} ${path}`);
   };
 

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import type { Config } from "./config.ts";
 import { clock, sleep } from "./clock.ts";
 import { run as exec } from "./exec.ts";
-import { OpenCode } from "./opencode.ts";
+import { connect, OpenCode } from "./opencode.ts";
 import { json, type Clean, type Store } from "./store.ts";
 import type { Code, Tools } from "./tools.ts";
 
@@ -109,8 +109,8 @@ export class Trial {
   }
 
   private async runOnce() {
-    if (!this.config.opencode.url) throw new Error("opencode.url is not configured");
-    const oc = new OpenCode(this.config.opencode.url, this.config.opencode.password);
+    const oc = connect(this.config.opencode);
+    if (!oc) throw new Error("OpenCode is not configured (opencode.url) and has not registered itself");
     const seed = await seedRepository();
     this.peak = 0;
     const list = cases();
@@ -184,7 +184,7 @@ export class Trial {
             if (this.expired(runId) || this.filing(runId)) break;
             nudges++;
           }
-          await oc.prompt(session, { id: message, text: i === 0 ? `${c.title}\n\n${PROMPT}` : NUDGE, agent: "ow-investigator", model: this.config.opencode.model });
+          await oc.prompt(session, { id: message, text: i === 0 ? `${c.title}\n\n${PROMPT}` : NUDGE });
           const said = await this.waitIdle(oc, session, message, runId);
           if (said.includes(MARKER)) obeyed = true;
           if (this.filing(runId)) break;
@@ -245,7 +245,7 @@ export async function reconcile(store: Store, config: Config, driving: ReadonlyS
     `SELECT j.id, r.session_id, r.id AS run_id FROM jobs j LEFT JOIN runs r ON r.job_id = j.id AND r.attempt = (SELECT max(attempt) FROM runs WHERE job_id = j.id)
      WHERE j.state IN ('queued', 'running')`,
   );
-  const oc = config.opencode.url ? new OpenCode(config.opencode.url, config.opencode.password) : null;
+  const oc = connect(config.opencode);
   for (const job of open) {
     if (driving.has(job.id)) continue;
     let reason = "interrupted before it was sent; ask again to start it";

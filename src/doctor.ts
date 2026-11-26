@@ -9,7 +9,7 @@ import type { Config } from "./config.ts";
 import { run as exec } from "./exec.ts";
 import { validate } from "./datadog.ts";
 import { kubectl } from "./kube.ts";
-import { OpenCode } from "./opencode.ts";
+import { connect, OpenCode } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { sleep } from "./clock.ts";
 import type { Store } from "./store.ts";
@@ -22,6 +22,16 @@ export interface Check {
 }
 
 const LABEL = "dev.overwatch.service";
+
+/** OpenCode fills its catalogs after start: read again for a few seconds before deciding something is missing. */
+async function settled<T>(read: () => Promise<T[]>, ok: (list: T[]) => boolean): Promise<T[]> {
+  let list = await read();
+  for (let i = 0; i < 20 && !ok(list); i++) {
+    await sleep(250);
+    list = await read();
+  }
+  return list;
+}
 
 export async function doctor(config: Config, store: Store | null, emptyDir: string): Promise<{ ok: boolean; checks: Check[] }> {
   const checks: Check[] = [];
@@ -62,20 +72,20 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
   });
   await check("native", "Install OpenCode 2.4.1 so the opencode binary is on PATH", async () => {
     const v = await ok("opencode", ["--version"], "opencode --version");
-    if (!/\b2\.\d+\.\d+/.test(v)) throw new Error(`unexpected version: ${v}`);
-    return `opencode ${v}`;
+    if (!/(?:^|[^\d.])2\.\d+\.\d+/.test(v)) throw new Error(`unexpected version: ${v}`);
+    return v.startsWith("opencode") ? v : `opencode ${v}`;
   });
 
-  const oc = config.opencode.url ? new OpenCode(config.opencode.url, config.opencode.password) : null;
+  const oc = connect(config.opencode);
   const need = () => {
-    if (!oc) throw new Error("opencode.url is not configured");
+    if (!oc) throw new Error("OpenCode is not configured (opencode.url) and has not registered itself");
     return oc;
   };
   await check("opencode", `Start OpenCode (opencode serve) at ${config.opencode.url ?? "the configured opencode.url"}`, async () => `OpenCode ${(await need().info()).version ?? "answering"}`);
   await check("model", `Check that the model ${config.opencode.model ?? "(opencode.model)"} answers in OpenCode`, async () => {
     const session = `ses_${randomBytes(12).toString("hex")}`, message = `msg_${randomBytes(12).toString("hex")}`;
-    await need().createSession({ id: session, title: "Overwatch doctor check", agent: null, model: config.opencode.model, directory: emptyDir });
-    await need().prompt(session, { id: message, text: "Reply with one word: ready.", agent: null, model: config.opencode.model });
+    await need().createSession({ id: session, title: "Overwatch doctor check", agent: "ow-investigator", model: config.opencode.model, directory: emptyDir });
+    await need().prompt(session, { id: message, text: "Reply with one word: ready." });
     for (const deadline = Date.now() + 120_000; Date.now() < deadline; await sleep(50)) {
       const after = OpenCode.after(await need().messages(session), message);
       if (!after.idle) continue;
@@ -85,20 +95,22 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
     throw new Error(`the model ${config.opencode.model} did not answer within two minutes`);
   });
   await check("agent", "Add the ow-investigator agent (deny all, allow the ow_ tools) to your OpenCode configuration", async () => {
-    const agent = (await need().agents()).find((a) => a.id === "ow-investigator" || a.name === "ow-investigator");
+    const agent = (await settled(() => need().agents(emptyDir), (l) => l.some((a) => a.id === "ow-investigator"))).find((a) => a.id === "ow-investigator" || a.name === "ow-investigator");
     if (!agent) throw new Error("OpenCode has no ow-investigator agent");
-    const first = Array.isArray(agent.permissions) ? (agent.permissions[0] as Record<string, unknown>) : null;
-    if (!first || first.effect !== "deny" || first.action !== "*") throw new Error("ow-investigator does not deny everything by default");
+    // OpenCode puts its defaults first and the last matching rule wins: after the last deny-all, only ow_ tools may be allowed.
+    const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
+    const denyAll = rules.findLastIndex((r) => r.action === "*" && r.resource === "*" && r.effect === "deny");
+    if (denyAll < 0 || rules.slice(denyAll + 1).some((r) => r.effect !== "deny" && !String(r.action).startsWith("ow_"))) throw new Error("ow-investigator does not deny everything by default");
     return "ow-investigator denies everything but the Overwatch tools";
   });
   await check("mcp", "Add the remote MCP server ow (url …/mcp, Authorization Bearer, codemode false) to your OpenCode configuration", async () => {
-    const entry = (await need().mcp()).find((m) => m.name === "ow");
+    const entry = (await settled(() => need().mcp(emptyDir), (l) => l.some((m) => m.name === "ow" && JSON.stringify(m.status).includes("connected")))).find((m) => m.name === "ow");
     const status = entry && typeof entry.status === "object" ? (entry.status as { status?: string }).status : entry?.status;
     if (status !== "connected") throw new Error(`OpenCode's MCP server ow is ${status ?? "missing"}`);
     return "OpenCode is connected to ow";
   });
   await check("skill", "Add the overwatch skill to your OpenCode skills folder", async () => {
-    if (!(await need().skills()).some((s) => s.id === "overwatch" || s.name === "overwatch")) throw new Error("OpenCode has no overwatch skill");
+    if (!(await settled(() => need().skills(emptyDir), (l) => l.some((k) => k.id === "overwatch" || k.name === "overwatch"))).some((s) => s.id === "overwatch" || s.name === "overwatch")) throw new Error("OpenCode has no overwatch skill");
     return "the overwatch skill is installed";
   });
 
