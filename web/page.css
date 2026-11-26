@@ -226,7 +226,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .axis { display: flex; justify-content: space-between; color: var(--ink-muted); font-size: var(--text-sm); }
 .note { color: var(--ink-muted); font-size: var(--text-sm); margin: 8px 0 0; }
 .note.bound { color: var(--state-warn); }
-.back { display: none; }
+.stage-back { display: none; }
 .subject-link { cursor: pointer; text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
 .sources li[data-subject] { cursor: pointer; }
 .sources li[data-subject]:hover { border-color: var(--accent-border); }
@@ -346,7 +346,7 @@ body[data-link="down"] .groups, body[data-link="down"] .stage { opacity: 0.55; f
   .dock { padding: 10px var(--space-4) 12px; }
   .route { display: none; }
   .groups { padding-bottom: 120px; }
-  .back { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 14px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); border: 1px solid var(--border-strong); background: var(--bg-elevated); font-weight: 560; }
+  .stage-back { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 14px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); border: 1px solid var(--border-strong); background: var(--bg-elevated); font-weight: 560; }
   .stage[data-focus-id] { padding-bottom: 120px; }
   .dock { position: sticky; bottom: 0; }
 }

@@ -266,7 +266,7 @@ function renderStage() {
   stage.innerHTML = back + incidentView(i, d);
 }
 
-const back = `<button type="button" class="back" data-back>← Inbox</button>`;
+const back = `<button type="button" class="stage-back" data-back>← Inbox</button>`;
 
 function overview() {
   const s = state.snap;
