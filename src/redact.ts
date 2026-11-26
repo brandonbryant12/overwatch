@@ -85,6 +85,14 @@ export function clean(input: string, maxBytes = 16_384): Clean {
 }
 
 /** Bounds text to `maxBytes` of UTF-8 without splitting a character, saying so with a readable marker. */
+/**
+ * The last boundary for text that leaves the laptop (a draft's title and body, a notice): secrets redacted as
+ * everywhere, and private local paths (home folders, temporary folders, volumes) replaced, on the final document.
+ */
+export function outbound(text: string): string {
+  return clean(text, 60_000).replace(/(?:~\/|(?<![\w.])\/(?:Users|home|root|private|var\/folders|tmp|Volumes)\/|[A-Za-z]:\\Users\\)[^\s"'`)\]<>|]*/g, "<private path>");
+}
+
 export function truncate(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text) <= maxBytes) return text;
   const marker = " … [truncated]";

@@ -203,8 +203,8 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     name: "fixes",
     ddl: `CREATE TABLE fixes (id TEXT PRIMARY KEY, incident TEXT NOT NULL, job_id TEXT NOT NULL, app TEXT NOT NULL, environment TEXT NOT NULL, origin TEXT NOT NULL,
       state TEXT NOT NULL, reason TEXT, previous TEXT, deployed TEXT, base TEXT, candidate TEXT, head TEXT, diff TEXT, run_id TEXT,
-      data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL)`,
-    columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq"],
+      data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0)`,
+    columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq", "version"],
     json: ["data"],
   },
   {
@@ -293,6 +293,7 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["asks", "answer", "answer TEXT"],
   ["asks", "reason", "reason TEXT"],
   ["asks", "message", "message TEXT"],
+  ["fixes", "version", "version INTEGER NOT NULL DEFAULT 0"],
   ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
 ];
 
@@ -374,6 +375,29 @@ function normal(value: unknown): number | bigint | null | string {
   throw new Error(`the writer cannot store ${typeof value}`);
 }
 
+let issue: (p: Permit) => void = () => undefined;
+/**
+ * Authority for one outbound effect (a prompt, a handoff, a notice, a push, a host call). Only a Writer makes one, in
+ * the transaction that records the effect's intent, and it becomes live only when that transaction commits. It is
+ * spent by its one use. Constructed anywhere else, it is never live: `issue` is private to this module.
+ */
+export class Permit {
+  readonly kind: string;
+  readonly seq: number;
+  #live = false;
+  static {
+    issue = (p) => void (p.#live = true);
+  }
+  constructor(kind: string, seq: number) {
+    this.kind = kind;
+    this.seq = seq;
+  }
+  spend(kind: string) {
+    if (!this.#live || this.kind !== kind) throw new Error(`an outbound ${kind} needs a committed intent`);
+    this.#live = false;
+  }
+}
+
 /** Writes inside one transaction. Each transaction gets its own, and it is dead once that transaction ends: a writer
  * kept past its callback cannot write without admission. */
 export class Writer {
@@ -396,6 +420,13 @@ export class Writer {
   /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
   next(): number {
     return ((this.#open.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0) + 1;
+  }
+  readonly permits: Permit[] = [];
+  /** Records an outbound effect's intent; the permit for it is live once this transaction commits. */
+  permit(kind: string, subject: string | null, data: unknown = {}): Permit {
+    const p = new Permit(kind, this.event("intent", subject, { kind, ...(data as object) }));
+    this.permits.push(p);
+    return p;
   }
   /** Appends to the log and returns its seq. */
   event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): number {
@@ -506,6 +537,11 @@ export class Store {
     });
   }
 
+  /** One outbound effect's intent, in its own transaction; the returned permit is live. */
+  permit(kind: string, subject: string | null, data: unknown = {}): Permit {
+    return this.tx((w) => w.permit(kind, subject, data));
+  }
+
   /** Lets the write-ahead log go back to the file system (tests measure the file). */
   checkpoint() {
     this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -532,6 +568,7 @@ export class Store {
       writer.end();
     }
     tick();
+    for (const p of writer.permits) issue(p);
     for (const listener of this.listeners) listener();
     return result;
   }

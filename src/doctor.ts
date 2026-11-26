@@ -88,8 +88,9 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
   await check("opencode", `Start OpenCode (opencode serve) at ${config.opencode.url ?? "the configured opencode.url"}`, async () => `OpenCode ${(await need().info()).version ?? "answering"}`);
   await check("model", `Check that the model ${config.opencode.model ?? "(opencode.model)"} answers in OpenCode`, async () => {
     const session = `ses_${randomBytes(12).toString("hex")}`, message = `msg_${randomBytes(12).toString("hex")}`;
-    await need().createSession({ id: session, title: "Overwatch doctor check", agent: "ow-investigator", model: config.opencode.model, directory: emptyDir });
-    await need().prompt(session, { id: message, text: "Reply with one word: ready." });
+    if (!store) throw new Error("the model check needs the database: run doctor with the service running, or with it stopped");
+    await need().createSession(store.permit("peer", null, { doctor: session }), { id: session, title: "Overwatch doctor check", agent: "ow-investigator", model: config.opencode.model, directory: emptyDir });
+    await need().prompt(store.permit("peer", null, { doctor: message }), session, { id: message, text: "Reply with one word: ready." });
     for (const deadline = Date.now() + 120_000; Date.now() < deadline; await sleep(50)) {
       const after = OpenCode.after(await need().messages(session), message);
       if (!after.idle) continue;

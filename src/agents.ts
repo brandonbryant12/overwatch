@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { LIMITS, type Config } from "./config.ts";
 import { bounded, clock, Expired, sleep } from "./clock.ts";
-import { run as exec } from "./exec.ts";
+import { effect, run as exec } from "./exec.ts";
 import { afterFinding, announce, groupNow, HttpError, label, passed, receipt } from "./inbox.ts";
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
@@ -66,7 +66,7 @@ function openRun(store: Store, tools: Tools, t: { jobId: string; role: Role; slo
   });
   tools.contexts.set(runId, { ...t.context, deadline, role: t.role });
   tools.authored.set(runId, []);
-  return { runId, sessionId, deadline };
+  return { runId, sessionId, deadline, permit: () => store.permit("peer", runId, { session: sessionId }) };
 }
 
 /** Whether a run has filed its one filing (a finding, a challenge, or a fixer's proposal). */
@@ -90,13 +90,13 @@ export async function converse(store: Store, tools: Tools, config: Config, empty
     runId = s.runId;
     tries++;
     try {
-      await bounded(oc.createSession({ id: s.sessionId, title: t.title, agent: AGENT[t.role], model: config.opencode.model, directory: emptyDir }), s.deadline);
+      await bounded(oc.createSession(s.permit(), { id: s.sessionId, title: t.title, agent: AGENT[t.role], model: config.opencode.model, directory: emptyDir }), s.deadline);
       for (const [i, text] of [t.prompt, t.nudge].entries()) {
         if (i === 1 && (filed(store, s.runId) || clock.mono() >= s.deadline)) break;
         if (i === 1) nudges++;
         const message = id("msg");
-        store.tx((w) => w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, ?)", message as Clean, s.runId as Clean, (i ? "nudge" : "prompt") as Clean));
-        await bounded(oc.prompt(s.sessionId, { id: message, text }), s.deadline);
+        const permit = store.tx((w) => (w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, ?)", message as Clean, s.runId as Clean, (i ? "nudge" : "prompt") as Clean), w.permit("peer", s.runId, { message })));
+        await bounded(oc.prompt(permit, s.sessionId, { id: message, text }), s.deadline);
         let after = OpenCode.after(await bounded(oc.messages(s.sessionId), s.deadline), message);
         while (!after.idle) {
           if (clock.mono() >= s.deadline) throw new Expired();
@@ -108,7 +108,7 @@ export async function converse(store: Store, tools: Tools, config: Config, empty
       }
     } catch (e) {
       if (e instanceof Unavailable && !filed(store, s.runId)) throw e;
-      if (e instanceof Expired) void oc.interrupt(s.sessionId);
+      if (e instanceof Expired) void oc.interrupt(s.permit(), s.sessionId);
       reason = e instanceof Expired ? "its five minutes ran out; the session was interrupted" : e instanceof Unavailable ? reason : `OpenCode failed: ${errorText(e, 300)}`;
     } finally {
       tools.contexts.delete(s.runId);
@@ -391,20 +391,21 @@ export class Agents {
     const scope = telemetryOf(this.store, ask.subject);
     const { code, repo } = await this.code(scope.revision, scope.app);
     const what = label(this.store, this.config, ask.subject) ?? ask.subject;
-    let s: { runId: string; sessionId: string; deadline: number } | undefined;
+    let s: ReturnType<typeof openRun> | undefined;
     try {
       const oc = this.oc();
       let existing = ask.session_id ?? this.store.get<{ session_id: string }>("SELECT session_id FROM runs WHERE job_id = ? AND role = 'responder' ORDER BY attempt DESC LIMIT 1", job.id)?.session_id;
       if (existing && !(await oc.exists(existing))) existing = undefined;
       s = openRun(this.store, this.tools, { jobId: job.id, role: "responder", workId: work.id, code, context: { telemetry: scope.telemetry, repo } }, existing);
-      if (!existing) await bounded(oc.createSession({ id: s.sessionId, title: `Overwatch question: ${clean(what, 120)}`, agent: AGENT.responder, model: this.config.opencode.model, directory: this.emptyDir }), s.deadline);
+      if (!existing) await bounded(oc.createSession(s.permit(), { id: s.sessionId, title: `Overwatch question: ${clean(what, 120)}`, agent: AGENT.responder, model: this.config.opencode.model, directory: this.emptyDir }), s.deadline);
       const message = ask.message && ask.session_id === s.sessionId ? ask.message : id("msg");
-      this.store.tx((w) => {
+      const permit = this.store.tx((w) => {
         w.run("UPDATE asks SET session_id = ?, message = ? WHERE key = ?", s!.sessionId as Clean, message as Clean, ask.key as Clean);
         w.run("INSERT OR IGNORE INTO messages (id, run_id, purpose) VALUES (?, ?, 'prompt')", message as Clean, s!.runId as Clean);
+        return w.permit("peer", s!.runId, { message });
       });
       const sent = (await bounded(oc.messages(s.sessionId), s.deadline)).some((m) => m.id === message);
-      if (!sent) await bounded(oc.prompt(s.sessionId, { id: message, text: responderPrompt(ask.subject, what, ask.text, !existing) }), s.deadline);
+      if (!sent) await bounded(oc.prompt(permit, s.sessionId, { id: message, text: responderPrompt(ask.subject, what, ask.text, !existing) }), s.deadline);
       const after = await this.idle(s.sessionId, message, s.deadline);
       if (after.outcome === "failed" || !after.said.trim()) throw new Error("the model gave no answer");
       this.store.tx((w) => {
@@ -469,9 +470,9 @@ export class Agents {
     if (!oc) throw new HttpError(503, "OpenCode is not configured and has not registered itself; start it, then try again");
     try {
       let made: { data?: { url?: string } } | undefined;
-      if (!(await oc.exists(intent.sessionId))) made = (await oc.createSession({ id: intent.sessionId, title: `Overwatch: ${clean(what, 120)}`, agent: null, model: this.config.opencode.model, directory: this.emptyDir })) as typeof made;
+      if (!(await oc.exists(intent.sessionId))) made = (await oc.createSession(this.store.permit("peer", null, { subject, handoff: intent.sessionId }), { id: intent.sessionId, title: `Overwatch: ${clean(what, 120)}`, agent: null, model: this.config.opencode.model, directory: this.emptyDir })) as typeof made;
       if (!(await oc.messages(intent.sessionId)).some((m) => m.id === intent.message))
-        await oc.prompt(intent.sessionId, { id: intent.message, text: `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.` });
+        await oc.prompt(this.store.permit("peer", null, { subject, handoff: intent.message }), intent.sessionId, { id: intent.message, text: `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.` });
       if (!(await oc.exists(intent.sessionId))) throw new Error("the session is not there");
       const url = made?.data?.url ?? `${oc.url}/session/${intent.sessionId}`;
       const result = { subject, sessionId: intent.sessionId, url };
@@ -560,8 +561,8 @@ export class Agents {
           });
           continue;
         }
-        this.store.tx((w) => w.run("UPDATE notifications SET state = 'sending', attempts = ?, next_ms = NULL WHERE id = ?", attempt, n.id as Clean));
-        const r = await exec(helper, ["-group", n.id, "-title", n.title, "-message", n.body], { timeoutMs: 15_000 });
+        const permit = this.store.tx((w) => (w.run("UPDATE notifications SET state = 'sending', attempts = ?, next_ms = NULL WHERE id = ?", attempt, n.id as Clean), w.permit("notice", null, { intent: n.id, attempt })));
+        const r = await effect(permit, helper, ["-group", n.id, "-title", n.title, "-message", n.body], { timeoutMs: 15_000 });
         this.store.tx((w) => {
           if (r.code === 0) {
             w.run("UPDATE notifications SET state = 'delivered', next_ms = NULL, delay_ms = NULL, reason = NULL WHERE id = ?", n.id as Clean);

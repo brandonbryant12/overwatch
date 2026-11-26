@@ -3,6 +3,7 @@
  * Sessions and messages are created with identifiers Overwatch chose and recorded first, so repeating a request
  * repeats the same idempotent action.
  */
+import type { Permit } from "./store.ts";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -79,7 +80,9 @@ export class OpenCode {
   mcp = (directory: string) => this.at("/api/mcp", directory);
   skills = (directory: string) => this.at("/api/skill", directory);
 
-  createSession(input: { id: string; title: string; agent: string | null; model: string | null; directory: string }) {
+  /** Writes to the peer (a session, a message, an interrupt) are outbound effects: each spends a permit. */
+  createSession(permit: Permit, input: { id: string; title: string; agent: string | null; model: string | null; directory: string }) {
+    permit.spend("peer");
     const slash = input.model?.indexOf("/") ?? -1;
     const model = input.model && slash > 0 ? { providerID: input.model.slice(0, slash), id: input.model.slice(slash + 1) } : null;
     return this.call("/api/session", {
@@ -88,7 +91,8 @@ export class OpenCode {
     });
   }
 
-  prompt(session: string, input: { id: string; text: string }) {
+  prompt(permit: Permit, session: string, input: { id: string; text: string }) {
+    permit.spend("peer");
     return this.call(`/api/session/${encodeURIComponent(session)}/prompt`, { method: "POST", body: { id: input.id, text: input.text } });
   }
 
@@ -108,7 +112,7 @@ export class OpenCode {
   /** Whether the peer knows this session. */
   exists = (session: string) => this.call(`/api/session/${encodeURIComponent(session)}`).then(() => true, () => false);
 
-  interrupt = (session: string) => this.call(`/api/session/${encodeURIComponent(session)}/interrupt`, { method: "POST", body: {} }).catch(() => undefined);
+  interrupt = (permit: Permit, session: string) => (permit.spend("peer"), this.call(`/api/session/${encodeURIComponent(session)}/interrupt`, { method: "POST", body: {} }).catch(() => undefined));
 
   /** After our message `id`: whether the session has gone idle, and what the model said. */
   static after(history: ReadonlyArray<Message>, id: string): { idle: boolean; outcome: string | null; said: string } {
