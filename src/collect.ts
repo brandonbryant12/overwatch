@@ -42,7 +42,7 @@ export function problem(text: string): { fingerprint: string; title: string; sev
 type Reading = { state: "ok" | "capped" | "gap" | "failed"; missed: number | null };
 
 /** What one slice of one source read, before it is committed. Bounded: at most the occurrence limit is kept. */
-class Slice {
+export class Slice {
   readonly admitted: Array<{ key: string; at: number; bucket: string }> = [];
   readonly buckets = new Map<string, { title: string; severity: "error" | "warn" | "info"; inexact: boolean }>();
   readonly baselines: Array<{ key: string; count: number; bucket: string }> = [];

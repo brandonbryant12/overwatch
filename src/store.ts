@@ -244,7 +244,12 @@ export class Store {
       result = work(this.writer);
       this.db.exec("COMMIT");
     } catch (error) {
-      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      // A failed change is undone whole. (A statement that raises leaves the transaction open, so this always runs.)
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // SQLite already rolled back.
+      }
       throw error;
     }
     tick();
