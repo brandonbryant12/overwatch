@@ -1,4 +1,9 @@
 #!/bin/sh
-# The overwatch command. Node runs the TypeScript directly by stripping its types: there is nothing to build or install.
+# The overwatch command. Node runs the TypeScript directly by stripping its types. Effect's SQLite client needs
+# node:sqlite's isTransaction (Node 22.16+ or 24+) to roll a failed change back, so older Nodes are refused here.
 here="$(cd "$(dirname "$0")/.." && pwd)"
+if ! node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>=24||(a===22&&b>=16)?0:1)' 2>/dev/null; then
+  echo "overwatch: Node $(node --version 2>/dev/null || echo 'is missing'); Overwatch needs Node 24, or 22.16 or newer" >&2
+  exit 2
+fi
 exec node --experimental-strip-types --no-warnings "$here/src/main.ts" "$@"

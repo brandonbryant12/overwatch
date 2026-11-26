@@ -6,12 +6,25 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 
 ## Working on the code
 
-- Node 22.13 or newer. TypeScript that Node runs by stripping types: no enums, namespaces or parameter properties
-  (`erasableSyntaxOnly`). No build step. Never Bun.
-- **No runtime dependencies.** `"dependencies": {}` stays empty: Node's standard library only (`node:sqlite`,
-  `node:http`, `fetch`, `node:child_process`). Dev dependencies are `typescript`, `fast-check`, `@types/node`.
+- **Effect 4.1** throughout the service, and **Effect UI** (`@effect/ui`) for the page. The rule: do not hand-roll what
+  Effect provides. Use its modules as they come: `Effect.gen` and `Effect.fn` (no async/await), `Context.Service` and
+  `Layer` for every stateful part, `Schema.TaggedError` for expected failures, `Schema` for every value from outside
+  (configuration, request bodies, provider replies), `Predicate` for checks, `effect/sql` (`SqlClient` on
+  `@effect/sql-sqlite-node`) for the database, `effect/process` for programs, `effect/http` (`HttpRouter` on
+  `NodeHttpServer`, and `HttpClient`) for HTTP, `effect/ai` `McpServer` for MCP, `effect/cli` for the command line,
+  `Stream`, `PubSub`, `Schedule` and `Redacted`. Pure domain logic (adjudication, forecasts, parsers of known text,
+  redaction) stays plain functions. `docs/plans/effect-migration.md` maps each old piece to its Effect module.
+- Effect's own guides ship in the package: `node_modules/effect/AGENTS.md` and `node_modules/effect/ai-docs/`, and
+  `node_modules/@effect/ui/` for the page. Check APIs there: Effect 4 renamed much of Effect 3.
+- **Node 24, or 22.16 and newer.** Node runs the TypeScript by stripping its types: no enums, namespaces or parameter
+  properties (`erasableSyntaxOnly`). Effect's SQLite client rolls a transaction back only where `node:sqlite` reports
+  `isTransaction`, which Node 22.16+ and 24+ do; 23.x does not. Never Bun.
+- **Dependencies are Effect's.** Runtime dependencies are `effect`, `@effect/platform-node`, `@effect/sql-sqlite-node`
+  and, for the page, `@effect/ui` and `@effect/ui-kit` (pkg.pr.new snapshots, pinned by commit until they reach npm).
+  Development dependencies are `typescript`, `fast-check`, `@types/node` and `rolldown` (the page's bundler). Add
+  nothing else without the owner.
 - `pnpm run check` (typecheck and `test/`) before every commit; `pnpm run accept` for the acceptance suite. Never
-  edit `accept/`: if a test there looks wrong, say so with evidence.
+  edit `accept/`: if a test there looks wrong, say so with evidence. Tests run Effect programs through `test/effect.ts`.
 - Size budget: at most 5,500 lines of service code (nonblank, noncomment lines of `src/`). It was 5,000 until
   milestone 4: acting on Git (deriving, checking, verifying and publishing a fix) and looking ahead could not fit
   inside the old number without dropping a safety check, so the owner raised it once, and no further.
@@ -19,9 +32,11 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 ## Rules that hold because of how the data is shaped
 
 - **One owner.** `Store.own` sets exclusive locking, enters WAL and commits a write before reading the schema or
-  listening. No lock files, no pid checks. A second owner of any version fails with "database is locked".
-- **One way to change anything.** `Store.tx` runs one `BEGIN IMMEDIATE` transaction; a change appends to `events`
-  in the same transaction. `events` is append-only (triggers), except inside an explicit maintenance transaction
+  listening, on the one connection of an `SqliteClient` opened with `disableWAL` and a zero busy timeout (so the order
+  is ours). No lock files, no pid checks. A second owner of any version fails with "database is locked" (`Busy`).
+- **One way to change anything.** `Store.tx` runs one `BEGIN IMMEDIATE` transaction (`SqlClient.withTransaction`); a
+  change appends to `events` in the same transaction. Its body is database work only: an Effect that waits on the
+  network or a program inside a transaction holds the only connection. SQL errors are defects with SQLite's words. `events` is append-only (triggers), except inside an explicit maintenance transaction
   (compaction, restore). `events.seq` is the only clock that decides order.
 - **Text is clean or not stored.** The writer accepts `Clean` text (made only by `clean` in `src/redact.ts`), generated
   identifiers and JSON; at run time it cleans every string and every JSON value again, so a cast cannot bypass it.
@@ -53,7 +68,7 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 - **One write path.** `Store.tx` runs `Store.guard` before every transaction (the collector installs the disk check),
   so slices, failure records, deadlines, page actions and tool writes are admitted by the same rule. Maintenance
   (`expire`, `retain`) is the only write without admission, and it is private to the store (`#maintain`), as is the
-  connection. A `Writer` lives for one transaction; one kept past it throws. Foreign keys are deferred to commit.
+  connection. A `Writer` lives for one transaction; one kept past it dies. Foreign keys are deferred to commit.
 - **The schema is declared once.** Every table in `TABLES` (`src/store.ts`) lists every column, and in `refs` each one
   that refers to a named parent ("table.key"). Restore checks every declared reference whatever the column is called;
   a build test fails when a created table has a column the list does not declare, and the class property fails until a

@@ -4,42 +4,49 @@
  * invented: no impact, fix or answer that was not recorded. A part of the interval that compaction removed is
  * named. Copy-only: the owner sends it.
  */
-import type { Config } from "./config.ts";
-import { HttpError } from "./inbox.ts";
-import type { Store } from "./store.ts";
+import { Effect } from "effect";
+import { AppConfig } from "./config.ts";
+import { apiError } from "./errors.ts";
+import { Store } from "./store.ts";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-export function brief(store: Store, config: Config, audience: string, after = 0, through = store.seq()) {
-  if (audience !== "owner" && audience !== "team") throw new HttpError(400, "audience is owner or team");
-  if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through) || after < 0 || through < after || through > store.seq()) throw new HttpError(400, "afterSeq and throughSeq must satisfy 0 ≤ afterSeq ≤ throughSeq ≤ the current seq");
+export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: number, throughSeq?: number) {
+  const store = yield* Store;
+  const config = yield* AppConfig;
+  const current = yield* store.seq;
+  const after = afterSeq ?? 0, through = throughSeq ?? current;
+  if (audience !== "owner" && audience !== "team") return yield* apiError(400, "audience is owner or team");
+  if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through) || after < 0 || through < after || through > current) return yield* apiError(400, "afterSeq and throughSeq must satisfy 0 ≤ afterSeq ≤ throughSeq ≤ the current seq");
   const team = audience === "team";
   const inside = (sql: string) => `${sql} > ${after} AND ${sql} <= ${through}`;
   const places = config.watchers.map((w) => ({ app: w.app, environment: w.environment }));
   const name = (p: { app: string; environment: string }) => `${p.app} ${p.environment}`;
-  const fresh = store.all<{ app: string; environment: string; title: string; severity: string }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
-  const returned = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'returned' AND ${inside("seq")} ORDER BY seq`);
-  const decided = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'adjudicated' AND ${inside("seq")} ORDER BY seq`);
-  const deploys = store.all<{ app: string; environment: string; revision: string }>(`SELECT * FROM deploys WHERE ${inside("seq")} ORDER BY seq`);
-  const failed = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'source_failed' AND ${inside("seq")} ORDER BY seq`);
-  const gaps = store.all<{ source: string; reading: string; state: string }>(`SELECT DISTINCT source, reading, state FROM coverage WHERE state <> 'ok' AND ${inside("seq")}`);
+  const fresh = yield* store.all<{ app: string; environment: string; title: string; severity: string }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
+  const returned = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'returned' AND ${inside("seq")} ORDER BY seq`);
+  const decided = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'adjudicated' AND ${inside("seq")} ORDER BY seq`);
+  const deploys = yield* store.all<{ app: string; environment: string; revision: string }>(`SELECT * FROM deploys WHERE ${inside("seq")} ORDER BY seq`);
+  const failed = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'source_failed' AND ${inside("seq")} ORDER BY seq`);
+  const gaps = yield* store.all<{ source: string; reading: string; state: string }>(`SELECT DISTINCT source, reading, state FROM coverage WHERE state <> 'ok' AND ${inside("seq")}`);
   // Open as of the fence: the disposition and quiet state are replayed from events up to `through`, so a later
   // Done, return or quiet cannot rewrite a past brief.
-  const open = store.all<{ id: string; app: string; environment: string; title: string; severity: string; active: number }>(
-    `SELECT id, app, environment, title, severity, active FROM incidents WHERE first_seq <= ${through} ORDER BY severity, first_seq`)
-    .filter((i) => {
-      const last = (kinds: string, cmp: string) => store.get<{ kind: string; data: string }>(`SELECT kind, data FROM events WHERE subject = ? AND kind IN (${kinds}) AND seq ${cmp} ${through} ORDER BY seq DESC LIMIT 1`, i.id);
-      const way = last("'action','returned'", "<=");
-      if (way?.kind === "action" && (JSON.parse(way.data) as { way: unknown }).way) return false;
-      const quiet = last("'quieted','returned'", "<=");
-      return quiet ? quiet.kind === "returned" : i.active === 1 || !!last("'quieted'", ">");
-    });
-  const earliest = store.get<{ s: number | null }>("SELECT min(seq) AS s FROM events")?.s ?? null;
+  const open: Array<{ id: string; app: string; environment: string; title: string; severity: string; active: number }> = [];
+  for (const i of yield* store.all<{ id: string; app: string; environment: string; title: string; severity: string; active: number }>(
+    `SELECT id, app, environment, title, severity, active FROM incidents WHERE first_seq <= ${through} ORDER BY severity, first_seq`,
+  )) {
+    const last = (kinds: string, cmp: string) => store.get<{ kind: string; data: string }>(`SELECT kind, data FROM events WHERE subject = ? AND kind IN (${kinds}) AND seq ${cmp} ${through} ORDER BY seq DESC LIMIT 1`, i.id);
+    const way = yield* last("'action','returned'", "<=");
+    if (way?.kind === "action" && (JSON.parse(way.data) as { way: unknown }).way) continue;
+    const quiet = yield* last("'quieted','returned'", "<=");
+    if (quiet ? quiet.kind === "returned" : i.active === 1 || !!(yield* last("'quieted'", ">"))) open.push(i);
+  }
+  const earliest = (yield* store.get<{ s: number | null }>("SELECT min(seq) AS s FROM events"))?.s ?? null;
   const title = (id: string) => store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", id);
   // The evidence a decision rests on: the handles cited by the readings that agree with the verdict.
-  const cited = (findings: string[]) => findings.length
-    ? store.all<{ handle: string }>(`SELECT DISTINCT handle FROM citations WHERE finding IN (${findings.map(() => "?").join(",")}) ORDER BY handle`, ...findings).map((c) => c.handle)
-    : [];
+  const cited = (findings: string[]) =>
+    findings.length
+      ? Effect.map(store.all<{ handle: string }>(`SELECT DISTINCT handle FROM citations WHERE finding IN (${findings.map(() => "?").join(",")}) ORDER BY handle`, ...findings), (rows) => rows.map((c) => c.handle))
+      : Effect.succeed([] as string[]);
 
   const changed: string[] = [];
   for (const p of places) {
@@ -52,15 +59,15 @@ export function brief(store: Store, config: Config, audience: string, after = 0,
   }
   for (const d of deploys) changed.push(team ? `${d.app} ${d.environment} received a new release.` : `${d.app} ${d.environment}: deployed ${d.revision.slice(0, 12)}.`);
   for (const r of returned) {
-    const t = title(r.subject), data = JSON.parse(r.data) as { reason: string };
+    const t = yield* title(r.subject), data = JSON.parse(r.data) as { reason: string };
     if (t) changed.push(team ? `A known ${t.app} ${t.environment} problem came back.` : `${t.app} ${t.environment}: «${t.title}» came back: ${data.reason}`);
   }
   for (const d of decided) {
-    const t = title(d.subject), r = (JSON.parse(d.data) as { result: { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null; readings?: Array<{ verdict: string | null; findingId: string | null }> } }).result;
+    const t = yield* title(d.subject), r = (JSON.parse(d.data) as { result: { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null; readings?: Array<{ verdict: string | null; findingId: string | null }> } }).result;
     if (!t) continue;
     const votes = `${r.counts.real ?? 0} of ${r.planned} said real`;
     const overturned = (r.counts.real ?? 0) > r.planned / 2 && r.challenge?.outcome === "disproved";
-    const handles = cited((r.readings ?? []).filter((x) => x.verdict === r.verdict && x.findingId).map((x) => x.findingId!));
+    const handles = yield* cited((r.readings ?? []).filter((x) => x.verdict === r.verdict && x.findingId).map((x) => x.findingId!));
     changed.push(team
       ? `An investigation of a ${t.app} ${t.environment} problem concluded: ${r.verdict === "real" ? "it is real" : r.verdict === "not_real" ? "it is not a real problem" : "it could not decide"}${overturned ? " (most investigators said real, but a challenger disproved that, so the majority was overturned)" : r.counts.real && r.counts.real < r.planned ? " (the investigators disagreed)" : ""}.`
       : `${t.app} ${t.environment}: «${t.title}» investigated: ${r.verdict.replace("_", " ")} (${votes}${r.challenge ? `, challenger ${r.challenge.outcome ?? "did not file"}` : ""}${overturned ? "; majority overturned" : ""})${handles.length ? `; evidence ${handles.join(", ")}` : ""}.`);
@@ -97,4 +104,4 @@ export function brief(store: Store, config: Config, audience: string, after = 0,
     section("Next check", [...new Set(next)], "None recorded."),
   ].join("\n\n");
   return { audience, afterSeq: after, throughSeq: through, text };
-}
+});

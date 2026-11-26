@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -23,35 +23,9 @@ jobs:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm test
       - run: pnpm run build:web
-
-  e2e:
-    # The service and the plugin against a real, isolated OpenCode server with a fake model and kubectl.
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      OPENCODE_VERSION: 2.4.1
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Fetch OpenCode
-        run: |
-          mkdir -p "$RUNNER_TEMP/opencode"
-          cd "$RUNNER_TEMP/opencode"
-          npm pack "@opencode/cli-linux-x64@${OPENCODE_VERSION}"
-          tar xzf opencode-cli-linux-x64-*.tgz
-          echo "OPENCODE_BIN=$RUNNER_TEMP/opencode/package/bin/opencode" >> "$GITHUB_ENV"
-      - run: pnpm run e2e
+      - run: pnpm run check
+      - run: pnpm run accept

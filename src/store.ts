@@ -414,6 +414,17 @@ export class Permit {
   }
 }
 
+/** The innermost message of an error from SQLite, for diagnostics. */
+const reason = (error: unknown): string => {
+  let e: unknown = error;
+  for (let depth = 0; depth < 5 && Predicate.isObject(e) && "cause" in e && (e as { cause?: unknown }).cause !== undefined; depth++) e = (e as { cause: unknown }).cause;
+  return e instanceof Error ? e.message : String(e);
+};
+
+/** A SQL failure is a defect; it dies with SQLite's own words (a constraint, a trigger), the SqlError as its cause. */
+const orDieSql = <A, R>(effect: Effect.Effect<A, SqlError.SqlError, R>): Effect.Effect<A, never, R> =>
+  Effect.catch(effect, (e) => Effect.die(new Error(reason(e), { cause: e })));
+
 /** A statement's outcome: rows changed and the last row inserted. */
 export interface Changed {
   readonly changes: number;
@@ -443,8 +454,7 @@ export class Writer {
   }
   run(query: string, ...params: ReadonlyArray<Param>): Effect.Effect<Changed> {
     return this.#open.pipe(
-      Effect.flatMap((sql) => Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw)),
-      Effect.orDie,
+      Effect.flatMap((sql) => orDieSql(Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw))),
       Effect.map(changed),
       Effect.tap(() => Effect.sync(tick)),
     );
@@ -505,13 +515,6 @@ export interface StoreShape {
   readonly expire: (now: number) => Effect.Effect<number>;
   readonly retain: (now: number, over: Effect.Effect<boolean>, keepEvents?: number) => Effect.Effect<void>;
 }
-
-/** The innermost message of an error from SQLite, for diagnostics. */
-const reason = (error: unknown): string => {
-  let e: unknown = error;
-  for (let depth = 0; depth < 5 && Predicate.isObject(e) && "cause" in e && (e as { cause?: unknown }).cause !== undefined; depth++) e = (e as { cause: unknown }).cause;
-  return e instanceof Error ? e.message : String(e);
-};
 
 /**
  * Takes ownership of the data directory's database, or fails with Busy. Exclusive locking, WAL and a committed write
@@ -580,7 +583,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
   let guard: Effect.Effect<void, Full> | null = null;
 
   const all = <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>): Effect.Effect<T[]> =>
-    Effect.suspend(() => sql.unsafe<Record<string, unknown>>(query, params)).pipe(Effect.orDie, Effect.map((rows) => rows as unknown as T[]));
+    orDieSql(Effect.suspend(() => sql.unsafe<Record<string, unknown>>(query, params))).pipe(Effect.map((rows) => rows as unknown as T[]));
   const get = <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>): Effect.Effect<T | undefined> =>
     Effect.map(all<T>(query, ...params), (rows) => rows[0]);
   const pragma = (name: string) => Effect.map(get<Record<string, number>>(`PRAGMA ${name}`), (row) => Object.values(row ?? {})[0] ?? 0);
@@ -606,7 +609,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         )
         .pipe(
           // A failed COMMIT (a deferred reference) is a defect, like any broken constraint; the change is undone whole.
-          Effect.catchIf(SqlError.isSqlError, (e) => Effect.die(e)),
+          Effect.catchIf(SqlError.isSqlError, (e) => Effect.die(new Error(reason(e), { cause: e }))),
           Effect.ensuring(Effect.sync(() => writer.end())),
         ) as Effect.Effect<A, E, R>;
     });

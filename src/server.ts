@@ -1,338 +1,355 @@
 /**
- * The service: one process that owns the database, runs the scheduler, and answers on IPv4 loopback.
+ * The service: one process that owns the database, runs the scheduler, and answers on IPv4 loopback, built from
+ * Effect's HTTP server (`HttpRouter` on `NodeHttpServer`).
  *
  * Routes: GET / and the page's files from web/; GET /v2/status, GET /v2/changes (server-sent events: a snapshot, then
  * changes, and a heartbeat every five seconds that needs no request), GET /v2/inbox, /v2/items/:id, /v2/search,
  * /v2/focus; POST /v2/items/:id/action, /v2/ask, /v2/backup, /v2/doctor, /v2/trial, and POST /mcp (Streamable HTTP
- * MCP, JSON replies). Requests must come to a loopback host name, and from the same origin if they name one.
+ * MCP, from `src/mcp.ts`). Requests must come to a loopback host name, and from the same origin if they name one.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
+import { Cause, Effect, FileSystem, Layer, Option, Path, Predicate, Schedule, Schema, Stream } from "effect";
+import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { createServer } from "node:http";
 import { Socket } from "node:net";
-import { createInterface } from "node:readline";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
-import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, ask, basisOf, deadlines, detail, focus, HttpError, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
 import { Agents } from "./agents.ts";
 import { brief } from "./brief.ts";
-import { connect } from "./opencode.ts";
-import type { Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { Collector } from "./collect.ts";
+import { AppConfig } from "./config.ts";
+import { freshen } from "./demo.ts";
 import { doctor } from "./doctor.ts";
-import { secret } from "./exec.ts";
+import { ApiError, apiError, type Full } from "./errors.ts";
+import { Fixes } from "./fixes.ts";
+import { act, ask, basisOf, deadlines, detail, focus, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
+import { McpRoutes } from "./mcp.ts";
+import { compare, comparisons, forecasts } from "./outlook.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
-import { compare, comparisons, forecasts } from "./outlook.ts";
-import { Fixes } from "./fixes.ts";
-import { Full, trace, type Store } from "./store.ts";
-import { Refusal, Tools } from "./tools.ts";
-import { parseJson } from "./parse.ts";
+import { Store, trace } from "./store.ts";
+import { Tools } from "./tools.ts";
 import { emptyFolder, reconcile, Trial } from "./trial.ts";
 
-export interface Service {
-  readonly url: string;
-  readonly close: () => Promise<void>;
-}
-
 const HEARTBEAT_MS = 5_000;
+const MAX_BODY = 1_000_000;
 
-/** How a POST may change state; the router dispatches on exactly these three. */
-type Guard = { keyed: (m: string[]) => Plan<any>; code?: number } | { fenced: (m: string[], basis: number | null) => unknown } | { command: (m: string[]) => unknown };
-function backup(store: Store, body: Record<string, unknown>) {
-  if (typeof body.file !== "string") throw new HttpError(400, "file is required");
-  try {
-    return store.backup(body.file);
-  } catch (e) {
-    throw new HttpError(409, errorText(e));
-  }
-}
+/** A refusal as the API states it: `{ error: { code, message } }` with the status. */
+const refusal = (status: number, code: string, message: string, headers: Record<string, string> = {}) =>
+  HttpServerResponse.jsonUnsafe({ error: { code, message } }, { status, headers });
+const CODES: Record<number, string> = { 404: "not_found", 409: "conflict", 503: "unavailable" };
 
-export async function serve(store: Store, config: Config, options: { scheduler: boolean; collect: boolean; log: (line: string) => void; tick?: () => void }): Promise<Service> {
-  const collector = new Collector(store, config, config.dataDir);
-  const tools = new Tools(store);
-  const empty = emptyFolder(config.dataDir);
-  const trial = new Trial(store, tools, config, empty);
-  const token = config.mcpToken ? await secret(config.mcpToken) : null;
-  const current = () => snapshot(store, config, collector, true);
-  /** The state after a decision: taken once the decision is written, so it includes it. */
-  const decided = (action: { seq: number | null }) => ({ ...current(), action });
-  const agents = new Agents(store, tools, config, empty, options.log);
-  const fixes = new Fixes(store, tools, config, empty, options.log);
-  // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
-  const itemOf = (id: string) => {
-    const d = detail(store, config, id);
-    return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: fixes.forItem(id), comparison: comparisons(store, config).find((c) => c.incident === id) ?? null };
-  };
-  // The owner's tools in an ordinary OpenCode session call exactly what the page calls.
-  tools.owner = {
-    exists: async (sessionId) => Boolean(await connect(config.opencode)?.exists(sessionId)),
-    inbox: () => inbox(store),
-    get: (id) => itemOf(id),
-    search: (text) => search(store, config, text),
-    act: (id, body) => decided(act(store, config, id, body, basisOf(body))),
-  };
+/** Every handler's outcome as a response: a value as JSON, a known refusal with its status, a defect as 500. */
+const respond = <A, R>(work: Effect.Effect<A, ApiError | Full, R>, status = 200) =>
+  work.pipe(
+    Effect.map((value) => HttpServerResponse.jsonUnsafe(value, { status })),
+    Effect.catchTags({
+      ApiError: (e) => Effect.succeed(refusal(e.status, CODES[e.status] ?? "bad_request", errorText(e))),
+      Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),
+    }),
+    Effect.catchDefect((defect) => Effect.as(Effect.logError(`http: ${errorText(defect)}`), HttpServerResponse.empty({ status: 500 }))),
+  );
 
-  /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
-  rebuild(store);
-  const pass = async () => {
-    await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
-    if (options.collect) await collector.pass();
-    try {
-      if (options.collect) compare(store, config);
-      store.expire(clock.now());
-      deadlines(store);
-      if (options.collect) agents.tick(); // the demo contacts nothing
-      if (options.collect) fixes.tick();
-      options.tick?.();
-    } catch (e) {
-      if (!(e instanceof Full)) throw e; // paused for disk: deadlines wait for room like every write
-    }
-  };
+/** The JSON body of a request, at most 1 MB; a refusal when it is larger or not JSON. */
+const body = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const length = Number(request.headers["content-length"] ?? 0);
+  if (length > MAX_BODY) return yield* apiError(413, "request too large");
+  const text = yield* request.text.pipe(Effect.orElseSucceed(() => ""));
+  if (text.length > MAX_BODY) return yield* apiError(413, "request too large");
+  if (!text) return {} as Record<string, unknown>;
+  const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(text).pipe(Effect.mapError(() => apiError(400, "the body is not JSON")));
+  return (Predicate.isObject(value) && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+});
 
-  // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.
-  const streams = new Set<ServerResponse>();
-  const send = (res: ServerResponse, event: string, data: unknown, id?: number) =>
-    res.write(`${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  let changePending = false;
-  const offCommit = store.onCommit(() => {
-    if (changePending || streams.size === 0) return;
-    changePending = true;
-    setImmediate(() => {
-      changePending = false;
-      const s = current();
-      for (const res of streams) send(res, "change", s, s.seq);
-    });
-  });
-  let lastBeat = clock.mono();
-  const beat = setInterval(() => {
-    if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
-    if (clock.mono() - lastBeat < HEARTBEAT_MS) return;
-    lastBeat = clock.mono();
-    for (const res of streams) send(res, "heartbeat", { seq: store.seq(), atMs: clock.now() });
-  }, 200);
-
-  const sessions = new Set<string>();
-  const handle = async (req: IncomingMessage, res: ServerResponse) => {
-    const reply = (code: number, body: unknown, headers: Record<string, string> = {}) => {
-      res.writeHead(code, { "content-type": "application/json", ...headers });
-      res.end(JSON.stringify(body));
-    };
-    const error = (code: number, kind: string, message: string) => reply(code, { error: { code: kind, message } });
-    const host = req.headers.host ?? "";
-    if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return error(403, "forbidden", "Overwatch answers on loopback only");
-    if (req.headers.origin && req.headers.origin !== `http://${host}`) return error(403, "forbidden", "cross-origin requests are refused");
-    const address = new URL(req.url ?? "/", "http://localhost");
-    const path = address.pathname;
-    let raw = "";
-    for await (const chunk of req) {
-      raw += chunk;
-      if (raw.length > 1_000_000) return error(413, "too_large", "request too large");
-    }
-    const body = (raw ? parseJson(raw) : {}) as Record<string, unknown>;
-    if (body === undefined) return error(400, "bad_request", "the body is not JSON");
-    if (req.method === "GET" && path === "/v2/status") return reply(200, current());
-    if (req.method === "GET" && !path.startsWith("/v2/") && path !== "/mcp") return page(path, res);
-    try {
-      // Every POST is declared here, and only here, with its guard: `keyed` (the router takes the request key and wraps
-      // the change in its receipt), `fenced` (the router hands over the basisSeq the owner was shown; a decision made
-      // since refuses it) or `command` (changes no item: backup, doctor, trial, and the MCP transport, whose tools are
-      // bound to their session's run). Anything else is refused before it runs.
-      const WRITES: Array<[RegExp, Guard]> = [
-        [/^\/v2\/ask$/, { keyed: () => ask(store, config, body) }],
-        [/^\/v2\/open$/, { keyed: () => agents.open(String(body.subject ?? "")) }],
-        [/^\/v2\/items\/([^/]+)\/investigate$/, { keyed: ([id]) => agents.investigate(id!), code: 202 }],
-        [/^\/v2\/items\/([^/]+)\/corrections$/, { keyed: ([id]) => agents.correct(id!, body) }],
-        [/^\/v2\/items\/([^/]+)\/fix$/, { keyed: ([id]) => fixes.request(id!, body), code: 202 }],
-        [/^\/v2\/fixes\/([^/]+)\/publish$/, { keyed: ([id]) => fixes.publication(id!, basisOf(body)) }],
-        [/^\/v2\/notifications\/([^/]+)\/retry$/, { keyed: ([id]) => agents.retry(id!) }],
-        [/^\/v2\/items\/([^/]+)\/action$/, { fenced: ([id], basis) => decided(act(store, config, id!, body, basis)) }],
-        [/^\/v2\/backup$/, { command: () => backup(store, body) }],
-        [/^\/v2\/doctor$/, { command: () => doctor(config, store, empty) }],
-        [/^\/v2\/trial$/, { command: async () => {
-          const report = await trial.run().catch((e) => { throw new HttpError(503, errorText(e)); });
-          return body.fixes === true ? { ...report, fixGate: await fixes.calibrate(report.automation) } : report;
-        } }],
-        [/^\/mcp$/, { command: () => mcp(req, res, body, reply) }],
-      ];
-      for (const [route, guard] of WRITES) {
-        const m = req.method === "POST" ? route.exec(path)?.slice(1).map(decodeURIComponent) : null;
-        if (!m) continue;
-        if ("keyed" in guard) return reply(guard.code ?? 200, await keyed(store, req.headers["idempotency-key"] as string | undefined, guard.keyed(m)));
-        if ("fenced" in guard) return reply(200, guard.fenced(m, basisOf(body)));
-        if ("command" in guard) {
-          const out = await guard.command(m);
-          return out === undefined ? undefined : reply(200, out);
-        }
-        throw new Error(`POST ${path} is declared without a guard: it must be keyed, fenced or a command`);
-      }
-      if (req.method === "GET" && path === "/v2/inbox") return reply(200, inbox(store));
-      if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? "", address.searchParams.get("cursor")));
-      if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
-      const item = /^\/v2\/items\/([^/]+)$/.exec(path);
-      if (item && req.method === "GET") return reply(200, itemOf(decodeURIComponent(item[1]!)));
-      const fix = /^\/v2\/fixes\/([^/]+)$/.exec(path);
-      if (fix && req.method === "GET") return reply(200, fixes.view(decodeURIComponent(fix[1]!)));
-      const jobRoute = /^\/v2\/jobs\/([^/]+)$/.exec(path);
-      if (jobRoute && req.method === "GET") return reply(200, agents.job(decodeURIComponent(jobRoute[1]!)));
-      if (req.method === "GET" && path === "/v2/notifications") return reply(200, agents.notifications());
-      if (req.method === "GET" && path === "/v2/outlook") return reply(200, { forecasts: forecasts(store, config), comparisons: comparisons(store, config) });
-      if (req.method === "GET" && path === "/v2/brief") {
-        const q = address.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
-        return reply(200, brief(store, config, q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")));
-      }
-    } catch (e) {
-      if (e instanceof HttpError) return error(e.status, ({ 404: "not_found", 409: "conflict", 503: "unavailable" } as Record<number, string>)[e.status] ?? "bad_request", errorText(e));
-      if (e instanceof Full) return error(503, "paused", "collection is paused for disk space; see pausedFix in status");
-      throw e;
-    }
-    if (req.method === "GET" && path === "/v2/changes") {
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
-      const s = current();
-      send(res, "snapshot", s, s.seq);
-      streams.add(res);
-      req.on("close", () => streams.delete(res));
-      return;
-    }
-    // No server-initiated stream: Streamable HTTP clients are told so with 405, and carry on.
-    if (path === "/mcp") return reply(405, { error: { code: "method_not_allowed", message: "POST only" } }, { allow: "POST" });
-    return error(404, "not_found", `no route ${req.method} ${path}`);
-  };
-
-  /** MCP over Streamable HTTP with JSON replies. The bearer credential and the OpenCode session ID decide access. */
-  const mcp = async (req: IncomingMessage, res: ServerResponse, body: Record<string, unknown>, reply: (code: number, body: unknown, headers?: Record<string, string>) => void) => {
-    const given = Buffer.from(String(req.headers.authorization ?? ""));
-    const expected = Buffer.from(token ? `Bearer ${token}` : "");
-    if (!token || given.length !== expected.length || !timingSafeEqual(given, expected)) return reply(401, { error: { code: "unauthorized", message: "a valid bearer credential is required" } });
-    const id = body.id, method = String(body.method ?? "");
-    if (id === undefined || id === null) {
-      res.writeHead(202);
-      return res.end();
-    }
-    const ok = (result: unknown, headers: Record<string, string> = {}) => reply(200, { jsonrpc: "2.0", id, result }, headers);
-    if (method === "initialize") {
-      const session = randomBytes(16).toString("hex");
-      sessions.add(session);
-      const requested = String((body.params as { protocolVersion?: string } | undefined)?.protocolVersion ?? "2025-03-26");
-      return ok({ protocolVersion: requested >= "2025-03-26" ? requested : "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "ow", version: "2" } }, { "mcp-session-id": session });
-    }
-    if (method === "ping") return ok({});
-    if (method === "tools/list") return ok({ tools: tools.list() });
-    if (method === "tools/call") {
-      const params = (body.params ?? {}) as { name?: string; arguments?: unknown; _meta?: Record<string, unknown> };
-      try {
-        const value = await tools.call(params._meta?.["ai.opencode/sessionID"], String(params.name ?? ""), params.arguments ?? {});
-        return ok({ content: [{ type: "text", text: JSON.stringify(value) }] });
-      } catch (e) {
-        const known = e instanceof Refusal || e instanceof HttpError;
-        const message = known ? errorText(e, 30_000) : "the tool failed";
-        if (!known) options.log(`tool ${params.name}: ${errorText(e)}`);
-        return ok({ content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true });
-      }
-    }
-    return reply(200, { jsonrpc: "2.0", id, error: { code: -32601, message: `unknown method ${method}` } });
-  };
-
-  const server = createServer((req, res) => {
-    handle(req, res).catch((e) => {
-      options.log(`http: ${errorText(e)}`);
-      if (!res.headersSent) res.writeHead(500);
-      res.end();
-    });
-  });
-  if (options.collect) await agents.start(1000); // notices left waiting go out first ("retried at start")
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(config.port, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  const url = `http://127.0.0.1:${typeof address === "object" && address ? address.port : config.port}`;
-  writeFileSync(join(config.dataDir, "service.json"), JSON.stringify({ url, pid: process.pid, version: 2 }), { mode: 0o600 });
-
-  // ---- scheduling: on its own in production; under the test descriptor, only when told.
-  const timers: NodeJS.Timeout[] = [];
-  let control: Socket | null = null;
-  if (process.env.OW_TEST_FD) {
-    control = new Socket({ fd: Number(process.env.OW_TEST_FD), readable: true, writable: true });
-    control.on("error", () => undefined);
-    createInterface({ input: control }).on("line", (line) => {
-      void (async () => {
-        const message = parseJson(line) as Record<string, unknown> | undefined;
-        if (!message) return;
-        const answer = (result: Record<string, unknown>) => control?.write(JSON.stringify({ id: message.id, ...result }) + "\n");
-        try {
-          if (message.op === "clock") clock.set(Number(message.nowMs), Number(message.monoMs));
-          else if (message.op === "wake") collector.wake();
-          else if (message.op === "space") collector.setSpace({ freeBytes: Number(message.freeBytes), dbBytes: Number(message.dbBytes) });
-          else if (message.op === "trace") {
-            trace.count = 0;
-            trace.killAfter = message.killAfter === null || message.killAfter === undefined ? null : Number(message.killAfter);
-          } else if (message.op === "poll") {
-            await pass();
-            return answer({ writes: trace.count });
-          }
-          answer({ ok: true });
-        } catch (e) {
-          answer({ error: errorText(e) });
-        }
-      })();
-    });
-  } else if (options.scheduler) {
-    let lastMono = clock.mono();
-    let network = networkKey();
-    let busy = false;
-    timers.push(
-      setInterval(() => {
-        // Waking from sleep (the clock jumped) or a network change probes failing sources after a few seconds.
-        const jumped = clock.mono() - lastMono > 30_000;
-        lastMono = clock.mono();
-        const key = networkKey();
-        if (jumped || key !== network) collector.wake();
-        network = key;
-        if (busy) return;
-        busy = true;
-        pass()
-          .catch((e) => options.log(`collect: ${errorText(e)}`))
-          .finally(() => (busy = false));
-      }, 1_000),
-    );
-  }
-
-  return {
-    url,
-    close: async () => {
-      for (const t of timers) clearInterval(t);
-      clearInterval(beat);
-      offCommit();
-      for (const res of streams) res.end();
-      control?.destroy();
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(join(config.dataDir, "service.json"), { force: true });
-    },
-  };
-}
+/** How a POST may change state. Every POST is declared in WRITES with exactly one of these. */
+type Guard<R> =
+  | { readonly keyed: (params: Params, body: Record<string, unknown>) => Effect.Effect<Plan<any, any, any>, ApiError, R>; readonly code?: number }
+  | { readonly fenced: (params: Params, body: Record<string, unknown>, basis: number | null) => Effect.Effect<unknown, ApiError | Full, R> }
+  | { readonly command: (params: Params, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full, R> };
+type Params = Readonly<Record<string, string | undefined>>;
 
 /** The page: plain files from web/, the entry at /. Nothing outside that folder is served. */
 const WEB = fileURLToPath(new URL("../web/", import.meta.url));
-const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
-function page(path: string, res: ServerResponse) {
-  const name = path === "/" ? "index.html" : path.slice(1);
-  const file = join(WEB, name);
-  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name) || !TYPES[extname(name)] || !existsSync(file) || !statSync(file).isFile()) {
-    res.writeHead(404, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ error: { code: "not_found", message: `no page file ${path}` } }));
-  }
-  res.writeHead(200, { "content-type": TYPES[extname(name)]!, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
-  res.end(readFileSync(file));
-}
+const TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+const page = (pathname: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const name = pathname === "/" ? "index.html" : pathname.slice(1);
+    const type = TYPES[path.extname(name)];
+    const file = path.join(WEB, name);
+    const isFile = yield* fs.stat(file).pipe(
+      Effect.map((info) => info.type === "File"),
+      Effect.orElseSucceed(() => false),
+    );
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name) || !type || !isFile) return refusal(404, "not_found", `no page file ${pathname}`);
+    const bytes = yield* fs.readFile(file).pipe(Effect.orDie);
+    return HttpServerResponse.uint8Array(bytes, { contentType: type, headers: { "cache-control": "no-cache", "x-content-type-options": "nosniff" } });
+  });
 
-function networkKey(): string {
+/** The addresses of this machine's network interfaces: a change wakes failing sources. */
+const networkKey = () => {
   try {
     const { networkInterfaces } = process.getBuiltinModule("node:os");
-    return JSON.stringify(Object.values(networkInterfaces()).flat().filter((a) => a && !a.internal).map((a) => a!.address).sort());
+    return JSON.stringify(
+      Object.values(networkInterfaces())
+        .flat()
+        .filter((a) => a && !a.internal)
+        .map((a) => a!.address)
+        .sort(),
+    );
   } catch {
     return "";
   }
-}
+};
+
+/**
+ * Serves until interrupted. `demo` seeds nothing here (the caller did) but contacts nothing: no collection, agents or
+ * fixes. `ready` is told the address once the server listens and the discovery record is written.
+ */
+export const serve = (options: { readonly demo: boolean; readonly ready: (url: string) => Effect.Effect<void> }) =>
+  Effect.gen(function* () {
+    const config = yield* AppConfig;
+    const collect = !options.demo;
+
+    const Routes = HttpRouter.use(
+      Effect.fn(function* (router) {
+        const store = yield* Store;
+        const collector = yield* Collector;
+        const agents = yield* Agents;
+        const fixes = yield* Fixes;
+        const trial = yield* Trial;
+        const empty = yield* emptyFolder(config.dataDir);
+        const current = snapshot(collector.view, true);
+        /** The state after a decision: taken once the decision is written, so it includes it. */
+        const decided = (action: { seq: number | null }) => Effect.map(current, (s) => ({ ...s, action }));
+        // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
+        const itemOf = (id: string) =>
+          Effect.gen(function* () {
+            const d = yield* detail(id);
+            return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null };
+          });
+
+        // ---- reads
+        const get = (path: HttpRouter.PathInput, handler: (request: HttpServerRequest.HttpServerRequest, url: URL, params: Params) => Effect.Effect<unknown, ApiError | Full, any>) =>
+          router.add("GET", path, (request) =>
+            Effect.flatMap(HttpRouter.params, (params) => respond(handler(request, new URL(request.url, "http://localhost"), params))),
+          );
+        yield* get("/v2/status", () => current);
+        yield* get("/v2/inbox", () => inbox);
+        yield* get("/v2/search", (_, url) => search(url.searchParams.get("q") ?? "", url.searchParams.get("cursor")));
+        yield* get("/v2/focus", (_, url) => focus(url.searchParams.get("subject") ?? ""));
+        yield* get("/v2/items/:id", (_, __, p) => itemOf(p.id!));
+        yield* get("/v2/fixes/:id", (_, __, p) => fixes.view(p.id!));
+        yield* get("/v2/jobs/:id", (_, __, p) => agents.job(p.id!));
+        yield* get("/v2/notifications", () => agents.notifications);
+        yield* get("/v2/outlook", () => Effect.all({ forecasts, comparisons }));
+        yield* get("/v2/brief", (_, url) => {
+          const q = url.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
+          return brief(q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq"));
+        });
+
+        // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.
+        let lastBeat = clock.mono();
+        const frame = (event: string, data: unknown, id?: number) => `${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+        const heartbeats = Stream.tick("200 millis").pipe(
+          Stream.filter(() => {
+            if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
+            if (clock.mono() - lastBeat < HEARTBEAT_MS) return false;
+            lastBeat = clock.mono();
+            return true;
+          }),
+          Stream.mapEffect(() => Effect.map(store.seq, (seq) => frame("heartbeat", { seq, atMs: clock.now() }))),
+        );
+        // Commits that arrive while a change is being prepared are coalesced into the next one.
+        const changes = store.changes.pipe(
+          Stream.chunks,
+          Stream.mapEffect(() => Effect.map(current, (s) => frame("change", s, s.seq))),
+        );
+        yield* router.add("GET", "/v2/changes", () =>
+          Effect.map(current, (s) =>
+            HttpServerResponse.stream(Stream.concat(Stream.make(frame("snapshot", s, s.seq)), Stream.merge(changes, heartbeats)).pipe(Stream.encodeText), {
+              contentType: "text/event-stream",
+              headers: { "cache-control": "no-store", connection: "keep-alive" },
+            }),
+          ),
+        );
+
+        // ---- writes. Every POST is declared here, and only here, with its guard: `keyed` (the router takes the
+        // request key and wraps the change in its receipt), `fenced` (the router hands over the basisSeq the owner was
+        // shown; a decision made since refuses it) or `command` (changes no item: backup, doctor, trial). Anything
+        // else is refused before it runs. MCP is its own route, from src/mcp.ts.
+        const WRITES: ReadonlyArray<readonly [HttpRouter.PathInput, Guard<any>]> = [
+          ["/v2/ask", { keyed: (_, b) => ask(b) }],
+          ["/v2/open", { keyed: (_, b) => agents.open(String(b.subject ?? "")) }],
+          ["/v2/items/:id/investigate", { keyed: (p) => agents.investigate(p.id!), code: 202 }],
+          ["/v2/items/:id/corrections", { keyed: (p, b) => agents.correct(p.id!, b) }],
+          ["/v2/items/:id/fix", { keyed: (p, b) => fixes.request(p.id!, b), code: 202 }],
+          ["/v2/fixes/:id/publish", { keyed: (p, b) => Effect.flatMap(basisOf(b), (basis) => fixes.publication(p.id!, basis)) }],
+          ["/v2/notifications/:id/retry", { keyed: (p) => agents.retry(p.id!) }],
+          ["/v2/items/:id/action", { fenced: (p, b, basis) => Effect.flatMap(act(p.id!, b, basis), decided) }],
+          ["/v2/backup", { command: (_, b) => (Predicate.isString(b.file) ? store.backup(b.file).pipe(Effect.mapError((e) => apiError(409, e.message))) : apiError(400, "file is required")) }],
+          ["/v2/doctor", { command: () => doctor(store, empty) }],
+          [
+            "/v2/trial",
+            {
+              command: (_, b) =>
+                Effect.gen(function* () {
+                  const report = yield* trial.run.pipe(Effect.catchCause((cause) => Effect.fail(apiError(503, errorText(Cause.squash(cause))))));
+                  return b.fixes === true ? { ...report, fixGate: yield* fixes.calibrate(report.automation) } : report;
+                }),
+            },
+          ],
+        ];
+        for (const [path, guard] of WRITES) {
+          yield* router.add("POST", path, (request) =>
+            Effect.gen(function* () {
+              const params = yield* HttpRouter.params;
+              const b = yield* body;
+              if ("keyed" in guard) {
+                const key = request.headers["idempotency-key"];
+                return HttpServerResponse.jsonUnsafe(yield* keyed(key, yield* guard.keyed(params, b)), { status: guard.code ?? 200 });
+              }
+              if ("fenced" in guard) return HttpServerResponse.jsonUnsafe(yield* guard.fenced(params, b, yield* basisOf(b)));
+              if ("command" in guard) return HttpServerResponse.jsonUnsafe(yield* guard.command(params, b));
+              return yield* Effect.die(new Error(`POST ${path} is declared without a guard: it must be keyed, fenced or a command`));
+            }).pipe(
+              Effect.catchTags({
+                ApiError: (e) => Effect.succeed(refusal(e.status, CODES[e.status] ?? "bad_request", errorText(e))),
+                Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),
+              }),
+              Effect.catchDefect((defect) => Effect.as(Effect.logError(`http: ${errorText(defect)}`), HttpServerResponse.empty({ status: 500 }))),
+            ),
+          );
+        }
+
+        // ---- the page, and everything else.
+        yield* router.add("GET", "/*", (request) => {
+          const pathname = new URL(request.url, "http://localhost").pathname;
+          return pathname.startsWith("/v2/") || pathname === "/mcp" ? Effect.succeed(refusal(404, "not_found", `no route GET ${pathname}`)) : page(pathname);
+        });
+        yield* router.add("*", "/*", (request) => Effect.succeed(refusal(404, "not_found", `no route ${request.method} ${new URL(request.url, "http://localhost").pathname}`)));
+      }),
+    );
+
+    /** Requests must come to a loopback host name, and from the same origin if they name one. */
+    const Loopback = HttpRouter.middleware(
+      (app) =>
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const host = request.headers.host ?? "";
+          if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return refusal(403, "forbidden", "Overwatch answers on loopback only");
+          if (request.headers.origin && request.headers.origin !== `http://${host}`) return refusal(403, "forbidden", "cross-origin requests are refused");
+          return yield* app;
+        }),
+      { global: true },
+    );
+
+    /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
+    const Scheduler = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const store = yield* Store;
+        const collector = yield* Collector;
+        const agents = yield* Agents;
+        const fixes = yield* Fixes;
+        const trial = yield* Trial;
+        yield* rebuild;
+        const pass = Effect.gen(function* () {
+          yield* reconcile(trial.driving).pipe(Effect.catchCause((cause) => Effect.logError(`reconcile: ${errorText(Cause.squash(cause))}`)));
+          if (collect) yield* collector.pass;
+          yield* Effect.gen(function* () {
+            if (collect) yield* compare;
+            yield* store.expire(clock.now());
+            yield* deadlines;
+            if (collect) yield* agents.tick; // the demo contacts nothing
+            if (collect) yield* fixes.tick;
+            if (options.demo) yield* freshen;
+          }).pipe(Effect.catchTag("Full", () => Effect.void)); // paused for disk: deadlines wait for room like every write
+        });
+        if (collect) yield* agents.start(1000); // notices left waiting go out first ("retried at start")
+
+        if (process.env.OW_TEST_FD) {
+          // ---- under the test descriptor, scheduling happens only when told, over the control descriptor.
+          const fd = Number(process.env.OW_TEST_FD);
+          const socket = yield* NodeSocket.fromDuplex(Effect.sync(() => new Socket({ fd, readable: true, writable: true })));
+          const { write } = yield* socket.writer;
+          const Control = Schema.Struct({ id: Schema.optional(Schema.Unknown), op: Schema.String, nowMs: Schema.optional(Schema.Number), monoMs: Schema.optional(Schema.Number), freeBytes: Schema.optional(Schema.Number), dbBytes: Schema.optional(Schema.Number), killAfter: Schema.optional(Schema.NullOr(Schema.Number)) });
+          const handle = (line: string) =>
+            Effect.gen(function* () {
+              const message = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Control))(line).pipe(Effect.option);
+              if (Option.isNone(message)) return;
+              const m = message.value;
+              const answer = (result: Record<string, unknown>) => write(JSON.stringify({ id: m.id, ...result }) + "\n").pipe(Effect.ignore);
+              const outcome = yield* Effect.exit(
+                Effect.gen(function* () {
+                  if (m.op === "clock") clock.set(Number(m.nowMs), Number(m.monoMs));
+                  else if (m.op === "wake") yield* collector.wake;
+                  else if (m.op === "space") yield* collector.setSpace({ freeBytes: Number(m.freeBytes), dbBytes: Number(m.dbBytes) });
+                  else if (m.op === "trace") {
+                    trace.count = 0;
+                    trace.killAfter = m.killAfter === null || m.killAfter === undefined ? null : Number(m.killAfter);
+                  } else if (m.op === "poll") {
+                    yield* pass;
+                    return { writes: trace.count };
+                  }
+                  return { ok: true };
+                }),
+              );
+              yield* answer(outcome._tag === "Success" ? outcome.value : { error: errorText(Cause.squash(outcome.cause)) });
+            });
+          const reader = yield* socket.reader;
+          yield* Stream.fromEffectRepeat(reader.pull).pipe(
+            Stream.flattenIterable,
+            Stream.map((chunk) => (Predicate.isString(chunk) ? chunk : new TextDecoder().decode(chunk as Uint8Array))),
+            Stream.splitLines,
+            Stream.runForEach((line) => Effect.forkDetach(handle(line))),
+            Effect.ignore,
+            Effect.forkScoped,
+          );
+        } else {
+          // ---- on its own in production: a pass every second, never two at once. Waking from sleep (the clock
+          // jumped) or a network change probes failing sources after a few seconds.
+          let lastMono = clock.mono();
+          let network = networkKey();
+          yield* Effect.gen(function* () {
+            const jumped = clock.mono() - lastMono > 30_000;
+            lastMono = clock.mono();
+            const key = networkKey();
+            if (jumped || key !== network) yield* collector.wake;
+            network = key;
+            yield* pass.pipe(Effect.catchCause((cause) => Effect.logError(`collect: ${errorText(Cause.squash(cause))}`)));
+          }).pipe(Effect.repeat(Schedule.spaced("1 second")), Effect.forkScoped);
+        }
+      }),
+    );
+
+    /** The discovery record, written once listening and removed at stop; then the caller is told the address. */
+    const Discovery = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const server = yield* HttpServer.HttpServer;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const port = server.address._tag === "UnixPathAddress" ? config.port : server.address.port;
+        const url = `http://127.0.0.1:${port}`;
+        const file = path.join(config.dataDir, "service.json");
+        yield* Effect.acquireRelease(fs.writeFileString(file, JSON.stringify({ url, pid: process.pid, version: 2 }), { mode: 0o600 }).pipe(Effect.orDie), () =>
+          fs.remove(file, { force: true }).pipe(Effect.ignore),
+        );
+        yield* options.ready(url);
+      }),
+    );
+
+    const Services = Layer.mergeAll(Collector.layer, Tools.layer, Agents.layer, Fixes.layer, Trial.layer);
+    const App = Layer.mergeAll(Routes, McpRoutes, Loopback);
+    const Listener = NodeHttpServer.layer(createServer, { port: config.port, host: "127.0.0.1", gracefulShutdownTimeout: "100 millis" });
+    const Http = Layer.mergeAll(HttpRouter.serve(App, { disableLogger: true, disableListenLog: true }), Discovery).pipe(Layer.provide(Listener));
+    return yield* Layer.launch(Layer.mergeAll(Http, Scheduler).pipe(Layer.provide(Services)));
+  });
