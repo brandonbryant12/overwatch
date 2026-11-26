@@ -74,8 +74,10 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   with `src/domain/status.ts`, the schema the service encodes with. Drafts belong to their incident and stay until a
   send is acknowledged. `test/browser.test.ts` drives the built page in headless Chrome.
 - **Loopback only.** The service binds `127.0.0.1` and refuses other host names and other origins. (`service.test.ts`)
-- **One writer per database.** The host takes `src/host/lock.ts`'s lock before opening or repairing; restore and
-  search rebuild take it too, and restore validates a staged copy before an atomic rename. (`regressions.test.ts` A4, A5)
+- **One writer per database.** The host takes `src/host/lock.ts`'s lock (`<db>.writer`; an earlier version's `<db>.lock`
+  is only consulted) before opening or repairing; restore and
+  search rebuild take it too, and restore validates a staged copy (exactly the columns, indexes and no triggers the service writes with) before an
+  atomic rename. (`regressions.test.ts` A4, A5)
 - **Reports are an outbox.** The collector saves its reports with the checkpoint in one transaction and sends them
   after; never report before the checkpoint is saved. (`regressions.test.ts` A2)
 - **Runs are strict.** requested → sent → completed | failed; only the run's own session completes it; time limits
@@ -83,7 +85,8 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
 - **Unknown is never healthy.** A metric not sampled by the last poll is `unknown`, and a missing sample breaks a run
   of samples; an environment not fully checked within three intervals is stale; a suspended one says since when. The
   page says so in words and with the unknown pattern. "Quiet" comes only from `notQuietBecause` / `allQuiet` in
-  `web/src/app.ts`; do not write another. (`regressions.test.ts` B1, B4; `defects3.test.ts` 6; `daily.test.ts`, over
+  `web/src/app.ts`; do not write another. It needs a status under 30 seconds old by the page's clock, every expected
+  reading from every source sampled within the stale window, and a skipped poll changes nothing that is known. (`regressions.test.ts` B1, B4; `defects3.test.ts` 6; `daily.test.ts`, over
   generated states)
 - **Three ways out, each meaning one thing.** Done: back if it happens again after one polling interval. Later: back at
   a time, on a change (finding, deploy), or when it gets worse; any Later comes back when worse. Never: back only on a
@@ -99,6 +102,16 @@ and the global OpenCode config. Do not commit names, paths, contexts, queries or
   (`causesOf`); everything unreachable at once is one cause. Agent work is retried once in a fresh session, then
   parked (`RunFailed.retryAs`). (`daily.test.ts` D, `domain.test.ts`)
 - **No spend tracking or caps**; only timeouts and concurrency limits.
+- **Counts come from what happened, never from what is kept to show.** A source lists every occurrence in its
+  window; a signal's count is what it lists (one per poll for an ongoing condition). Do not cap occurrences or carry a
+  separate total. (`durability.test.ts`)
+- **Identifiers from outside are input.** A caller's prompt id or command id is accepted only in the shape of an id
+  and only if redaction leaves it unchanged (`src/domain/safe.ts`, and the `/api` check in `service.ts`); incident,
+  thread, run and session ids must have the shape Overwatch derives. An id from OpenCode is mapped to one Overwatch
+  issues. Every error message written anywhere goes through `errorText`; every log line is redacted. (`fields.test.ts`,
+  `recovery.test.ts`)
+- **An incident decides from its own history.** A deploy is told to every incident in its environment with when it
+  was recorded; the incident alone decides whether it was deferred before. Never decide from a view. (`ordering.test.ts`)
 - **Free text is redacted where it enters** (`src/domain/redact.ts`, by name and by how random it looks): the
   aggregates redact prompts, signal titles, samples and queries, findings, handoffs and reasons in `decide`, before
   their events exist; the collector redacts signals before de-duplication and the report outbox; what sessions are
