@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import { fixtureTemp } from "../temp.mjs"
+import { fixtureLease, fixtureTemp } from "../temp.mjs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, execFileSync } from "node:child_process"
@@ -225,13 +225,22 @@ export async function rig(t, { both = false, baseline = true } = {}) {
     },
   }
   const lifetime = fileURLToPath(new URL("./parent-lifetime.cjs", import.meta.url))
-  x.start = async (command = "serve", exe = BIN) => {
-    const c = spawn(exe, [command, "--config", dir("config.json"), "--json"], {
-      env: { ...env, OW_TEST_FD: "3", NODE_OPTIONS: [env.NODE_OPTIONS, "--require=" + JSON.stringify(lifetime)].filter(Boolean).join(" ") },
+  x.spawnService = (command, exe = BIN) => {
+    const child = spawn(exe, [command, "--config", dir("config.json"), "--json"], {
+      env: {
+        ...env,
+        OW_TEST_FD: "3",
+        NODE_OPTIONS: [env.NODE_OPTIONS, "--require=" + JSON.stringify(lifetime)].filter(Boolean).join(" "),
+      },
       cwd: root,
-      stdio: ["ignore", "pipe", "pipe", "pipe", "ipc"],
+      stdio: ["ignore", "pipe", "pipe", "pipe", "ipc", fixtureLease()],
     })
-    children.add(c)
+    children.add(child)
+    child.once("close", () => children.delete(child))
+    return child
+  }
+  x.start = async (command = "serve", exe = BIN) => {
+    const c = x.spawnService(command, exe)
     x.child = c
     c.stderr.on("data", (b) => logs.push(String(b)))
     const closed = once(c, "close")

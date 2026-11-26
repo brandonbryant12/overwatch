@@ -1,3 +1,4 @@
+import { fixtureLease } from "../temp.mjs"
 // Explicit native compatibility run. Only the scripted model, local bare Git and test gh receive requests.
 import test from "node:test"
 import assert from "node:assert/strict"
@@ -122,11 +123,11 @@ test("native 2.4.1 through both calibrations and published draft", { timeout: 18
           ],
         }
       fs.writeFileSync(x.dir("config/opencode/opencode.json"), JSON.stringify(cfg))
-      child = fork(new URL("./native-process.mjs", import.meta.url), [process.env.OPENCODE_BIN, "serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+      child = fork(new URL("../peer-process.mjs", import.meta.url), ["quiet", process.env.OPENCODE_BIN, "serve", "--hostname", "127.0.0.1", "--port", String(port)], {
         cwd: x.dir("tmp"),
         env: { ...x.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
         execArgv: [],
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        stdio: ["ignore", "ignore", "ignore", "ipc", fixtureLease()],
       })
       const closed = once(child, "close")
       t.after(async () => {

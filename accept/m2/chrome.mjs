@@ -1,8 +1,8 @@
 // Chrome DevTools Protocol over inherited pipes. No browser downloads or shared profile.
 import fs from "node:fs"
-import { fixtureTemp } from "../temp.mjs"
+import { fixtureLease, fixtureTemp } from "../temp.mjs"
 import path from "node:path"
-import { spawn } from "node:child_process"
+import { fork } from "node:child_process"
 import { once } from "node:events"
 import { setTimeout as delay } from "node:timers/promises"
 import assert from "node:assert/strict"
@@ -17,14 +17,15 @@ export async function browser(t, x) {
   const root = fixtureTemp("ow-m2-chrome-")
   const env = { HOME: root, TMPDIR: root, PATH: x.env.PATH, XDG_CONFIG_HOME: root, XDG_CACHE_HOME: root,
     XDG_STATE_HOME: root, XDG_DATA_HOME: root }
-  const child = spawn(binary, ["--headless=new", "--disable-gpu", "--disable-background-networking",
+  const child = fork(new URL("../peer-process.mjs", import.meta.url), ["cdp", binary, "--headless=new", "--disable-gpu", "--disable-background-networking",
     "--disable-component-update", "--disable-sync", "--disable-extensions", "--no-first-run", "--no-default-browser-check",
     "--use-mock-keychain", "--password-store=basic", "--no-proxy-server", "--disable-features=HttpsUpgrades",
     "--host-resolver-rules=EXCLUDE 127.0.0.1, EXCLUDE localhost, MAP * ~NOTFOUND", "--remote-debugging-pipe",
     "--user-data-dir=" + path.join(root, "profile"), "about:blank"], {
-    env, stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
+    env, execArgv: [], stdio: ["ignore", "ignore", "pipe", "pipe", "pipe", fixtureLease(), "ipc"],
   })
   const closed = once(child, "close")
+  const started = once(child, "message")
   let logs = "", incoming = "", id = 0, sessionId
   const pending = new Map()
   child.stderr.on("data", b => { logs = (logs + b).slice(-1000) })
@@ -50,6 +51,7 @@ export async function browser(t, x) {
   })
   t.after(async () => { child.kill("SIGTERM"); const tm = setTimeout(() => child.kill("SIGKILL"), 2000)
     try { await closed } finally { clearTimeout(tm); fs.rmSync(root, { recursive: true, force: true, maxRetries: 4 }) } })
+  const [pid] = await Promise.race([started, closed.then(() => { throw Error("Chrome exited before startup: " + logs) })])
   const { targetId } = await cmd("Target.createTarget", { url: "about:blank" })
   sessionId = (await cmd("Target.attachToTarget", { targetId, flatten: true })).sessionId
   const evaluate = async expression => {
@@ -77,5 +79,5 @@ export async function browser(t, x) {
     await cmd("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", ...fields, text })
     await cmd("Input.dispatchKeyEvent", { type: "keyUp", ...fields })
   }
-  return { cmd, evaluate, visit, wait, key, type: text => cmd("Input.insertText", { text }) }
+  return { pid, cmd, evaluate, visit, wait, key, type: text => cmd("Input.insertText", { text }) }
 }

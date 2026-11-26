@@ -1,19 +1,14 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import { spawn } from "node:child_process"
 import { once } from "node:events"
 import { DatabaseSync } from "node:sqlite"
 import { rig, BIN, T, iso, stamp, total } from "./rig.mjs"
 
 test("simultaneous first startup has exactly one ready owner", async t => {
   const x = await rig(t)
-  const children = [BIN, process.env.M1_OTHER_BIN || BIN].map(bin =>
-    spawn(bin, ["serve", "--json", "--config", x.dir("config.json")], {
-      env: { ...x.env, OW_TEST_FD: "3" }, stdio: ["ignore", "pipe", "pipe", "pipe"],
-    }))
+  const children = [BIN, process.env.M1_OTHER_BIN || BIN].map(bin => x.spawnService("serve", bin))
   const ends = children.map(c => once(c, "close"))
-  t.after(async () => { children.forEach(c => c.kill("SIGKILL")); await Promise.all(ends) })
   for (const c of children) c.stdio[3].on("error", () => {})
   const results = await Promise.all(children.map((c, i) => Promise.race([
     ends[i].then(([code]) => ({ code })),
