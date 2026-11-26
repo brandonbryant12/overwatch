@@ -26,15 +26,29 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   An error's message goes through `errorText`. Identifiers from outside are hashed into keys, never stored as given.
 - **Counting is a key.** An occurrence's key is made from the source's own data; the slice inserts keys "if absent"
   and counts only what was inserted, in the same transaction as the checkpoint. Never derive a count from a list.
-  A log read counts only if the container's identity is the same in the pod list after it as before; a read that
-  shows loss (a stored key in its window it no longer returns) is a `gap`, never a recount.
-- **Space comes back in bounded steps.** The file uses incremental auto-vacuum from creation; `Store.reclaim` frees
-  at most 16 MiB per scheduler pass and truncates the WAL. Never run a full `VACUUM` while serving: it copies the
-  whole file and holds the only connection until done.
+  Only a record whose key is not yet stored is charged against the slice limit. A log read counts only if the
+  container's identity is the same in the pod list after it as before; a read that shows loss (a stored key in its
+  window it no longer returns) is a `gap`, never a recount, and the occurrence's recorded incident becomes a lower
+  bound in the same transaction.
+- **One window type.** Every window of event time is a half-open `Span` (`src/collect.ts`): slices, overlap, the
+  14-day floor and saturated intervals. Never compare an end with `<=`.
+- **Outside values go through `src/parse.ts`.** `num`, `count`, `time` return null for anything not clearly that
+  kind; null is "not measured" and must stay distinguishable from a measured value all the way to health.
+- **Space is checked before admission.** `Collector.room` checks the free-space floor and the database budget before
+  every commit, and after `Store.retain` has made room in the declared order (never removing cited evidence).
+  `Store.reclaim` frees at most `LIMITS.reclaimBytes` per pass for any page size and truncates the WAL. Never run a
+  full `VACUUM` while serving: it copies the whole file and holds the only connection until done.
+- **Schema changes within version 1 are additive.** A new column has a default and an entry in `ADDED`
+  (`src/store.ts`), so an older file gains it on open and an older backup restores into it. Restore checks the
+  staged rows against `INVARIANTS` before it commits.
 - **Limits are declared** in `LIMITS` (`src/config.ts`), mirrored in `docs/customizing.md`. Beyond one, behave as the
   specification says (capped coverage, a lower-bound count, an overflow row, a gap) and keep going.
-- **Health is computed, never stored.** `src/snapshot.ts` derives it from readings, failures and open errors, by both
-  clocks, at the moment it is asked.
+- **Health is computed, never stored.** `src/snapshot.ts` derives it from readings, failures and active error
+  problems, by both clocks, at the moment it is asked. Whether a problem is active is kept with it (`incidents.active`)
+  and changed only in the transaction that measured it: a gauge by its breach, an occurrence problem by three
+  ordinary fully measured intervals with nothing new.
+- **Deadlines live on the service's clock.** A deadline is a number that every waiter shares (a trial run's, a
+  source's next probe with its stored delay); nothing waits on a peer without one.
 - **Evidence by handle.** Tools store a piece before returning it; a filing cites handles delivered to the same
   attempt, or is refused whole. A model never supplies a quote, a source or a confidence.
 - **Restore rebuilds rows** into the owned database in one transaction: no file is moved into place, no SQL from a

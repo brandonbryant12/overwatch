@@ -26,7 +26,7 @@ Write `~/.config/overwatch/config.json` (or pass `--config FILE`):
   "dataDir": "~/.local/share/overwatch",
   "port": 7331,
   "mcpToken": "env:OW_MCP_TOKEN",
-  "opencode": { "url": "http://127.0.0.1:4096", "model": "private/glm-5.3" },
+  "opencode": { "url": "http://127.0.0.1:4096", "model": "private/glm-5.3", "password": "env:OPENCODE_PASSWORD" },
   "apps": {
     "shop": {
       "checkout": "~/src/shop",
@@ -73,16 +73,18 @@ Overwatch has no plugin. OpenCode loads it from its own configuration (`~/.confi
 
 and a skill folder `skills/overwatch/SKILL.md`. OpenCode names an MCP tool after its server, so the tool
 `ow_telemetry` on server `ow` is the permission action `ow_ow_telemetry`. OpenCode puts its own default rules before
-yours and the last matching rule wins: `doctor` accepts the agent when nothing after its deny-all allows anything but
-an `ow_` tool.
+yours and the last matching rule wins: `doctor` evaluates the rules the same way and accepts the agent only when
+each of the five tools is allowed and other tools (bash, edit, read, web fetch, any other `ow_` tool) are denied.
 
 OpenCode 2.4.1 always asks for a password (Basic `opencode:<password>`). Run as a service, it registers its address
 and password in `~/.local/state/opencode/service.json`, and Overwatch reads them from there when `opencode.url` is
-not set. Under a plain `opencode serve`, set `opencode.url` and point `opencode.password` at the `OPENCODE_PASSWORD`
-it runs with, for example `"password": "env:OPENCODE_PASSWORD"`.
+not set. Under a plain `opencode serve` (as in the sample above), set `opencode.url` and point `opencode.password`
+at the `OPENCODE_PASSWORD` it runs with. Without a matching password every OpenCode check fails with 401.
 
-Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill`. The run in
-`test/real/opencode.ts` does all of this against a real OpenCode 2.4.1 with a scripted model.
+Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill`. These show that OpenCode
+answers, the model replies, the agent's rules allow exactly the five tools, the MCP server is connected and the
+skill is installed; they do not run a tool. `bin/overwatch trial` is what shows the tools working end to end. The
+run in `test/real/opencode.ts` does both against a real OpenCode 2.4.1 with a scripted model.
 
 ## 4. Run it
 
@@ -122,7 +124,8 @@ exit 5 and the current data is left as it was.
 | Symptom | What to do |
 | --- | --- |
 | `serve` or `status` exits 3, "in use by another process" | Another Overwatch (or SQLite program) owns the database. Stop it. The message names the running service's address if it answers. |
-| An environment is `signed_out` | Run the fix `status` shows (your cluster's login command), then wait for the next probe; it resumes by itself. |
+| An environment is `signed_out` | Run the `fix` that `status` shows for the source (your cluster's login command and the `kubectl --context … get pods` check), then wait for the next probe; it resumes by itself. |
+| `paused: "disk"` | Do what `pausedFix` in `status` says: free disk space or move `dataDir`. Nothing is lost meanwhile; the checkpoint waits. |
 | An environment is `stale` | A reading has not succeeded for three polling intervals: the service is not running, a read hangs, or the laptop slept. |
 | `paused: "disk"` | Less than 256 MiB is free next to the database. Free space; collection resumes by itself. |
 | `trial` exits 3 | Start `serve` first: the model calls the service's tools. |

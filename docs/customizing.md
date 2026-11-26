@@ -23,29 +23,33 @@ A Kubernetes source: `type: "kubernetes"`, `context`, `namespace`, `selector`, `
 
 ## Operating limits
 
-Inside these, behaviour is exact. They are `LIMITS` in `src/config.ts`.
+Inside these, and where every reading was fully measured, counts are exact; otherwise they are marked as lower
+bounds (see [using.md](using.md)). They are `LIMITS` in `src/config.ts`.
 
 | Limit | Value | Beyond it |
 | --- | --- | --- |
 | Watchers; sources per watcher; polling interval | 50; 4; at least 60 s | `check` refuses |
-| Occurrences per source per slice | 50,000 | The count becomes a lower bound, coverage `capped`, the checkpoint moves, and a replay of that interval adds nothing |
+| New occurrences per source per slice | 50,000 (replays are not charged) | The count becomes a lower bound, coverage `capped`, the checkpoint moves, and a replay of that interval adds nothing |
 | Distinct problems per source per slice | 500 | The rest fold into one "many other errors" incident |
 | Log output per pod per call; pods per source | 4 MiB; 20 (in UID order) | Coverage `capped` |
-| Overlap for late data | 2 min Kubernetes, 5 min Datadog | Older records are not counted |
-| Catch-up after sleep | 14 days, in 6-hour slices, each committed with its checkpoint | Older time is a recorded `gap` |
-| Gauge problems | memory > 90 % of limit, pods not ready > 0; 2 samples to open, 2 to close | `METRIC_RULES` in `src/collect.ts` |
+| Overlap for late data | 2 min Kubernetes, 5 min Datadog, never below the 14-day floor | Older records are not counted |
+| Catch-up after sleep | 14 days, in half-open 6-hour slices, each committed with its checkpoint | Older time is a recorded `gap`; active totals become lower bounds |
+| Gauge problems | memory > 90 % of limit, pods not ready > 0; 2 measured samples to open, 2 to close | `METRIC_RULES` in `src/collect.ts`; an unmeasured sample breaks both runs |
+| Quiet | 3 ordinary, fully measured intervals with nothing new | The problem stops holding health in `attention`; its total stays |
 | Datadog rate limit | Retry-After up to 30 s, twice | Backs off; the checkpoint does not move |
-| Agent run | 8 tool calls, 5 active minutes; 2 sessions at once | Refused; retried once, then parked |
-| Evidence | 16 KiB per piece; 400 pieces per session; 50 per telemetry call | Truncated with a marker |
+| Agent run | 8 tool calls (paging and filing together), 5 minutes on the service's clock; 2 sessions at once | Refused; the session is interrupted and its slot released; retried once, then parked |
+| Evidence | 16 KiB per piece; 50 per telemetry call, so at most 7 pages before filing; 400 pieces per session as a storage ceiling | Truncated with a marker |
 | Freshness | 3 polling intervals | `stale` |
-| Disk | database 1 GiB; 256 MiB free | Old events compacted, and the freed space given back 16 MiB per pass; below the floor collection pauses (`paused: "disk"`) |
+| Disk | 1 GiB in use; 256 MiB free; both checked before every commit | Room is made in a fixed order (never cited evidence); if not enough, collection pauses (`paused: "disk"`, with `pausedFix`) and the checkpoint stays |
+| Giving space back | 16 MiB per scheduler pass, any page size | Free pages are reused meanwhile |
 
 ## Where things are
 
 | What | File |
 | --- | --- |
 | Configuration and limits | `src/config.ts` |
-| Storage, writer, backup, restore, compaction | `src/store.ts` |
+| Storage, writer, backup, restore and its invariants, retention, reclaim | `src/store.ts` |
+| Reading outside values (numbers, counts, times) | `src/parse.ts` |
 | Redaction rules | `src/redact.ts` |
 | Collection, keys, slices | `src/collect.ts` |
 | kubectl allowlist and parsers | `src/kube.ts` |

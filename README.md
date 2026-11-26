@@ -1,8 +1,8 @@
 # Overwatch
 
-Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts what goes wrong exactly inside
-limits it writes down, says honestly when it does not know, and lets an OpenCode model investigate with evidence
-it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
+Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts what goes wrong exactly where it
+read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
+not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
 
 This is the **simple core, milestone 1**: the kernel and the tools for proving it on a real laptop and a real model.
 Specification: [docs/plans/simple-core.md](docs/plans/simple-core.md) with its
@@ -25,13 +25,15 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
 - **Storage**: one SQLite file owned by one process through SQLite's own exclusive lock; every change is one
   transaction that appends to an append-only event log; text is stored only after redaction.
 - **Collection**: Kubernetes through read-only `kubectl` (logs, events, workloads, usage) and Datadog (logs, monitors,
-  a metric), counted by keys made from each source's own data, so replay, crash and late data never count twice.
-- **Health**: each environment is quiet, needs a look, partial, stale or signed out, from the least-known reading.
+  a metric), counted by keys made from each source's own data, so replay, crash and late data never count twice; a
+  total over a window that was not fully read is marked as a lower bound.
+- **Health**: each environment is quiet, needs a look, partial, stale or signed out, from the least-known reading
+  and the problems active now.
 - **Failures**: classified (sign-in, permission, rate limit, unreachable, configuration), backed off, suspended and
   probed; one cause per failure; "offline" only when several independent endpoints all fail.
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
-  cases before any automation is allowed.
+  cases before any automation is allowed for that model.
 
 ## Documentation
 
