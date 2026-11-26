@@ -39,6 +39,9 @@ const [verb, res] = args.slice(i)
 if (state.kubeFailure) fail(state.kubeFailure)
 const option = (n) =>
   args.find((a) => a.startsWith(n + "="))?.slice(n.length + 1) ?? args[args.indexOf(n) + 1]
+const ns = option("-n")
+if (state.failedNamespace && state.failedNamespace === ns) fail("network unreachable")
+const revision = state.namespaceRevisions?.[ns] ?? state.revision
 const pods = Array.from({ length: state.pods ?? 1 }, (_, i) => {
   const id = String(i).padStart(3, "0"),
     restart = state.restart ?? 0
@@ -53,7 +56,7 @@ const pods = Array.from({ length: state.pods ?? 1 }, (_, i) => {
       containers: [
         {
           name: "api",
-          image: "shop:" + state.revision,
+          image: "shop:" + revision,
           resources: { limits: { cpu: "1", memory: "512Mi" } },
         },
       ],
@@ -88,7 +91,7 @@ else if (verb === "get" && res.startsWith("deploy"))
         spec: {
           replicas: 1,
           template: {
-            metadata: { annotations: { "overwatch.dev/revision": state.revision } },
+            metadata: { annotations: { "overwatch.dev/revision": revision } },
             spec: pods[0]?.spec,
           },
         },

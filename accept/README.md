@@ -61,3 +61,16 @@ The expanded M1 and M2 suites include the neighbouring cases from the independen
 ```
 
 M3 is specified ahead of the implementation. The fixtures use the executable, temporary OpenCode and Datadog peers, scripted independent readings through actual MCP calls, a disposable notification executable with an exit-code ledger and system Chrome with an isolated clipboard substitute. Product cases may stop at a missing interface on M2. The fake notifier control can run today. A green control verifies the fixture alone. See the revision 4 interface contract and `docs/plans/m2-independent-assessment.md` for scope, measured results and outstanding owner checks.
+
+## Milestone 3 assessment and prospective milestone 4
+
+The M1 assessment neighbours use A01–A21 for the original kernel defects and B numbers for the eight M2 kernel probes that broke. A20 is in storage-edges. The M2 U cases exercise rendered measurement freshness, brief editing and a disposition that changes and then returns to the same visible state. The separate owner-timing driver now populates completed, running and queued investigations, a parked answer and 200 real fixture problems. B, edit, Tab and Enter must copy the exact edited bytes.
+
+M3 adds tests of peer delivery, durable filing and request boundaries, evidence provenance, scoped model inputs, answering and brief language, and notification recovery. The transition suite kills the real service at ten externally observable investigation stages. Its oracle checks the contents and identity of a committed filing. The cadence test advances the service clock through one day; the provider and model remain local fixtures.
+
+```sh
+/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
+/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m4/*.test.mjs
+```
+
+M4 implements the assessor side of revision 5 only. The disposable bare Git remote accepts candidate branches and logs attempted ref updates. The fake gh records draft status, head, base and body, and lets the fixture drive an external close or merge. The service sees these changes through its ordinary scheduler. Tests exercise an unearned gate, an investigation-only gate, a disallowed proposal, failed app verification, a planted change request, both draft lifecycles, a short and a noisy series, and staging compared with both complete and missing production data. On M3 the fixture control runs; prospective scenarios stop at the unsupported M4 configuration keys. See the assessment for observed pass/fail counts and focused reproduction commands.
