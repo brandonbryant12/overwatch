@@ -11,10 +11,12 @@
     "overwatch": "./bin/overwatch"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "check": "pnpm run typecheck && pnpm test",
-    "accept": "node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs"
+    "accept": "node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs",
+    "build:web": "node --experimental-strip-types --no-warnings scripts/build-web.ts",
+    "prepare": "node --experimental-strip-types --no-warnings scripts/build-web.ts --optional"
   },
   "dependencies": {
     "@effect/platform-browser": "4.1.6",

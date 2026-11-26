@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "exactOptionalPropertyTypes": true
+  },
+  "include": ["src/**/*.ts", "freshness.d.mts"]
+}

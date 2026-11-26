@@ -314,9 +314,9 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   };
 }
 
-/** The page: plain files from web/, the entry at /. Nothing outside that folder is served. */
-const WEB = fileURLToPath(new URL("../web/", import.meta.url));
-const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
+/** The page: the built files in web/dist/ (`pnpm run build:web`), the entry at /. Nothing outside that folder is served. */
+const WEB = fileURLToPath(new URL("../web/dist/", import.meta.url));
+const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".map": "application/json; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
 function page(path: string, res: ServerResponse) {
   const name = path === "/" ? "index.html" : path.slice(1);
   const file = join(WEB, name);
