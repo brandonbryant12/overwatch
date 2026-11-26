@@ -26,6 +26,11 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   An error's message goes through `errorText`. Identifiers from outside are hashed into keys, never stored as given.
 - **Counting is a key.** An occurrence's key is made from the source's own data; the slice inserts keys "if absent"
   and counts only what was inserted, in the same transaction as the checkpoint. Never derive a count from a list.
+  A log read counts only if the container's identity is the same in the pod list after it as before; a read that
+  shows loss (a stored key in its window it no longer returns) is a `gap`, never a recount.
+- **Space comes back in bounded steps.** The file uses incremental auto-vacuum from creation; `Store.reclaim` frees
+  at most 16 MiB per scheduler pass and truncates the WAL. Never run a full `VACUUM` while serving: it copies the
+  whole file and holds the only connection until done.
 - **Limits are declared** in `LIMITS` (`src/config.ts`), mirrored in `docs/customizing.md`. Beyond one, behave as the
   specification says (capped coverage, a lower-bound count, an overflow row, a gap) and keep going.
 - **Health is computed, never stored.** `src/snapshot.ts` derives it from readings, failures and open errors, by both

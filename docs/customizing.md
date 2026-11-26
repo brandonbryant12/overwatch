@@ -32,12 +32,13 @@ Inside these, behaviour is exact. They are `LIMITS` in `src/config.ts`.
 | Distinct problems per source per slice | 500 | The rest fold into one "many other errors" incident |
 | Log output per pod per call; pods per source | 4 MiB; 20 (in UID order) | Coverage `capped` |
 | Overlap for late data | 2 min Kubernetes, 5 min Datadog | Older records are not counted |
-| Catch-up after sleep | 14 days, in 6-hour slices | Older time is a recorded `gap` |
+| Catch-up after sleep | 14 days, in 6-hour slices, each committed with its checkpoint | Older time is a recorded `gap` |
+| Gauge problems | memory > 90 % of limit, pods not ready > 0; 2 samples to open, 2 to close | `METRIC_RULES` in `src/collect.ts` |
 | Datadog rate limit | Retry-After up to 30 s, twice | Backs off; the checkpoint does not move |
 | Agent run | 8 tool calls, 5 active minutes; 2 sessions at once | Refused; retried once, then parked |
 | Evidence | 16 KiB per piece; 400 pieces per session; 50 per telemetry call | Truncated with a marker |
 | Freshness | 3 polling intervals | `stale` |
-| Disk | database 1 GiB; 256 MiB free | Old events compacted; below the floor collection pauses (`paused: "disk"`) |
+| Disk | database 1 GiB; 256 MiB free | Old events compacted, and the freed space given back 16 MiB per pass; below the floor collection pauses (`paused: "disk"`) |
 
 ## Where things are
 

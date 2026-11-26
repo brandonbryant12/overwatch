@@ -57,13 +57,32 @@ Check: `bin/overwatch check` prints `… is valid` (exit 0) or the exact setting
 
 Overwatch has no plugin. OpenCode loads it from its own configuration (`~/.config/opencode/opencode.json`):
 
-- a remote MCP server named `ow` at `http://127.0.0.1:7331/mcp` with `"oauth": false`, `"codemode": false` and the
-  header `Authorization: Bearer <the value of mcpToken>`;
-- an agent `ow-investigator` whose permissions deny everything (`{"action":"*","resource":"*","effect":"deny"}`)
-  and allow only `ow_telemetry`, `ow_code_read`, `ow_code_search`, `ow_history` and `ow_finding`;
-- a skill folder `skills/overwatch/SKILL.md`.
+```json
+{
+  "agents": { "ow-investigator": { "mode": "primary", "permissions": [
+    { "action": "*", "resource": "*", "effect": "deny" },
+    { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+    { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+    { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+    { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
+    { "action": "ow_ow_finding", "resource": "*", "effect": "allow" } ] } },
+  "mcp": { "servers": { "ow": { "type": "remote", "url": "http://127.0.0.1:7331/mcp",
+    "headers": { "Authorization": "Bearer <the value of mcpToken>" }, "oauth": false, "codemode": false } } }
+}
+```
 
-Check: `bin/overwatch doctor` reports `agent`, `mcp` and `skill`.
+and a skill folder `skills/overwatch/SKILL.md`. OpenCode names an MCP tool after its server, so the tool
+`ow_telemetry` on server `ow` is the permission action `ow_ow_telemetry`. OpenCode puts its own default rules before
+yours and the last matching rule wins: `doctor` accepts the agent when nothing after its deny-all allows anything but
+an `ow_` tool.
+
+OpenCode 2.4.1 always asks for a password (Basic `opencode:<password>`). Run as a service, it registers its address
+and password in `~/.local/state/opencode/service.json`, and Overwatch reads them from there when `opencode.url` is
+not set. Under a plain `opencode serve`, set `opencode.url` and point `opencode.password` at the `OPENCODE_PASSWORD`
+it runs with, for example `"password": "env:OPENCODE_PASSWORD"`.
+
+Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill`. The run in
+`test/real/opencode.ts` does all of this against a real OpenCode 2.4.1 with a scripted model.
 
 ## 4. Run it
 

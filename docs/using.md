@@ -8,8 +8,9 @@ Every polling interval, for each source that is due:
 
 - **Kubernetes**: lists the pods (the one call that also tells a signed-out cluster from a working one), reads each
   container's logs since the checkpoint minus a two-minute overlap (current and previous instance, up to 20 pods in
-  UID order and 4 MiB per call), the namespace's warning events, the workloads' running revision, and memory against
-  the pods' own limits.
+  UID order and 4 MiB per call), lists the pods again, then reads the namespace's warning events, the workloads'
+  running revision and how many pods are not ready, and memory against the pods' own limits. After a sleep it
+  catches up in six-hour slices, up to 14 days.
 - **Datadog**: searches logs page by page in six-hour slices with a five-minute overlap, reads monitors and the
   configured metric.
 
@@ -18,7 +19,20 @@ incident for its app, environment, source and problem. Numbers, IDs, quoted valu
 A count is exact unless a slice passed the storm limit, when it is shown as a lower bound (`exact: false`).
 
 A slice is committed in one transaction with its coverage, readings, any deploy and the checkpoint: a crash before
-the commit changes nothing, and reading the same lines again adds nothing.
+the commit changes nothing, and reading the same lines again adds nothing. Catching up, each six-hour slice commits
+on its own, so a crash, a failure or another sleep resumes at the next slice.
+
+A container's log lines count only if the container is the same one (the same current and previous instance) in
+the pod list taken after the read as before it. Otherwise the read is ambiguous: its lines are dropped and the
+coverage is `gap`. Coverage is also `gap`, and the count a lower bound, when a read shows that something was lost:
+a line counted earlier that the log no longer returns (rotation, or fewer identical lines at one time than before),
+or a restarted container whose previous instance cannot be read. Identical lines silently replaced by identical
+lines cannot be told apart by anyone; that is the one thing a count cannot see.
+
+**Gauges** open problems with hysteresis: memory over 90 % of a container's limit, or any pod not ready, for two
+samples in a row opens an error problem (counted once per breach); two samples under the limit close it. A sample
+that could not be measured (usage refused or missing) breaks both runs, so it never closes a problem and never
+counts as fine. The latest value and whether it is in breach are in `status` under `metrics`.
 
 A **deploy** is recorded when the running revision changes (the pod template's `overwatch.dev/revision` annotation,
 or an image tag that is a commit SHA), with the revision it replaced and its place in the event log.
@@ -36,6 +50,15 @@ Each environment is one of, in this order of precedence:
 
 Readings you leave out of a source's `readings` are listed as `excluded` ("not measured here"); they never make an
 environment look worse or better.
+
+## Disk space
+
+The database stays within 1 GiB. Past it, old events are compacted (counts and the sequence are kept), and the
+space they held goes back to the disk in steps of at most 16 MiB between polls: the file is created with
+incremental auto-vacuum, and each step moves pages from the end of the file into free ones, truncates it, and
+truncates the write-ahead log. A full `VACUUM` is not used while serving: it copies the whole file (up to twice the
+space, on a disk that may be short of it) and holds the only connection until it finishes, so no poll could commit
+meanwhile. Below 256 MiB free on the disk, collection pauses and health says `partial`.
 
 ## When something keeps failing
 
