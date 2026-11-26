@@ -227,6 +227,9 @@ test("build: every column of every created table is declared, as data or as a re
     for (const t of TABLES) {
       const created = store.all<{ name: string }>(`SELECT name FROM pragma_table_info('${t.name}')`).map((c) => c.name).sort();
       assert.deepEqual(created, [...t.columns].sort(), `${t.name} has an undeclared or missing column`);
+      // A foreign key the database knows is a reference, never data: its declaration must say so.
+      for (const fk of store.all<{ from: string; table: string; to: string | null }>(`SELECT "from", "table", "to" FROM pragma_foreign_key_list('${t.name}')`))
+        assert.equal(t.refs?.[fk.from], `${fk.table}.${fk.to ?? "id"}`, `${t.name}.${fk.from} REFERENCES ${fk.table} but is declared as data`);
       for (const [column, to] of Object.entries(t.refs ?? {})) {
         assert.ok(t.columns.includes(column), `${t.name}.${column} is a reference to an undeclared column`);
         assert.ok(TABLES.some((p) => p.name === to.split(".")[0] && p.columns.includes(to.split(".")[1]!)), `${t.name}.${column} refers to ${to}, which is not declared`);
@@ -263,6 +266,7 @@ test("build: the request key is read only by the keyed router, and only keyed() 
   // Every POST goes through the one route table, whose guard is keyed, fenced or a command; basisSeq is read in one place.
   const server = readFileSync(join(src, "server.ts"), "utf8");
   assert.equal(server.match(/method === "POST"/g)?.length, 1, "a POST route is handled outside the WRITES table");
+  assert.equal(server.match(/["'`]POST["'`]/g)?.length, 2, "POST is tested somewhere other than the WRITES dispatcher (and the 405 Allow header)");
   const basis = readdirSync(src).filter((n) => n.endsWith(".ts")).flatMap((f) => (readFileSync(join(src, f), "utf8").match(/body\.basisSeq/g) ?? []).map(() => f));
   assert.deepEqual([...new Set(basis)], ["inbox.ts"], "basisSeq is read outside basisOf");
 });

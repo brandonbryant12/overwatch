@@ -42,8 +42,8 @@ export function count(v: unknown): number | null {
  * for a live read. A wall-clock number is not one, so it cannot be passed where a provider time belongs unseen.
  */
 export type ProviderTime = number & { readonly providerTime: true };
-/** A provider's time from an ISO string (or a number of milliseconds). */
-export function time(v: unknown): ProviderTime | null {
+/** A provider's time from an ISO string (or a number of milliseconds) in provider data; a typed number is refused. */
+export function time<T>(v: T & (T extends number ? never : unknown)): ProviderTime | null {
   const at = typeof v === "number" ? v : typeof v === "string" && v ? Date.parse(v) : NaN;
   return Number.isFinite(at) ? (at as ProviderTime) : null;
 }

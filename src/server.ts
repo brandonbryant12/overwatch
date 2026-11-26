@@ -56,6 +56,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const trial = new Trial(store, tools, config, empty);
   const token = config.mcpToken ? await secret(config.mcpToken) : null;
   const current = () => snapshot(store, config, collector, true);
+  /** The state after a decision: taken once the decision is written, so it includes it. */
+  const decided = (action: { seq: number | null }) => ({ ...current(), action });
   const agents = new Agents(store, tools, config, empty, options.log);
   const fixes = new Fixes(store, tools, config, empty, options.log);
   // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
@@ -69,7 +71,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     inbox: () => inbox(store),
     get: (id) => itemOf(id),
     search: (text) => search(store, config, text),
-    act: (id, body) => ({ ...current(), action: act(store, config, id, body, basisOf(body)) }),
+    act: (id, body) => decided(act(store, config, id, body, basisOf(body))),
   };
 
   /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
@@ -145,7 +147,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
         [/^\/v2\/items\/([^/]+)\/fix$/, { keyed: ([id]) => fixes.request(id!, body), code: 202 }],
         [/^\/v2\/fixes\/([^/]+)\/decline$/, { keyed: ([id]) => fixes.decline(id!) }],
         [/^\/v2\/notifications\/([^/]+)\/retry$/, { keyed: ([id]) => agents.retry(id!) }],
-        [/^\/v2\/items\/([^/]+)\/action$/, { fenced: ([id], basis) => ({ ...current(), action: act(store, config, id!, body, basis) }) }],
+        [/^\/v2\/items\/([^/]+)\/action$/, { fenced: ([id], basis) => decided(act(store, config, id!, body, basis)) }],
         [/^\/v2\/backup$/, { command: () => backup(store, body) }],
         [/^\/v2\/doctor$/, { command: () => doctor(config, store, empty) }],
         [/^\/v2\/trial$/, { command: async () => {

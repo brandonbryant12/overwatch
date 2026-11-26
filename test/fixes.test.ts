@@ -149,7 +149,7 @@ test("class: a forecast exists only for six fresh, evenly spaced, consistently r
       seen[0]!++;
       const t0 = 1_000_000_000_000;
       const hash = createHash("sha256").update(JSON.stringify(["m", "disk", "units", 1000])).digest("hex");
-      const rows = values.map((v, i) => ({ series: hash, at_ms: time(t0 + i * 60_000)!, value: v }));
+      const rows = values.map((v, i) => ({ series: hash, at_ms: time(new Date(t0 + i * 60_000).toISOString())!, value: v }));
       const now = t0 + (values.length - 1) * 60_000 + lag;
       const f = forecast(source, rows, now);
       if (f.state !== "forecast") return assert.equal(f.etaMinutes, null);

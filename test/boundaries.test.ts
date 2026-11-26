@@ -82,6 +82,36 @@ test("class: a reading is complete only when the adapter recognised the reply; a
   assert.ok(seen.ok > 0 && seen.gap > 0, JSON.stringify(seen)); // both sides of the rule were exercised
 });
 
+test("class: monitors certify quiet only when every member is in a known measured state; any other state is a gap", async () => {
+  const known = ["OK", "Alert", "Warn", "Ignored", "Skipped"];
+  const state = fc.oneof(fc.constantFrom(...known), fc.constantFrom("Unknown", "No Data", "ok", "Paused", ""), fc.string({ maxLength: 8 }));
+  await fc.assert(
+    fc.asyncProperty(fc.array(state, { minLength: 1, maxLength: 5 }), async (states) => {
+      const r = rig(["monitors"]);
+      reply.monitors = states.map((overall_state, i) => ({ id: i + 1, name: `m${i}`, overall_state }));
+      await r.step();
+      assert.equal(r.reading("monitors")?.state === "ok", states.every((x) => known.includes(x)), JSON.stringify(states));
+      if (!states.every((x) => known.includes(x))) assert.notEqual(r.snap().environments[0]!.health, "quiet");
+      r.store.close();
+    }),
+    { numRuns: 40 },
+  );
+});
+
+test("class: a metric point is a measurement only inside the queried window, on either side", async () => {
+  await fc.assert(
+    fc.asyncProperty(fc.integer({ min: -3 * 60_000, max: 3 * 60_000 }), async (offset) => {
+      const r = rig(["metrics"]);
+      const end = r.now + 60_000;
+      reply.query = { series: [{ metric: "shop.errors", pointlist: [[end + offset, 1]] }] };
+      await r.step();
+      assert.equal(r.reading("metrics")?.state === "ok", offset <= 0 && offset >= -60_000, String(offset));
+      r.store.close();
+    }),
+    { numRuns: 40 },
+  );
+});
+
 test("class: freshness is the provider's observation time, never the time Overwatch asked", async () => {
   await fc.assert(
     fc.asyncProperty(fc.oneof(fc.integer({ min: 0, max: 60_000 }), fc.integer({ min: 60_001, max: 50 * 60_000 })), async (age) => {
