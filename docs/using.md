@@ -1,6 +1,7 @@
 # Using Overwatch
 
-What milestones 1 and 2 do: the service that watches and counts, and the page that shows it. Open the page at the
+What milestones 1 to 3 do: the service that watches and counts, the page that shows it, and the agents that
+investigate and answer. Open the page at the
 address `serve` prints (`http://127.0.0.1:7331/` by default). `bin/overwatch demo` shows all of it with a seeded
 picture and contacts nothing.
 
@@ -16,12 +17,15 @@ One screen answers "is anything wrong, and what needs me":
   folded; the page remembers which groups you opened, per browser. Rows never move while you look: new and returned
   rows wait behind **N new**, and rows that only changed group behind **N moved**, until you press `r`. Your own actions take effect at once. A row's bars are its last 24 hours by the hour; `42+×` means the
   count is a lower bound.
-- **The focus stage** in the middle: the problem's counts, why it came back, its findings with their evidence, and
-  its history; for an environment, its sources, their repair commands, gauges and coverage.
+- **The focus stage** in the middle, where you decide. For a problem, in this order: the investigation's verdict with
+  how the readings voted and what the challenger did (an agreed verdict, a disagreement and an undecided result each
+  look different); the cause and each claim with the evidence it cites, the actual lines or code, readable in place;
+  what was ruled out and what was not checked; the deploy it started after, when known; counts, sources and whether
+  the total is exact or a lower bound; your questions with their answers; your corrections; then history. For an
+  environment or a source: its sources, their repair commands, readings, gauges and coverage.
 - **The bar** at the bottom, the one place to find or ask: with something in focus, Enter asks about it
   (Shift+Enter in a new request); with nothing in focus, Enter opens the finder. A question is stored and queued, and
-  shown on its item under *Questions* as "queued, waiting for an agent" and in its history; agents answering it come
-  in milestone 3. A second Enter while a question is on its way does nothing, and a late reply never clears what you
+  shown on its item under *Questions* as queued, then the agent's answer appears in the same place. A second Enter while a question is on its way does nothing, and a late reply never clears what you
   typed since. Environments and their sources can be put in focus and asked about too (click a source's name).
 - **Its own clock for measurements too.** Each cell knows when its readings were last measured and how long they
   stay fresh, and ages them on the page's clock: a live connection with a quiet heartbeat cannot keep a cell green
@@ -51,6 +55,10 @@ paused for disk space* shows `pausedFix`; an empty inbox says *Nothing needs you
 | `p` / `Enter` | Ask about what is in focus; with nothing in focus, open the finder |
 | `Shift+Enter` (in the bar) | Ask in a new request |
 | `/` or `⌘K` | Find anything: problems wherever they went, findings, evidence, prompts |
+| `i` | Investigate the problem in focus: independent readings, then a challenger if most say real |
+| `o` | Open in OpenCode: an ordinary session of yours with the focus already named in it |
+| `y` | Was this right? A line for the app's playbook, read by later investigations |
+| `b` | Brief: what changed, for you or the team, to edit and copy |
 | `t` | Dark or light |
 | `?` | This list |
 | `Esc` | Close a sheet or the finder, or leave the bar (the draft stays) |
@@ -216,6 +224,58 @@ a change after each commit, a heartbeat every five seconds), `GET /v2/inbox`, `G
 `GET /v2/search?q=`, `GET /v2/focus?subject=`, `POST /v2/items/:id/action`, `POST /v2/ask` (with the
 `Idempotency-Key` that `/v2/focus` issued), `POST /v2/backup`, `/v2/doctor`, `/v2/trial`, and `POST /mcp`. The
 contract is `docs/plans/simple-core-interfaces.md`.
+
+## Investigations
+
+An investigation is several independent **readings** of one problem (`readings` in the configuration, default 3),
+each an OpenCode session told to start from a different place: the telemetry, the change that was deployed, a
+harmless explanation. Every reading gets the same frozen inputs (the problem's latest lines, the deployed revision
+and the app's playbook), its own evidence handles, eight tool calls and five minutes. No reading sees another's
+reasoning. A reading that does not file is nudged once and retried once in a fresh session; then it is a missing
+vote, and it stays in the denominator.
+
+Code decides, never a model. Out of all **planned** readings:
+
+| Readings | Challenger | Result |
+| --- | --- | --- |
+| More than half say real | upheld | real; *observed* if a real reading cited telemetry |
+| More than half say real | disproved | not real |
+| More than half say real | unsure, did not file | undecided |
+| More than half say not real | not run | not real |
+| Anything else | not run | undecided |
+
+The **challenger** is a fresh session given the majority's claims as hypotheses, without handles, votes or who said
+what, and told to disprove them with its own evidence. The result shows agreement as numbers ("2 of 3 said real ·
+1 not real · challenger upheld") and the dissent in words; there is no confidence score. An undecided result is a
+valid result: in production it waits for you in *Needs you*. Only the finished investigation (never a single
+reading) can bring back a problem put away with *Later*.
+
+A problem is investigated automatically when it is first counted, once your model has passed its trial; before
+that, press `i`. Investigations and questions share two sessions at a time; your questions go first.
+
+## Questions, OpenCode and playbooks
+
+A **question** from the bar is answered by an agent (`ow-responder`) that can read the subject's evidence and
+change nothing. The answer is stored redacted and shown where you asked. A second question on the same subject
+continues the same conversation while the deployed revision is the same; Shift+Enter, a deploy, a failed answer or a
+different subject starts a new one.
+
+**Open in OpenCode** (`o`) makes an ordinary interactive session of yours with the focus named in it; there the
+owner tools (`ow_inbox`, `ow_get`, `ow_search`, `ow_act`) and the `overwatch` skill work as the page does.
+
+**Was this right?** (`y`) adds one dated line to the app's playbook; see [customizing.md](customizing.md#playbooks).
+
+## Briefs and notifications
+
+`b` opens a **brief** of what changed, built from the event log between two positions: *What changed*, *Impact*,
+*Still open*, *Next check*. *For you* has titles, counts (with `+` for lower bounds), revisions and verdicts; *for
+the team* is plain words without titles, handles, commands or session IDs. Nothing is invented: an impact or a fix
+that was not recorded is "None recorded", and time that could not be checked is "unknown". Edit it and copy it;
+Overwatch never sends it.
+
+When a problem moves into *Needs you* (a production error, or an undecided investigation of one), Overwatch shows a
+macOS notification through `terminal-notifier`, once per cause. A refused delivery is tried again after 60 seconds
+and then 300 seconds, then parked; `GET /v2/notifications` shows each notice's state and reason.
 
 ## The trial and the investigation tools
 

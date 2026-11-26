@@ -11,7 +11,7 @@ Keys outside this grammar are refused by `check`.
 | `port` | `7331` | Loopback port; `0` picks a free one. |
 | `mcpToken` | none | Secret reference for the bearer credential OpenCode sends to `/mcp`. Without it MCP refuses every call. |
 | `opencode.url`, `opencode.model`, `opencode.password` | registration file; none; none | Where OpenCode answers, the model sessions use, and its password reference. |
-| `readings` | `3` | Independent readings per investigation (1–3; used from milestone 3). |
+| `readings` | `3` | Independent readings per investigation, 1–3. Each starts from a different place (the telemetry, the change, a harmless explanation); a real verdict needs more than half of them, so 1 trusts one reading (still challenged), 3 is the most robust and costs three sessions per problem. |
 | `apps.<app>.checkout` | required | The app's git checkout, read only through git objects. |
 | `apps.<app>.problemPatterns` | `{error: [error, fatal, panic, exception, critical], warn: [warn, warning]}` | Literal whole words (any case) that make a log line an error or a warning, per class; a list replaces that class's defaults for this app, an empty list turns the class off, a missing class keeps its defaults. Error wins a tie. A provider's own severity (Datadog's status, a Kubernetes Warning event, a gauge rule) is not affected. |
 | `apps.<app>.environments.<env>.sources.<name>` | at least one | A source, below. |
@@ -42,11 +42,29 @@ bounds (see [using.md](using.md)). They are `LIMITS` in `src/config.ts`.
 | Age | Trial messages and uncited evidence 7 days; real 14 days; coverage and hourly counts 30 days | Removed on every pass; findings and the evidence they cite are kept for good |
 | Search | 50 results per page, with a cursor | Every match reachable |
 | Datadog rate limit | Retry-After up to 30 s, twice | Backs off; the checkpoint does not move |
-| Agent run | 8 tool calls (paging and filing together), 5 minutes on the service's clock; 2 sessions at once | Refused; the session is interrupted and its slot released; retried once, then parked |
+| Agent run | 8 tool calls (paging and filing together), 5 minutes on the service's clock; 2 sessions at once across the trial, readings, challengers and answers | Refused; the session is interrupted and its slot released; retried once, then a missing vote (or a parked answer) |
+| Queue | Owner questions first, then investigations by age; one turn at a time per conversation | A question waits at most for the rest of one running session |
+| Investigation inputs | The problem's latest 200 lines, the deployed revision, the app's latest 20 playbook lines, frozen when queued | Older lines are not read |
+| Notifications | On moving into Needs you; terminal-notifier; retries after 60 s and 300 s, three attempts | Parked with the reason in `/v2/notifications` |
 | Evidence | 16 KiB per piece; 50 per telemetry call, so at most 7 pages before filing; 400 pieces per session as a storage ceiling | Truncated with a marker |
 | Freshness | 3 polling intervals | `stale` |
 | Disk | 1 GiB in use; 256 MiB free; both checked before every write, by every path | Old events go, then what age allows (never a finding or its cited evidence); if not enough, every write waits (`paused: "disk"`, with `pausedFix`) and the checkpoint stays |
 | Giving space back | 16 MiB per scheduler pass, any page size | Free pages are reused meanwhile |
+
+## Playbooks
+
+A playbook is what the owner wants every later investigation of an app to know. It is written from the page, never
+by hand and never by an agent: focus a problem that has a finished investigation, press `y` ("Was this right?"),
+and write one line, for example *The regional maintenance window runs 02:00–03:00 UTC; check it before calling a
+timeout real* or *Payments timeouts under 10 a minute are the provider's own; check its status page first*. Each
+line is stored with its date, its problem and the investigation it corrects, and the file
+`<dataDir>/playbooks/<app>.jsonl` (one JSON object per line: `date`, `seq`, `app`, `subject`, `jobId`, `text`) is
+rebuilt whole from the database after every correction and at start. Editing the file changes nothing; the database
+is authoritative.
+
+Each new investigation snapshots the app's latest 20 lines when it is queued and gives them to every reader and the
+challenger as owner guidance (data to weigh, not instructions). A correction never changes the verdict it corrects
+and is never a vote. Write lines that are true for the app in general, short and checkable; one line per lesson.
 
 ## Where things are
 
@@ -66,3 +84,6 @@ bounds (see [using.md](using.md)). They are `LIMITS` in `src/config.ts`.
 | The trial and reconciliation | `src/trial.ts` |
 | OpenCode adapter | `src/opencode.ts` |
 | Doctor | `src/doctor.ts` |
+| Agents: queue, investigations, adjudication, answers, open, playbooks, notifications | `src/agents.ts` |
+| Briefs | `src/brief.ts` |
+| The owner skill | `skills/overwatch/SKILL.md` |

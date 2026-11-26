@@ -4,11 +4,12 @@ Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts w
 read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
 not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
 
-This is the **simple core, milestones 1 and 2**: the kernel, the tools for proving it on a real laptop and a real
-model, and the page.
+This is the **simple core, milestones 1 to 3**: the kernel, the tools for proving it on a real laptop and a real
+model, the page, and the agents.
 Specification: [docs/plans/simple-core.md](docs/plans/simple-core.md) with its
 [amendments](docs/plans/simple-core-amendments.md) and [interfaces](docs/plans/simple-core-interfaces.md).
-Agents answering prompts from the page is milestone 3.
+The agents are OpenCode sessions on your own model; nothing depends on a model being right. Code adjudicates
+independent readings and a challenger, evidence is cited by handle, and disagreement is shown as disagreement.
 
 ![The demo, dark](docs/design/screenshots/v2/desktop-dark-all-groups.png)
 
@@ -38,6 +39,9 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
   Never with undo and a reason for everything that comes back, a finder, and one bar that asks about what is in
   focus. Moving, deciding, undoing, finding and asking are on the keyboard (a source is reached by a click or the
   finder). It keeps its own clock, says stale or down by itself, and ages each environment's measurements too.
+- **Agents**: investigations by independent readings and a challenger, adjudicated by code; answers to your
+  questions where you asked them; "Was this right?" corrections that reach the next investigation; briefs to copy;
+  local notifications; and owner tools plus a skill so any OpenCode session of yours can read and act on the inbox.
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
   cases before any automation is allowed for that model.

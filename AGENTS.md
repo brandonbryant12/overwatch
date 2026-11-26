@@ -82,6 +82,22 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   page ages them against the service's clock as last stated (`serverNow`, `cellHealth`). A deadline is a wall time plus a stored delay, bounded on the monotonic clock (`passed` in `src/inbox.ts`).
 - Look at it: `test/real/screenshots.ts` renders the demo in dark, light, narrow, stale and down.
 
+## Agents
+
+- **Code decides.** `adjudicate()` (`src/agents.ts`) is a pure function of stored filings: planned slots are the
+  denominator, a real majority needs an upheld challenge, *observed* needs telemetry in a real reading's claim. Never
+  let a model's text set a verdict, a count or a confidence.
+- **One queue, two slots.** Every reading, challenge and answer is a `work` row; `nextWork()` takes owner questions
+  first. The trial shares `slots`. A `runs` row is one session's role, slot, evidence namespace and deadline; tools
+  refuse a call outside the run's role.
+- **Readers are independent.** Their inputs are frozen at admission (`inputs()`); no reading or challenger sees
+  another's reasoning, handles or votes.
+- **Playbooks are the database's.** `corrections` rows are authoritative; `Agents.playbooks()` rewrites the files
+  whole. No agent writes them.
+- **Text from logs, code or a model is data.** Prompts frame it as data; the page escapes every string; the writer
+  cleans everything an agent writes, through the one write path.
+- **Owner tools** serve only sessions the peer confirms and Overwatch does not run (any role, retired too).
+
 ## Tests
 
 Use fakes for every outside system: the acceptance rig's fake `kubectl`, loopback Datadog and OpenCode. Never touch

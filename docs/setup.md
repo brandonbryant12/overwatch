@@ -59,19 +59,46 @@ Overwatch has no plugin. OpenCode loads it from its own configuration (`~/.confi
 
 ```json
 {
-  "agents": { "ow-investigator": { "mode": "primary", "permissions": [
-    { "action": "*", "resource": "*", "effect": "deny" },
-    { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
-    { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
-    { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
-    { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
-    { "action": "ow_ow_finding", "resource": "*", "effect": "allow" } ] } },
+  "agents": {
+    "ow-investigator": { "mode": "primary", "permissions": [
+      { "action": "*", "resource": "*", "effect": "deny" },
+      { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_finding", "resource": "*", "effect": "allow" } ] },
+    "ow-challenger": { "mode": "primary", "permissions": [
+      { "action": "*", "resource": "*", "effect": "deny" },
+      { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_challenge", "resource": "*", "effect": "allow" } ] },
+    "ow-responder": { "mode": "primary", "permissions": [
+      { "action": "*", "resource": "*", "effect": "deny" },
+      { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+      { "action": "ow_ow_history", "resource": "*", "effect": "allow" } ] }
+  },
   "mcp": { "servers": { "ow": { "type": "remote", "url": "http://127.0.0.1:7331/mcp",
     "headers": { "Authorization": "Bearer <the value of mcpToken>" }, "oauth": false, "codemode": false } } }
 }
 ```
 
-and a skill folder `skills/overwatch/SKILL.md`. OpenCode names an MCP tool after its server, so the tool
+and the owner skill: copy `skills/overwatch/` from this repository into OpenCode's skills folder
+(`~/.config/opencode/skills/overwatch/SKILL.md`). The three agents are the roles Overwatch runs: readers file a
+finding, the challenger files a challenge, the responder only reads to answer a question. Overwatch also binds the
+role on its side, so a responder that somehow had `ow_finding` allowed would still be refused.
+
+**Your own sessions.** Any ordinary OpenCode session (your default agent, not the three above) can use the owner
+tools `ow_inbox`, `ow_get`, `ow_search` and `ow_act` (allow `ow_ow_inbox`, `ow_ow_get`, `ow_ow_search`, `ow_ow_act` in
+its permissions if they ask). The skill teaches the session to read before speaking and to confirm with you before
+any way out. Overwatch asks OpenCode whether the calling session exists and refuses every session it runs itself.
+From the page, `o` opens such a session with the focused problem already named in it.
+
+**Notifications** (optional): `brew install terminal-notifier`, and make sure the service's PATH includes it. Without
+it, notices are parked with that repair and the page works as before. OpenCode names an MCP tool after its server, so the tool
 `ow_telemetry` on server `ow` is the permission action `ow_ow_telemetry`. OpenCode puts its own default rules before
 yours and the last matching rule wins: `doctor` evaluates the rules the same way and accepts the agent only when
 each of the five tools is allowed and other tools (bash, edit, read, web fetch, any other `ow_` tool) are denied.
@@ -81,7 +108,8 @@ and password in `~/.local/state/opencode/service.json`, and Overwatch reads them
 not set. Under a plain `opencode serve` (as in the sample above), set `opencode.url` and point `opencode.password`
 at the `OPENCODE_PASSWORD` it runs with. Without a matching password every OpenCode check fails with 401.
 
-Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill`. These show that OpenCode
+Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill` (`agent` checks
+`ow-investigator`; check the challenger and responder rules by eye). These show that OpenCode
 answers, the model replies, the agent's rules allow exactly the five tools, the MCP server is connected and the
 skill is installed; they do not run a tool. `bin/overwatch trial` is what shows the tools working end to end. The
 run in `test/real/opencode.ts` does both against a real OpenCode 2.4.1 with a scripted model.
