@@ -7,6 +7,7 @@ import { join, delimiter } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Config } from "./config.ts";
 import { run as exec } from "./exec.ts";
+import { LABEL, launchctl } from "./launchd.ts";
 import { validate } from "./datadog.ts";
 import { kubectl } from "./kube.ts";
 import { connect, OpenCode } from "./opencode.ts";
@@ -21,9 +22,8 @@ export interface Check {
   fix: string | null;
 }
 
-const LABEL = "dev.overwatch.service";
 /** The tools as OpenCode names them for the agent: the MCP server's name, then the tool's. */
-const TOOLS = ["ow_telemetry", "ow_code_read", "ow_code_search", "ow_history", "ow_finding"];
+const READ = ["ow_telemetry", "ow_code_read", "ow_code_search", "ow_history"];
 const glob = (pattern: string) => new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
 
 /** OpenCode fills its catalogs after start: read again for a few seconds before deciding something is missing. */
@@ -98,17 +98,22 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
     }
     throw new Error(`the model ${config.opencode.model} did not answer within two minutes`);
   });
-  await check("agent", "Add the ow-investigator agent (deny all, allow the ow_ tools) to your OpenCode configuration", async () => {
-    const agent = (await settled(() => need().agents(emptyDir), (l) => l.some((a) => a.id === "ow-investigator"))).find((a) => a.id === "ow-investigator" || a.name === "ow-investigator");
-    if (!agent) throw new Error("OpenCode has no ow-investigator agent");
-    // OpenCode puts its defaults first and the last matching rule wins: evaluate the rules as it does.
-    const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
-    const effect = (action: string) => rules.findLast((r) => glob(String(r.action ?? "")).test(action) && String(r.resource ?? "*") === "*")?.effect ?? "allow";
-    for (const other of ["bash", "edit", "read", "webfetch", "ow_other"]) if (effect(other) !== "deny") throw new Error(`ow-investigator does not deny ${other}`);
-    const missing = TOOLS.filter((t) => effect(`ow_${t}`) !== "allow");
-    if (missing.length) throw new Error(`ow-investigator cannot use ${missing.map((t) => `ow_${t}`).join(", ")}`);
-    return "ow-investigator denies everything but the five Overwatch tools, which it can use";
-  });
+  // Each role Overwatch runs: its own filing tool allowed, everything else denied. The investigator keeps the id "agent".
+  for (const [id, name, filing] of [["agent", "ow-investigator", "ow_finding"], ["agent:challenger", "ow-challenger", "ow_challenge"], ["agent:responder", "ow-responder", null]] as const) {
+    const tools = [...READ, ...(filing ? [filing] : [])];
+    await check(id, `Add the ${name} agent (deny all, allow ${tools.map((t) => `ow_${t}`).join(", ")}) to your OpenCode configuration; see docs/setup.md`, async () => {
+      const agent = (await settled(() => need().agents(emptyDir), (l) => l.some((a) => a.id === name))).find((a) => a.id === name || a.name === name);
+      if (!agent) throw new Error(`OpenCode has no ${name} agent`);
+      // OpenCode puts its defaults first and the last matching rule wins: evaluate the rules as it does.
+      const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
+      const effect = (action: string) => rules.findLast((r) => glob(String(r.action ?? "")).test(action) && String(r.resource ?? "*") === "*")?.effect ?? "allow";
+      const others = ["bash", "edit", "read", "webfetch", "ow_other", ...["ow_finding", "ow_challenge"].filter((t) => t !== filing).map((t) => `ow_${t}`)];
+      const missing = tools.filter((t) => effect(`ow_${t}`) !== "allow");
+      if (missing.length) throw new Error(`${name} cannot use ${missing.map((t) => `ow_${t}`).join(", ")}`);
+      for (const other of others) if (effect(other) !== "deny") throw new Error(`${name} does not deny ${other}`);
+      return `${name} can use ${tools.length} Overwatch tools and nothing else`;
+    });
+  }
   await check("mcp", "Add the remote MCP server ow (url …/mcp, Authorization Bearer, codemode false) to your OpenCode configuration", async () => {
     const entry = (await settled(() => need().mcp(emptyDir), (l) => l.some((m) => m.name === "ow" && JSON.stringify(m.status).includes("connected")))).find((m) => m.name === "ow");
     const status = entry && typeof entry.status === "object" ? (entry.status as { status?: string }).status : entry?.status;
@@ -122,7 +127,7 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
 
   let job: { program: string | null; path: string | null; proxy: string | null } | null = null;
   await check("launchd", "Install the launchd agent (overwatch install), or check it with: launchctl print gui/$(id -u)/" + LABEL, async () => {
-    const r = await exec("launchctl", ["print", `gui/${process.getuid?.() ?? 0}/${LABEL}`], { timeoutMs: 10_000 });
+    const r = await exec(launchctl(), ["print", `gui/${process.getuid?.() ?? 0}/${LABEL}`], { timeoutMs: 10_000 });
     if (r.code !== 0) throw new Error(`launchctl print failed: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
     const field = (re: RegExp) => re.exec(r.stdout)?.[1]?.trim() ?? null;
     job = { program: field(/^\s*program = (.+)$/m), path: field(/PATH => (.+)$/m), proxy: field(/HTTPS_PROXY => (.+)$/m) };
@@ -173,5 +178,7 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
       return `the deployed commit ${revision.slice(0, 12)} is in the checkout`;
     });
   }
-  return { ok: checks.every((c) => c.ok), checks };
+  // The challenger and responder only matter once investigations run: they are reported, with their repair, but do
+  // not fail the diagnosis on their own (an M1/M2 setup is complete without them).
+  return { ok: checks.every((c) => c.ok || c.id.startsWith("agent:")), checks };
 }

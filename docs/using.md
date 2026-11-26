@@ -218,11 +218,13 @@ busy, 4 a failed diagnostic or score gate, 5 an invalid or incompatible backup o
 - `doctor`: every dependency with its fix.
 - `trial`: five seeded cases through your OpenCode model (below).
 - `demo`: serves a seeded picture from a new temporary data directory without contacting anything.
+- `install`, `uninstall`, `restart`: the per-user launchd agent; see [setup.md](setup.md#4-run-it).
 
 The service's loopback API: `GET /` (the page), `GET /v2/status`, `GET /v2/changes` (server-sent events: a snapshot,
 a change after each commit, a heartbeat every five seconds), `GET /v2/inbox`, `GET /v2/items/:id`,
 `GET /v2/search?q=`, `GET /v2/focus?subject=`, `POST /v2/items/:id/action`, `POST /v2/ask` (with the
-`Idempotency-Key` that `/v2/focus` issued), `POST /v2/backup`, `/v2/doctor`, `/v2/trial`, and `POST /mcp`. The
+`Idempotency-Key` that `/v2/focus` issued; the same holds for every owner write), `GET /v2/notifications`,
+`POST /v2/notifications/:id/retry`, `POST /v2/backup`, `/v2/doctor`, `/v2/trial`, and `POST /mcp`. The
 contract is `docs/plans/simple-core-interfaces.md`.
 
 ## Investigations

@@ -22,6 +22,7 @@ bin/overwatch serve  --config ~/.config/overwatch/config.json   # then open the 
 bin/overwatch status --config ~/.config/overwatch/config.json
 bin/overwatch doctor --config ~/.config/overwatch/config.json
 bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isolated picture; contacts nothing
+bin/overwatch install --config ~/.config/overwatch/config.json  # run it at login (launchd); docs/setup.md
 ```
 
 ## What exists
@@ -42,7 +43,7 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
 - **Agents**: investigations by independent readings and a challenger, adjudicated by code; answers to your
   questions where you asked them; "Was this right?" corrections that reach the next investigation; briefs to copy;
   local notifications; and owner tools plus a skill so any OpenCode session of yours can read and act on the inbox.
-- **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
+- **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`, `install`, `uninstall`, `restart`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
   cases before any automation is allowed for that model.
 

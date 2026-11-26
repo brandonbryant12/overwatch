@@ -1,6 +1,12 @@
 # Setting up Overwatch
 
-For a macOS laptop with Node only. Every step ends with how to check it.
+For a macOS laptop with Node only: from a fresh clone to a service that starts at login. Every step ends with how to
+check it.
+
+```sh
+git clone <this repository's Git remote> overwatch && cd overwatch
+bin/overwatch check     # step 2 first: write the configuration
+```
 
 ## 1. What you need
 
@@ -25,8 +31,8 @@ Write `~/.config/overwatch/config.json` (or pass `--config FILE`):
   "version": 2,
   "dataDir": "~/.local/share/overwatch",
   "port": 7331,
-  "mcpToken": "env:OW_MCP_TOKEN",
-  "opencode": { "url": "http://127.0.0.1:4096", "model": "private/glm-5.3", "password": "env:OPENCODE_PASSWORD" },
+  "mcpToken": "keychain:overwatch/mcp-token",
+  "opencode": { "url": "http://127.0.0.1:4096", "model": "private/glm-5.3", "password": "keychain:overwatch/opencode" },
   "apps": {
     "shop": {
       "checkout": "~/src/shop",
@@ -35,8 +41,8 @@ Write `~/.config/overwatch/config.json` (or pass `--config FILE`):
           "sources": {
             "pods": { "type": "kubernetes", "context": "prod-east", "namespace": "shop", "selector": "app=shop",
                       "readings": ["logs", "events", "workloads", "usage"] },
-            "dd": { "type": "datadog", "baseUrl": "https://api.datadoghq.com", "apiKey": "env:DD_API_KEY",
-                    "appKey": "env:DD_APP_KEY", "query": "service:shop", "metric": "avg:shop.errors{*}",
+            "dd": { "type": "datadog", "baseUrl": "https://api.datadoghq.com", "apiKey": "keychain:overwatch/dd-api",
+                    "appKey": "keychain:overwatch/dd-app", "query": "service:shop", "metric": "avg:shop.errors{*}",
                     "readings": ["logs", "monitors", "metrics"] }
           }
         }
@@ -47,9 +53,15 @@ Write `~/.config/overwatch/config.json` (or pass `--config FILE`):
 }
 ```
 
-Secrets are references, never values: `env:NAME` or `keychain:service/account` (store a keychain value yourself
-with `security add-generic-password -s service -a account -w`). Every key is described in
-[customizing.md](customizing.md).
+Secrets are references, never values: `keychain:service/account` or `env:NAME`. Store each keychain value yourself:
+
+```sh
+security add-generic-password -s overwatch -a mcp-token -w     # prompts for the value; likewise opencode, dd-api, dd-app
+```
+
+Use `keychain:` for anything the installed service needs: a launchd service does not see your shell's environment,
+so `install` refuses a configuration with `env:` references (they are fine for `serve` in a terminal). Every key is
+described in [customizing.md](customizing.md).
 
 Check: `bin/overwatch check` prints `… is valid` (exit 0) or the exact setting to fix (exit 2). It contacts nothing.
 
@@ -108,13 +120,16 @@ and password in `~/.local/state/opencode/service.json`, and Overwatch reads them
 not set. Under a plain `opencode serve` (as in the sample above), set `opencode.url` and point `opencode.password`
 at the `OPENCODE_PASSWORD` it runs with. Without a matching password every OpenCode check fails with 401.
 
-Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent`, `mcp` and `skill` (`agent` checks
-`ow-investigator`; check the challenger and responder rules by eye). These show that OpenCode
-answers, the model replies, the agent's rules allow exactly the five tools, the MCP server is connected and the
-skill is installed; they do not run a tool. `bin/overwatch trial` is what shows the tools working end to end. The
+Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent` (the investigator), `agent:challenger`,
+`agent:responder`, `mcp` and `skill`. These show that OpenCode answers, the model replies, each role's rules allow
+exactly its tools (the four reading tools plus its own filing tool, none for the responder), the MCP server is
+connected and the skill is installed; they do not run a tool. A missing challenger or responder is reported with its
+repair but does not fail `doctor` on its own: collection and the page work without them, investigations do not. `bin/overwatch trial` is what shows the tools working end to end. The
 run in `test/real/opencode.ts` does both against a real OpenCode 2.4.1 with a scripted model.
 
 ## 4. Run it
+
+Try it in a terminal first:
 
 ```sh
 bin/overwatch serve --config ~/.config/overwatch/config.json
@@ -122,9 +137,23 @@ bin/overwatch serve --config ~/.config/overwatch/config.json
 
 It prints one readiness line once it owns the database and listens on `127.0.0.1`. It writes
 `<dataDir>/service.json` so the other commands can find it. A second `serve` on the same data directory, of any
-version, exits with code 3 and the address of the one already running.
+version, exits with code 3 and the address of the one already running. Stop it with Ctrl-C.
 
-Check: `bin/overwatch status` shows each environment's health.
+Then install it as a per-user launchd agent, from a terminal where `kubectl`, `git`, `opencode` (and
+`terminal-notifier`, if you use it) are on PATH and your proxy settings are set, because the service keeps that PATH
+and `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`:
+
+```sh
+bin/overwatch install   --config ~/.config/overwatch/config.json  # writes ~/Library/LaunchAgents/dev.overwatch.service.plist and loads it
+bin/overwatch restart                                             # after changing the configuration or pulling a new version
+bin/overwatch uninstall                                           # stops it and removes the plist; the data directory is kept
+```
+
+The agent runs `serve` with the Node and the checkout you installed from, starts at login, restarts after a crash
+and writes its output to `<dataDir>/service.log`. Nothing needs administrator rights. Installing again replaces the
+earlier copy.
+
+Check: `bin/overwatch status` shows each environment's health, and the page is at `http://127.0.0.1:7331/`.
 
 ## 5. Check the laptop and the model
 
@@ -134,7 +163,8 @@ bin/overwatch trial      # five seeded cases through your model; turns automatio
 ```
 
 Both ask the running service. `doctor` also inspects the launchd job `dev.overwatch.service` and the PATH and
-proxy it runs with; it does not install anything.
+proxy it runs with (`launchd`, `launchd.paths`, `launchd.proxy`); if one fails, run `install` again from a terminal
+that has them.
 
 ## 6. Back up and restore
 
@@ -158,3 +188,7 @@ and the current data is left as it was. Values that are possible but wrong canno
 | `paused: "disk"` | Either less than 256 MiB is free next to the database, or the database holds more than 1 GiB that age cannot remove. Do what `pausedFix` in `status` says: free disk space or move `dataDir`. Nothing is written meanwhile (collection, failure records, page actions); the checkpoint waits and collection resumes by itself. |
 | An environment is `stale` | A reading has not succeeded for three polling intervals: the service is not running, a read hangs, or the laptop slept. |
 | `trial` exits 3 | Start `serve` first: the model calls the service's tools. |
+| `install` exits 2 naming `env:` settings | Move those secrets to the keychain (step 2) and change the references to `keychain:`. |
+| `install` or `restart` exits 3 | `launchctl` refused; its words are in the message. `launchctl print gui/$(id -u)/dev.overwatch.service` shows the job. |
+| A notification is parked | It names its repair (usually: install `terminal-notifier` on the service's PATH). After a repair, parked notices are tried again by themselves; `POST /v2/notifications/<id>/retry` with a request key from `/v2/focus` tries one again now. |
+| Investigations wait with "waiting for OpenCode" | OpenCode is down or erroring. Nothing failed: the work is kept and resumes when OpenCode answers. |

@@ -62,8 +62,10 @@ line is stored with its date, its problem and the investigation it corrects, and
 rebuilt whole from the database after every correction and at start. Editing the file changes nothing; the database
 is authoritative.
 
-Each new investigation snapshots the app's latest 20 lines when it is queued and gives them to every reader and the
-challenger as owner guidance (data to weigh, not instructions). A correction never changes the verdict it corrects
+Each new investigation snapshots the app's latest 20 lines when it is queued and gives them to every reader as owner
+guidance (data to weigh, not instructions). The challenger does not get them: its job is to test the readers'
+conclusion against the evidence alone, and a playbook line it shared with them would be a common cause, not an
+independent check. A correction never changes the verdict it corrects
 and is never a vote. Write lines that are true for the app in general, short and checkable; one line per lesson.
 
 ## Where things are

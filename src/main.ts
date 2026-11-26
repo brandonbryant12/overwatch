@@ -12,6 +12,7 @@ import { ConfigError, defaultConfigFile, loadConfig, type Config } from "./confi
 import { clock } from "./clock.ts";
 import { demoConfig, freshen, seedDemo } from "./demo.ts";
 import { doctor } from "./doctor.ts";
+import { envSecrets, install, restart, uninstall } from "./launchd.ts";
 import { clean, errorText } from "./redact.ts";
 import { serve } from "./server.ts";
 import { snapshot } from "./snapshot.ts";
@@ -213,8 +214,35 @@ async function main(): Promise<number> {
       out(r, human.join("\n"));
       return r.automation ? 0 : 4;
     }
+    case "install": {
+      const c = config();
+      const secrets = envSecrets(c.file);
+      if (secrets.length) throw new Exit(2, "invalid_config", `a launchd service cannot read your shell's environment; move these to keychain: references first: ${secrets.join(", ")}`);
+      const r = await launchd(() => install(c.file, c.dataDir));
+      out(r, `Installed ${r.label}: ${r.plist}\nIt runs serve --config ${r.config} now and at every login; output goes to ${r.log}.\nCheck: overwatch status, then overwatch doctor.`);
+      return 0;
+    }
+    case "uninstall": {
+      const r = await launchd(uninstall);
+      out(r, `Removed ${r.label} (${r.plist})${r.wasLoaded ? "; the service is stopped" : "; it was not loaded"}. Your data is kept.`);
+      return 0;
+    }
+    case "restart": {
+      const r = await launchd(restart);
+      out(r, `Restarted ${r.label}.`);
+      return 0;
+    }
     default:
-      throw new Exit(2, "invalid_arguments", `unknown command ${command}; commands: check, serve, status, backup, restore, doctor, trial, demo`);
+      throw new Exit(2, "invalid_arguments", `unknown command ${command}; commands: check, serve, status, backup, restore, doctor, trial, demo, install, uninstall, restart`);
+  }
+}
+
+/** launchctl refused or is missing: unavailable (3), with what it said. */
+async function launchd<T>(step: () => Promise<T>): Promise<T> {
+  try {
+    return await step();
+  } catch (e) {
+    throw new Exit(3, "unavailable", errorText(e));
   }
 }
 
