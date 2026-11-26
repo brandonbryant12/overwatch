@@ -16,10 +16,12 @@ export function fleetPageStates() {
     "verify_failed",
     "stale",
     "declined",
+    "unresolved",
   ]
   const forecast = ["forecast", "reached", "outside_horizon", "unknown"]
   const comparison = ["pending", "regression", "unknown", "no_signal", "same_release"]
   const reasons = {
+    unresolved: "The host has not confirmed this draft after five tries",
     blocked: "The fix trial has not passed",
     ineligible: "The first line predates rollout",
     refused: "The inverse changes an unapproved file",

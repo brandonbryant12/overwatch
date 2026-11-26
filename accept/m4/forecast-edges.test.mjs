@@ -118,3 +118,19 @@ test("S03 production partial reading just in the second interval prevents stagin
   assert.equal(c.state, "unknown")
   assert.match(c.reason, /production.*interval 2/)
 })
+
+test("a third production revision invalidates the staging comparison across restart", async t => {
+  const { x, tick, lines, revisions } = await promotion(t, false)
+  for (const count of [1, 2]) await tick(() => {
+    for (let i=0;i<count;i++) lines.staging.push([iso(x.now()-1),"ERROR carrier label"])
+  })
+  assert.equal((await api(x,"outlook")).comparisons[0].state,"regression")
+  await tick(() => { revisions.production = revisions.staging })
+  assert.equal((await api(x,"outlook")).comparisons[0].state,"same_release")
+  await x.stop()
+  await x.start()
+  await tick(() => { revisions.production = "d".repeat(40) })
+  const comparison = (await api(x,"outlook")).comparisons[0]
+  assert.notEqual(comparison.state,"same_release",JSON.stringify(comparison))
+  assert.notEqual(comparison.state,"regression",JSON.stringify(comparison))
+})

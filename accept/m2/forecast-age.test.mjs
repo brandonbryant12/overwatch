@@ -21,3 +21,16 @@ test(
     assert.doesNotMatch(await b.evaluate("document.querySelector('[data-env]').innerText"), /full in/)
   },
 )
+
+test("a nearly expired estimate disappears on the next page tick with the service clock held", { skip: !binary }, async t => {
+  const x = await capacity(t)
+  for (const value of [20, 30, 40, 50, 60]) await point(x, value)
+  await x.advance(59400)
+  assert.equal((await forecast(x)).state, "forecast")
+  const b = await browser(t, x)
+  await b.visit(x.url + "/")
+  await b.wait("document.querySelector('[data-env]')?.innerText.includes('full in')")
+  await b.wait("document.querySelector('[data-connection=live]') && !document.querySelector('[data-env]').innerText.includes('full in')",
+    "local elapsed time must expire the estimate before the next successful measurement", 4500)
+  assert.equal((await forecast(x)).state, "forecast", "the descriptor clock stayed fixed")
+})
