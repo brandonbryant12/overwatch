@@ -27,8 +27,7 @@ export type Requirements = HttpClient.HttpClient | ChildProcessSpawner.ChildProc
 const rateLimited = Schedule.recurs(LIMITS.retryAfterTimes).pipe(
   Schedule.setInputType<HttpFailure>(),
   Schedule.while(({ input }) => input.status === 429 && input.retryAfterS !== undefined && Number.isFinite(input.retryAfterS) && input.retryAfterS <= LIMITS.retryAfterMaxS),
-  Schedule.modifyDelay(({ input }) => Effect.succeed(Duration.seconds(Math.max(0, input.retryAfterS ?? 0)))),
-);
+  Schedule.modifyDelay(({ input }) => Effect.succeed(Duration.seconds(Math.max(0, input.retryAfterS ?? 0)))));
 
 const request = Effect.fnUntraced(function* (source: Source, path: string, body?: unknown) {
   const apiKey = yield* secret(source.apiKey!), appKey = yield* secret(source.appKey!);
@@ -37,13 +36,11 @@ const request = Effect.fnUntraced(function* (source: Source, path: string, body?
   const url = source.baseUrl + path;
   const req = (body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url).pipe(HttpClientRequest.bodyJsonUnsafe(body))).pipe(
     HttpClientRequest.setHeaders({ "DD-API-KEY": Redacted.value(apiKey), "DD-APPLICATION-KEY": Redacted.value(appKey), "content-type": "application/json" }),
-    HttpClientRequest.acceptJson,
-  );
+    HttpClientRequest.acceptJson);
   const once = Effect.gen(function* () {
     const response = yield* client.execute(req).pipe(
       Effect.timeoutOrElse({ duration: "60 seconds", orElse: () => Effect.fail(new Error("The operation was aborted due to timeout")) }),
-      Effect.mapError((error) => new HttpFailure({ status: 0, message: `Datadog unreachable: ${error.message}` })),
-    );
+      Effect.mapError((error) => new HttpFailure({ status: 0, message: `Datadog unreachable: ${error.message}` })));
     if (response.status === 429) {
       const wait = num(response.headers["retry-after"]) ?? Infinity;
       return yield* new HttpFailure({ status: 429, message: `Datadog rate limit (retry after ${wait}s)`, retryAfterS: wait });
@@ -53,11 +50,8 @@ const request = Effect.fnUntraced(function* (source: Source, path: string, body?
     }
     // A body that is not JSON is not a reply at all: the read fails, as a malformed answer did before.
     return yield* HttpClientResponse.schemaBodyJson(Schema.Unknown)(response).pipe(
-      Effect.mapError(() => new HttpFailure({ status: 0, message: "Datadog answered something that is not JSON" })),
-    );
-  });
-  return yield* once.pipe(Effect.retry(rateLimited));
-});
+      Effect.mapError(() => new HttpFailure({ status: 0, message: "Datadog answered something that is not JSON" }))); });
+  return yield* once.pipe(Effect.retry(rateLimited)); });
 
 // Tolerant shapes: a field of the wrong kind is absent; a list that is not one is absent (and so not complete).
 const field = <S extends Schema.Top>(schema: S) => Schema.optional(schema.pipe(Schema.catchDecoding(() => Effect.succeedNone)));
@@ -81,23 +75,20 @@ export interface DatadogLog {
 
 const LogPage = object({
   data: field(Schema.Array(object({ id: text, attributes: field(object({ timestamp: unknown, message: field(Schema.String), status: text })) }))),
-  meta: field(object({ status: unknown, warnings: field(Schema.Array(Schema.Unknown)), page: field(object({ after: field(Schema.NonEmptyString) })) })),
-});
+  meta: field(object({ status: unknown, warnings: field(Schema.Array(Schema.Unknown)), page: field(object({ after: field(Schema.NonEmptyString) })) })),});
 const decodeLogPage = decode(LogPage);
 
 /**
  * Every log in [from, to], page by page; `each` sees them as they arrive. Returns whether every page had the shape a
  * complete answer has: a data list, and no status or warning saying it is partial.
  */
-export const searchLogs = <E = never, R = never>(source: Source, from: number, to: number, each: (log: DatadogLog) => Effect.Effect<void, E, R>) =>
-  Effect.gen(function* () {
+export const searchLogs = <E = never, R = never>(source: Source, from: number, to: number, each: (log: DatadogLog) => Effect.Effect<void, E, R>) => Effect.gen(function* () {
     let cursor: string | null = null;
     for (let page = 0; page < 10_000; page++) {
       const body: object = {
         filter: { query: source.query, from: new Date(from).toISOString(), to: new Date(to).toISOString() },
         page: { limit: 1000, ...(cursor ? { cursor } : {}) },
-        sort: "timestamp",
-      };
+        sort: "timestamp",};
       const reply: typeof LogPage.Type = decodeLogPage(yield* request(source, "/api/v2/logs/events/search", body)) ?? {};
       const meta: NonNullable<typeof reply.meta> = reply.meta ?? {};
       if (!reply.data || (meta.status !== undefined && meta.status !== "done") || (meta.warnings ?? []).length) return false;
@@ -109,8 +100,7 @@ export const searchLogs = <E = never, R = never>(source: Source, from: number, t
       if (!after) return true;
       cursor = after;
     }
-    return false;
-  });
+    return false; });
 
 export interface Monitor {
   readonly id: string;
@@ -130,12 +120,9 @@ export const monitors = Effect.fnUntraced(function* (source: Source) {
   if (!reply) return { monitors: [] as Monitor[], complete: false };
   const all = reply.map((m) => ({ id: num(m.id) ?? (typeof m.id === "string" && m.id ? m.id : null), name: m.name ?? null, state: m.overall_state ?? null }));
   const known = all.filter((m) => m.id !== null && m.state !== null && STATES.includes(m.state)).map((m): Monitor => ({ id: String(m.id), name: m.name ?? `monitor ${m.id}`, state: m.state }));
-  return { monitors: known, complete: known.length === all.length };
-});
+  return { monitors: known, complete: known.length === all.length }; });
 
-const Query = object({
-  series: field(list(object({ metric: text, unit: field(list(object({ name: text, family: text }))), pointlist: field(list(list(Schema.Unknown))) }))),
-});
+const Query = object({ series: field(list(object({ metric: text, unit: field(list(object({ name: text, family: text }))), pointlist: field(list(list(Schema.Unknown))) }))) });
 const decodeQuery = decode(Query);
 
 /**
@@ -152,10 +139,8 @@ export const metric = Effect.fnUntraced(function* (source: Source, from: number,
       const at = time(point[0]), value = num(point[1]);
       if (at !== null && value !== null && at >= from && at <= to)
         return { name: `${series.metric ?? source.metric} (${source.metric})`, value, at, unit: u.name ?? u.family ?? null };
-    }
-  }
-  return null;
-});
+    }}
+  return null; });
 
 /** For the doctor: are the keys accepted? */
 export const validate = (source: Source): Effect.Effect<void, HttpFailure, Requirements> => Effect.asVoid(request(source, "/api/v1/validate"));

@@ -32,19 +32,10 @@ export const demoConfig = Effect.fn("demoConfig")(function* (port: number) {
           environments: {
             production: { sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
             staging: { sources: { pods: pods("staging-east") } },
-            qa: { sources: { pods: pods("qa-east") } },
-          },
-        },
-      },
-      watchers: [
-        { app: "shop", environment: "production", every: "2m" },
-        { app: "shop", environment: "staging", every: "2m" },
-        { app: "shop", environment: "qa", every: "10m" },
-      ],
-    },
+            qa: { sources: { pods: pods("qa-east") } },},},},
+      watchers: [{ app: "shop", environment: "production", every: "2m" }, { app: "shop", environment: "staging", every: "2m" }, { app: "shop", environment: "qa", every: "10m" }],},
     join(dataDir, "demo.json"),
-  ) as Config;
-});
+  ) as Config; });
 
 export const seedDemo = Effect.gen(function* () {
   const store = yield* Store;
@@ -58,29 +49,24 @@ export const seedDemo = Effect.gen(function* () {
     yield* w.run(
       `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak, first_seq)
        VALUES (?, 'shop', ?, ?, ?, ?, ?, 1, ?, ?, ?, 'logs', ?, 0, ?)`,
-      s(id), s(environment), s(`shop/${environment}/pods`), s(title), s(severity), total, now - counts.length * hour, now - 4 * min, seq, active ? 1 : 0, seq,
-    );
-    for (const [i, n] of counts.entries()) if (n) yield* hourly(w, id, now - (counts.length - 1 - i) * hour, n);
-  });
+      s(id), s(environment), s(`shop/${environment}/pods`), s(title), s(severity), total, now - counts.length * hour, now - 4 * min, seq, active ? 1 : 0, seq);
+    for (const [i, n] of counts.entries()) if (n) yield* hourly(w, id, now - (counts.length - 1 - i) * hour, n); });
   yield* store.tx((w) => Effect.gen(function* () {
     for (const source of config.sources) {
       const signedOut = source.environment === "qa";
       yield* w.run(
         "INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         s(source.id), signedOut ? now - hour : now, signedOut ? s("signin") : null, signedOut ? 2 : 0, now + source.everyMs, signedOut ? 1 : 0,
-        signedOut ? s(`Sign in to ${source.context} again, then check with: kubectl --context ${source.context} -n shop get pods`) : null, s(`${source.kind}:${source.context ?? source.baseUrl}`), source.everyMs,
-      );
+        signedOut ? s(`Sign in to ${source.context} again, then check with: kubectl --context ${source.context} -n shop get pods`) : null, s(`${source.kind}:${source.context ?? source.baseUrl}`), source.everyMs);
       for (const reading of source.readings) {
         yield* w.run("INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, 'ok', ?, ?)", s(source.id), s(reading), signedOut ? now - hour : now, signedOut ? now - hour : now);
-      }
-    }
+      }}
     const first = yield* w.event("deploy", s("shop/production"), { revision: "9f8e7d6c5b4a", previous: null, demo: true });
     yield* w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, 'shop', 'production', '9f8e7d6c5b4a', NULL)", first);
     // Seeded history is labelled as such: it belongs to the environment, not to the problem's own timeline.
     const seeded = (id: string, environment: string) => w.event("incident", s(`shop/${environment}`), { demo: true, seeded: id });
     const seed = Effect.fnUntraced(function* (id: string, environment: string, title: string, severity: string, counts: number[], active = true) {
-      yield* problem(w, id, environment, title, severity, counts, yield* seeded(id, environment), active);
-    });
+      yield* problem(w, id, environment, title, severity, counts, yield* seeded(id, environment), active); });
     yield* seed("inc_d0c5ea12", "production", "ERROR search index rebuild stalled at shard 12", "error", [0, 2, 3, 1, 1], false);
     yield* seed("inc_d0c7a1e5", "staging", "ERROR thumbnail worker exited 137 (OOMKilled) on large uploads", "error", [1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], false);
     yield* w.event("quieted", s("inc_d0c7a1e5"), { demo: true, reason: "three measured intervals with nothing new" });
@@ -99,8 +85,7 @@ export const seedDemo = Effect.gen(function* () {
     yield* seed("inc_d0c5a6e0", "staging", "New in staging since b7c6d5e4f3a2: ERROR shipping quote failed for EU addresses (production a1b2c3d4e5f6 unchanged)", "warn", [0, 0, 3, 2]);
     yield* w.run("UPDATE incidents SET reading = 'comparison', source = 'shop/staging/comparison' WHERE id = 'inc_d0c5a6e0'");
     yield* w.run(`INSERT INTO comparisons (id, app, staging_revision, production_revision, start_seq, state, reason, staging_count, production_count, data, incident)
-      VALUES ('cmp_d0c5a6e0', 'shop', 'b7c6d5e4f3a2', 'a1b2c3d4e5f6', ?, 'regression', 'ERROR shipping quote failed for EU addresses: 5 in staging over two intervals, none in production', 5, 0, '{}', 'inc_d0c5a6e0')`, staged);
-  }));
+      VALUES ('cmp_d0c5a6e0', 'shop', 'b7c6d5e4f3a2', 'a1b2c3d4e5f6', ?, 'regression', 'ERROR shipping quote failed for EU addresses: 5 in staging over two intervals, none in production', 5, 0, '{}', 'inc_d0c5a6e0')`, staged); }));
   // The owner's history, through the same rules as real work: an old issue put away with Done; the staging warning
   // put away with Later, then a finding on it brings it back; a question about the ledger lag queued for an agent.
   yield* act("inc_d0c5ea12", { action: "done" }, null);
@@ -116,8 +101,7 @@ export const seedDemo = Effect.gen(function* () {
     const body = { cause: "Slow cache warm-up at start, as every day since last month", ruled_out: ["the a1b2c3d release"], not_checked: [], next_check: "Watch the warm-up time after the next deploy", impact: "none", affected: [], since: null, status: "investigated" };
     yield* w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES ('f_d0c3f00d0000000000000001', ?, 'not_real', ?, ?, ?)", s(run), json(claims), json({ expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true }), json(body));
     const filed = yield* w.event("finding", s("inc_d0c3f00d"), { id: "f_d0c3f00d0000000000000001", verdict: "not_real", demo: true });
-    yield* afterFinding(w, "inc_d0c3f00d", filed, "not_real");
-  }));
+    yield* afterFinding(w, "inc_d0c3f00d", filed, "not_real"); }));
   yield* keyed("rk_d0c1ed9e0000000000000001", yield* ask({ subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }));
   yield* investigated(TIMEOUT);
   yield* investigated(POOL);
@@ -127,8 +111,7 @@ export const seedDemo = Effect.gen(function* () {
     const diff = 'diff --git a/config/database.json b/config/database.json\n--- a/config/database.json\n+++ b/config/database.json\n@@ -1,5 +1,5 @@\n {\n   "host": "orders-db",\n-  "pool_size": 5,\n+  "pool_size": 20,\n   "timeout_ms": 2000\n }\n';
     const data = { title: POOL.title, summary: "Restore pool_size in config/database.json to 20, its value at 9f8e7d6c5b4a", paths: ["config/database.json"], proposal: { kind: "setting", path: "config/database.json", key: "pool_size" },
       verification: [{ argv: ["npm", "test", "--", "config"], exitCode: 0, elapsedMs: 8412, summary: "12 passing" }], repo: "git.example/acme/shop" };
-    yield* w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'verified', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq);
-  }));
+    yield* w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'verified', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq); }));
   // An answered question on the staging warning, as an agent would have answered it.
   yield* keyed("rk_d0c3f00d0000000000000002", yield* ask({ subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }));
   yield* store.tx((w) => Effect.gen(function* () {
@@ -136,9 +119,7 @@ export const seedDemo = Effect.gen(function* () {
     yield* w.run("UPDATE asks SET state = 'answered', session_id = 'ses_d0c3f00d000000000002', answer = ? WHERE key = 'rk_d0c3f00d0000000000000002'", s(answer));
     yield* w.run("UPDATE work SET state = 'done' WHERE ask_key = 'rk_d0c3f00d0000000000000002'");
     yield* w.run("UPDATE jobs SET state = 'completed' WHERE id = (SELECT job_id FROM asks WHERE key = 'rk_d0c3f00d0000000000000002')");
-    yield* w.event("answered", s("inc_d0c3f00d"), { askSeq: 0, sessionId: "ses_d0c3f00d000000000002", answer, demo: true });
-  }));
-});
+    yield* w.event("answered", s("inc_d0c3f00d"), { askSeq: 0, sessionId: "ses_d0c3f00d000000000002", answer, demo: true }); })); });
 
 type Spec = { subject: string; tag: string; title: string; lines: string[]; diff: string; votes: Array<[string, string, string, string]>; upheld: string };
 /** The production timeout: three readings (two real, one dissent) and a challenger that upheld. */
@@ -149,10 +130,8 @@ const TIMEOUT: Spec = {
   votes: [
     ["real", "The a1b2c3d deploy cut the payments timeout from 3000 ms to 300 ms", "Every timeout follows the deploy and stops at exactly 300 ms", "telemetry"],
     ["real", "The timeout value changed in a1b2c3d", "The deployed config sets timeout_ms to 300, down from 3000", "code"],
-    ["not_real", "The provider was slow for a few minutes", "Timeouts could be the provider's own slowness", "telemetry"],
-  ],
-  upheld: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.",
-};
+    ["not_real", "The provider was slow for a few minutes", "Timeouts could be the provider's own slowness", "telemetry"]],
+  upheld: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.",};
 /** The connection pool: three of three real, upheld, observed. Eligible, so it has a draft fix. */
 const POOL: Spec = {
   subject: "inc_d0c0db05", tag: "d0c0db05", title: "ERROR orders: no free database connection (pool of 5 exhausted)",
@@ -161,10 +140,8 @@ const POOL: Spec = {
   votes: [
     ["real", "a1b2c3d lowered pool_size from 20 to 5", "Exhaustion starts with the deploy and every error names a pool of 5", "telemetry"],
     ["real", "The pool is too small for the order rate since a1b2c3d", "41 requests wait for 5 connections at the peak", "telemetry"],
-    ["real", "pool_size changed in the deploy", "Waiting requests track checkout traffic, not database latency", "telemetry"],
-  ],
-  upheld: "Database latency stayed under 4 ms; only the pool size changed, and every failure names it.",
-};
+    ["real", "pool_size changed in the deploy", "Waiting requests track checkout traffic, not database latency", "telemetry"]],
+  upheld: "Database latency stayed under 4 ms; only the pool size changed, and every failure names it.",};
 
 const investigated = Effect.fnUntraced(function* (spec: Spec) {
   const store = yield* Store;
@@ -196,9 +173,7 @@ const investigated = Effect.fnUntraced(function* (spec: Spec) {
     const observations = new Set(readings.filter((r) => r.verdict === decided.verdict).flatMap((r) => r.observed)).size;
     const result = { verdict: decided.verdict, observed: decided.observed, planned: 3, counts: decided.counts, observations, readings: readings.map(({ telemetry: _, observed: __, ...r }) => r), challenge, seq: at };
     yield* w.event("adjudicated", s(subject), { job, result });
-    yield* w.run("UPDATE jobs SET result = ? WHERE id = ?", json(result), s(job));
-  }));
-});
+    yield* w.run("UPDATE jobs SET result = ? WHERE id = ?", json(result), s(job)); })); });
 
 /** The demo's picture stays as seeded for as long as it runs: its readings are renewed each minute (QA stays signed out). */
 export const freshen = Effect.gen(function* () {
@@ -209,6 +184,4 @@ export const freshen = Effect.gen(function* () {
   yield* store.tx((w) => Effect.gen(function* () {
     yield* w.run("UPDATE readings SET at_ms = ?, ok_ms = ? WHERE source NOT LIKE 'shop/qa/%'", now, now);
     yield* w.run("UPDATE samples SET at_ms = at_ms + ? ", now - ((yield* store.get<{ t: number }>("SELECT max(at_ms) AS t FROM samples"))?.t ?? now));
-    yield* w.event("slice", null, { demo: true, renewed: "readings", atMs: now });
-  }));
-});
+    yield* w.event("slice", null, { demo: true, renewed: "readings", atMs: now }); })); });

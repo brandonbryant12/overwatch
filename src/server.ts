@@ -9,7 +9,9 @@
  */
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
 import { Cause, Effect, FileSystem, Layer, Option, Path, Predicate, Schedule, Schema, Stream } from "effect";
-import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
+import { OpenCodeClient } from "./opencode.ts";
 import { createServer } from "node:http";
 import { Socket } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -45,10 +47,8 @@ const respond = <A, R>(work: Effect.Effect<A, ApiError | Full, R>, status = 200)
     Effect.map((value) => HttpServerResponse.jsonUnsafe(value, { status })),
     Effect.catchTags({
       ApiError: (e) => Effect.succeed(refusal(e.status, CODES[e.status] ?? "bad_request", errorText(e))),
-      Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),
-    }),
-    Effect.catchDefect((defect) => Effect.as(Effect.logError(`http: ${errorText(defect)}`), HttpServerResponse.empty({ status: 500 }))),
-  );
+      Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),}),
+    Effect.catchDefect((defect) => Effect.as(Effect.logError(`http: ${errorText(defect)}`), HttpServerResponse.empty({ status: 500 }))));
 
 /** The JSON body of a request, at most 1 MB; a refusal when it is larger or not JSON. */
 const body = Effect.gen(function* () {
@@ -59,12 +59,13 @@ const body = Effect.gen(function* () {
   if (text.length > MAX_BODY) return yield* apiError(413, "request too large");
   if (!text) return {} as Record<string, unknown>;
   const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(text).pipe(Effect.mapError(() => apiError(400, "the body is not JSON")));
-  return (Predicate.isObject(value) && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
-});
+  return (Predicate.isObject(value) && !Array.isArray(value) ? value : {}) as Record<string, unknown>; });
 
 /** How a POST may change state. Every POST is declared in WRITES with exactly one of these. */
+/** What a route handler may read: the database, the configuration, the services and the platform. */
+type Needs = Store | AppConfig | Collector | Agents | Fixes | Trial | Tools | FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient | OpenCodeClient;
 type Guard<R> =
-  | { readonly keyed: (params: Params, body: Record<string, unknown>) => Effect.Effect<Plan<any, any, any>, ApiError, R>; readonly code?: number }
+  | { readonly keyed: (params: Params, body: Record<string, unknown>) => Effect.Effect<Plan<any, any, R>, ApiError, R>; readonly code?: number }
   | { readonly fenced: (params: Params, body: Record<string, unknown>, basis: number | null) => Effect.Effect<unknown, ApiError | Full, R> }
   | { readonly command: (params: Params, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full, R> };
 type Params = Readonly<Record<string, string | undefined>>;
@@ -77,46 +78,32 @@ const TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".css": "text/css; charset=utf-8",
-  ".svg": "image/svg+xml",
-};
-const page = (pathname: string) =>
-  Effect.gen(function* () {
+  ".svg": "image/svg+xml",};
+const page = (pathname: string) => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const name = pathname === "/" ? "index.html" : pathname.slice(1);
     const type = TYPES[path.extname(name)];
     const file = path.join(WEB, name);
-    const isFile = yield* fs.stat(file).pipe(
-      Effect.map((info) => info.type === "File"),
-      Effect.orElseSucceed(() => false),
-    );
+    const isFile = yield* fs.stat(file).pipe(Effect.map((info) => info.type === "File"), Effect.orElseSucceed(() => false));
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name) || !type || !isFile) return refusal(404, "not_found", `no page file ${pathname}`);
     const bytes = yield* fs.readFile(file).pipe(Effect.orDie);
-    return HttpServerResponse.uint8Array(bytes, { contentType: type, headers: { "cache-control": "no-cache", "x-content-type-options": "nosniff" } });
-  });
+    return HttpServerResponse.uint8Array(bytes, { contentType: type, headers: { "cache-control": "no-cache", "x-content-type-options": "nosniff" } }); });
 
 /** The addresses of this machine's network interfaces: a change wakes failing sources. */
 const networkKey = () => {
   try {
     const { networkInterfaces } = process.getBuiltinModule("node:os");
-    return JSON.stringify(
-      Object.values(networkInterfaces())
-        .flat()
-        .filter((a) => a && !a.internal)
-        .map((a) => a!.address)
-        .sort(),
-    );
+    return JSON.stringify(Object.values(networkInterfaces()) .flat() .filter((a) => a && !a.internal) .map((a) => a!.address) .sort());
   } catch {
     return "";
-  }
-};
+  }};
 
 /**
  * Serves until interrupted. `demo` seeds nothing here (the caller did) but contacts nothing: no collection, agents or
  * fixes. `ready` is told the address once the server listens and the discovery record is written.
  */
-export const serve = (options: { readonly demo: boolean; readonly ready: (url: string) => Effect.Effect<void> }) =>
-  Effect.gen(function* () {
+export const serve = (options: { readonly demo: boolean; readonly ready: (url: string) => Effect.Effect<void> }) => Effect.gen(function* () {
     const config = yield* AppConfig;
     const collect = !options.demo;
 
@@ -129,21 +116,19 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         const trial = yield* Trial;
         const empty = yield* emptyFolder(config.dataDir);
         /** The services a long-lived response stream reads after its handler has returned. */
-        const services = yield* Effect.context<Store | AppConfig>();
+        const services = yield* Effect.context<Needs>();
         const current = snapshot(collector.view, true);
         /** The state after a decision: taken once the decision is written, so it includes it. */
         const decided = (action: { seq: number | null }) => Effect.map(current, (s) => ({ ...s, action }));
         // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
-        const itemOf = (id: string) =>
-          Effect.gen(function* () {
+        const itemOf = (id: string) => Effect.gen(function* () {
             const d = yield* detail(id);
-            return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null };
-          });
+            return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null }; });
 
         // ---- reads
-        const get = (path: HttpRouter.PathInput, handler: (request: HttpServerRequest.HttpServerRequest, url: URL, params: Params) => Effect.Effect<unknown, ApiError | Full, any>) =>
+        const get = (path: HttpRouter.PathInput, handler: (request: HttpServerRequest.HttpServerRequest, url: URL, params: Params) => Effect.Effect<unknown, ApiError | Full, Needs>) =>
           router.add("GET", path, (request) =>
-            Effect.flatMap(HttpRouter.params, (params) => respond(handler(request, new URL(request.url, "http://localhost"), params))),
+            Effect.flatMap(HttpRouter.params, (params) => respond(handler(request, new URL(request.url, "http://localhost"), params)).pipe(Effect.provideContext(services))),
           );
         yield* get("/v2/status", () => current);
         yield* get("/v2/inbox", () => inbox);
@@ -156,8 +141,7 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         yield* get("/v2/outlook", () => Effect.all({ forecasts, comparisons }));
         yield* get("/v2/brief", (_, url) => {
           const q = url.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
-          return brief(q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq"));
-        });
+          return brief(q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")); });
 
         // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.
         let lastBeat = clock.mono();
@@ -167,29 +151,21 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
             if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
             if (clock.mono() - lastBeat < HEARTBEAT_MS) return false;
             lastBeat = clock.mono();
-            return true;
-          }),
-          Stream.mapEffect(() => Effect.map(store.seq, (seq) => frame("heartbeat", { seq, atMs: clock.now() }))),
-        );
+            return true; }),
+          Stream.mapEffect(() => Effect.map(store.seq, (seq) => frame("heartbeat", { seq, atMs: clock.now() }))));
         // Commits that arrive while a change is being prepared are coalesced into the next one.
-        const changes = store.changes.pipe(
-          Stream.chunks,
-          Stream.mapEffect(() => Effect.map(current, (s) => frame("change", s, s.seq))),
-        );
+        const changes = store.changes.pipe(Stream.chunks, Stream.mapEffect(() => Effect.map(current, (s) => frame("change", s, s.seq))));
         yield* router.add("GET", "/v2/changes", () =>
           Effect.map(current, (s) =>
             HttpServerResponse.stream(Stream.concat(Stream.make(frame("snapshot", s, s.seq)), Stream.merge(changes, heartbeats)).pipe(Stream.encodeText, Stream.provideContext(services)), {
               contentType: "text/event-stream",
-              headers: { "cache-control": "no-store", connection: "keep-alive" },
-            }),
-          ),
-        );
+              headers: { "cache-control": "no-store", connection: "keep-alive" },})));
 
         // ---- writes. Every POST is declared here, and only here, with its guard: `keyed` (the router takes the
         // request key and wraps the change in its receipt), `fenced` (the router hands over the basisSeq the owner was
         // shown; a decision made since refuses it) or `command` (changes no item: backup, doctor, trial). Anything
         // else is refused before it runs. MCP is its own route, from src/mcp.ts.
-        const WRITES: ReadonlyArray<readonly [HttpRouter.PathInput, Guard<any>]> = [
+        const WRITES: ReadonlyArray<readonly [HttpRouter.PathInput, Guard<Needs>]> = [
           ["/v2/ask", { keyed: (_, b) => ask(b) }],
           ["/v2/open", { keyed: (_, b) => agents.open(String(b.subject ?? "")) }],
           ["/v2/items/:id/investigate", { keyed: (p) => agents.investigate(p.id!), code: 202 }],
@@ -203,17 +179,11 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
           [
             "/v2/trial",
             {
-              command: (_, b) =>
-                Effect.gen(function* () {
+              command: (_, b) => Effect.gen(function* () {
                   const report = yield* trial.run.pipe(Effect.catchCause((cause) => Effect.fail(apiError(503, errorText(Cause.squash(cause))))));
-                  return b.fixes === true ? { ...report, fixGate: yield* fixes.calibrate(report.automation) } : report;
-                }),
-            },
-          ],
-        ];
+                  return b.fixes === true ? { ...report, fixGate: yield* fixes.calibrate(report.automation).pipe(Effect.catchTag("Unavailable", (e) => Effect.fail(apiError(503, e.message)))) } : report; }),}]];
         for (const [path, guard] of WRITES) {
-          yield* router.add("POST", path, (request) =>
-            Effect.gen(function* () {
+          yield* router.add("POST", path, (request) => Effect.gen(function* () {
               const params = yield* HttpRouter.params;
               const b = yield* body;
               if ("keyed" in guard) {
@@ -226,38 +196,32 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
             }).pipe(
               Effect.catchTags({
                 ApiError: (e) => Effect.succeed(refusal(e.status, CODES[e.status] ?? "bad_request", errorText(e))),
-                Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),
-              }),
+                Full: () => Effect.succeed(refusal(503, "paused", "collection is paused for disk space; see pausedFix in status")),}),
               Effect.catchDefect((defect) => Effect.as(Effect.logError(`http: ${errorText(defect)}`), HttpServerResponse.empty({ status: 500 }))),
-            ),
-          );
+              Effect.provideContext(services)));
         }
 
         // ---- the page, and everything else.
         yield* router.add("GET", "/*", (request) => {
           const pathname = new URL(request.url, "http://localhost").pathname;
-          return pathname.startsWith("/v2/") || pathname === "/mcp" ? Effect.succeed(refusal(404, "not_found", `no route GET ${pathname}`)) : page(pathname);
-        });
-        yield* router.add("*", "/*", (request) => Effect.succeed(refusal(404, "not_found", `no route ${request.method} ${new URL(request.url, "http://localhost").pathname}`)));
-      }),
-    );
+          return pathname.startsWith("/v2/") || pathname === "/mcp" ? Effect.succeed(refusal(404, "not_found", `no route GET ${pathname}`)) : page(pathname); });
+        // Every other method on any path (GET /* is the page, above): the router's "*" would claim GET too.
+        for (const method of ["PUT", "PATCH", "DELETE", "OPTIONS", "POST"] as const)
+          yield* router.add(method, "/*", (request) => Effect.succeed(refusal(404, "not_found", `no route ${request.method} ${new URL(request.url, "http://localhost").pathname}`)));
+      }));
 
     /** Requests must come to a loopback host name, and from the same origin if they name one. */
     const Loopback = HttpRouter.middleware(
-      (app) =>
-        Effect.gen(function* () {
+      (app) => Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           const host = request.headers.host ?? "";
           if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return refusal(403, "forbidden", "Overwatch answers on loopback only");
           if (request.headers.origin && request.headers.origin !== `http://${host}`) return refusal(403, "forbidden", "cross-origin requests are refused");
-          return yield* app;
-        }),
-      { global: true },
-    );
+          return yield* app; }),
+      { global: true });
 
     /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
-    const Scheduler = Layer.effectDiscard(
-      Effect.gen(function* () {
+    const Scheduler = Layer.effectDiscard(Effect.gen(function* () {
         const store = yield* Store;
         const collector = yield* Collector;
         const agents = yield* Agents;
@@ -284,14 +248,12 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
           const socket = yield* NodeSocket.fromDuplex(Effect.sync(() => new Socket({ fd, readable: true, writable: true })));
           const { write } = yield* socket.writer;
           const Control = Schema.Struct({ id: Schema.optional(Schema.Unknown), op: Schema.String, nowMs: Schema.optional(Schema.Number), monoMs: Schema.optional(Schema.Number), freeBytes: Schema.optional(Schema.Number), dbBytes: Schema.optional(Schema.Number), killAfter: Schema.optional(Schema.NullOr(Schema.Number)) });
-          const handle = (line: string) =>
-            Effect.gen(function* () {
+          const handle = (line: string) => Effect.gen(function* () {
               const message = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Control))(line).pipe(Effect.option);
               if (Option.isNone(message)) return;
               const m = message.value;
               const answer = (result: Record<string, unknown>) => write(JSON.stringify({ id: m.id, ...result }) + "\n").pipe(Effect.ignore);
-              const outcome = yield* Effect.exit(
-                Effect.gen(function* () {
+              const outcome = yield* Effect.exit(Effect.gen(function* () {
                   if (m.op === "clock") clock.set(Number(m.nowMs), Number(m.monoMs));
                   else if (m.op === "wake") yield* collector.wake;
                   else if (m.op === "space") yield* collector.setSpace({ freeBytes: Number(m.freeBytes), dbBytes: Number(m.dbBytes) });
@@ -302,11 +264,8 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
                     yield* pass;
                     return { writes: trace.count };
                   }
-                  return { ok: true };
-                }),
-              );
-              yield* answer(outcome._tag === "Success" ? outcome.value : { error: errorText(Cause.squash(outcome.cause)) });
-            });
+                  return { ok: true }; }));
+              yield* answer(outcome._tag === "Success" ? outcome.value : { error: errorText(Cause.squash(outcome.cause)) }); });
           const reader = yield* socket.reader;
           yield* Stream.fromEffectRepeat(reader.pull).pipe(
             Stream.flattenIterable,
@@ -314,8 +273,7 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
             Stream.splitLines,
             Stream.runForEach((line) => Effect.forkDetach(handle(line))),
             Effect.ignore,
-            Effect.forkScoped,
-          );
+            Effect.forkScoped);
         } else {
           // ---- on its own in production: a pass every second, never two at once. Waking from sleep (the clock
           // jumped) or a network change probes failing sources after a few seconds.
@@ -329,13 +287,10 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
             network = key;
             yield* pass.pipe(Effect.catchCause((cause) => Effect.logError(`collect: ${errorText(Cause.squash(cause))}`)));
           }).pipe(Effect.repeat(Schedule.spaced("1 second")), Effect.forkScoped);
-        }
-      }),
-    );
+        }}));
 
     /** The discovery record, written once listening and removed at stop; then the caller is told the address. */
-    const Discovery = Layer.effectDiscard(
-      Effect.gen(function* () {
+    const Discovery = Layer.effectDiscard(Effect.gen(function* () {
         const server = yield* HttpServer.HttpServer;
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
@@ -343,15 +298,11 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         const url = `http://127.0.0.1:${port}`;
         const file = path.join(config.dataDir, "service.json");
         yield* Effect.acquireRelease(fs.writeFileString(file, JSON.stringify({ url, pid: process.pid, version: 2 }), { mode: 0o600 }).pipe(Effect.orDie), () =>
-          fs.remove(file, { force: true }).pipe(Effect.ignore),
-        );
-        yield* options.ready(url);
-      }),
-    );
+          fs.remove(file, { force: true }).pipe(Effect.ignore));
+        yield* options.ready(url); }));
 
-    const Services = Layer.mergeAll(Collector.layer, Tools.layer, Agents.layer, Fixes.layer, Trial.layer);
+    const Services = Layer.mergeAll(Collector.layer, Tools.layer, Agents.layer, Fixes.layer, Trial.layer, OpenCodeClient.layer, FetchHttpClient.layer);
     const App = Layer.mergeAll(Routes, McpRoutes, Loopback);
     const Listener = NodeHttpServer.layer(createServer, { port: config.port, host: "127.0.0.1", gracefulShutdownTimeout: "100 millis" });
     const Http = Layer.mergeAll(HttpRouter.serve(App, { disableLogger: true, disableListenLog: true }), Discovery).pipe(Layer.provide(Listener));
-    return yield* Layer.launch(Layer.mergeAll(Http, Scheduler).pipe(Layer.provide(Services)));
-  });
+    return yield* Layer.launch(Layer.mergeAll(Http, Scheduler).pipe(Layer.provide(Services))); });

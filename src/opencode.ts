@@ -39,15 +39,13 @@ const MessageRow = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
   type: Schema.optionalKey(Schema.String),
   content: Schema.optionalKey(Schema.Array(Part)),
-  outcome: Schema.optionalKey(Schema.NullOr(Schema.String)),
-});
+  outcome: Schema.optionalKey(Schema.NullOr(Schema.String)),});
 const Messages = Schema.Struct({ data: Schema.optionalKey(Schema.Array(MessageRow)) });
 const Session = Schema.Struct({ data: Schema.optionalKey(Schema.Struct({ url: Schema.optionalKey(Schema.String) })) });
 const Anything = Schema.Unknown;
 
 /** The empty, read-only folder sessions work in. */
-export const emptyFolder = (dataDir: string): Effect.Effect<string, never, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
+export const emptyFolder = (dataDir: string): Effect.Effect<string, never, FileSystem.FileSystem | Path.Path> => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const dir = path.join(dataDir, "empty");
@@ -112,14 +110,11 @@ export class OpenCodeClient extends Context.Service<OpenCodeClient, { readonly c
       /** `password` is a secret reference, read on each call; `fallback` a password from OpenCode's own registration. */
       const peer = (url: string, password: string | null, fallback: Redacted.Redacted<string> | null): OpenCode => {
         const auth = password ? secret(password).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)) : Effect.succeed(fallback);
-        const call = <A, I>(schema: Schema.ConstraintCodec<A, I, never, never>, path: string, body?: unknown): Effect.Effect<A, Unavailable | PeerError> =>
-          Effect.gen(function* () {
+        const call = <A, I>(schema: Schema.ConstraintCodec<A, I, never, never>, path: string, body?: unknown): Effect.Effect<A, Unavailable | PeerError> => Effect.gen(function* () {
             let request = (body === undefined ? HttpClientRequest.get(url + path) : HttpClientRequest.post(url + path).pipe(HttpClientRequest.bodyJsonUnsafe(body))).pipe(HttpClientRequest.acceptJson);
             const value = yield* auth;
             if (value) request = HttpClientRequest.basicAuth(request, "opencode", value);
-            const response = yield* http.execute(request).pipe(
-              Effect.mapError((e) => new Unavailable({ message: `OpenCode is not answering at ${url} (${e.message})` })),
-            );
+            const response = yield* http.execute(request).pipe(Effect.mapError((e) => new Unavailable({ message: `OpenCode is not answering at ${url} (${e.message})` })));
             if (response.status >= 500 || response.status < 200 || response.status >= 300) {
               yield* response.text.pipe(Effect.ignore);
               return yield* response.status >= 500
@@ -127,12 +122,10 @@ export class OpenCodeClient extends Context.Service<OpenCodeClient, { readonly c
                 : new PeerError({ message: `OpenCode answered ${response.status} for ${path.replace(/\/session\/[^/?]+/, "/session/…")}` });
             }
             return yield* HttpClientResponse.schemaBodyJson(schema)(response).pipe(
-              Effect.mapError((e) => new PeerError({ message: `OpenCode's reply to ${path.replace(/\/session\/[^/?]+/, "/session/…")} could not be read (${e.message})` })),
-            );
+              Effect.mapError((e) => new PeerError({ message: `OpenCode's reply to ${path.replace(/\/session\/[^/?]+/, "/session/…")} could not be read (${e.message})` })));
           }).pipe(
             Effect.timeoutOption("30 seconds"),
-            Effect.flatMap(Option.match({ onNone: () => Effect.fail(new Unavailable({ message: `OpenCode is not answering at ${url} (timed out after 30 s)` })), onSome: Effect.succeed })),
-          );
+            Effect.flatMap(Option.match({ onNone: () => Effect.fail(new Unavailable({ message: `OpenCode is not answering at ${url} (timed out after 30 s)` })), onSome: Effect.succeed })));
       const at = (route: string) => (directory: string) => call(Catalog, `${route}?location[directory]=${encodeURIComponent(directory)}`).pipe(Effect.map((c) => c.data ?? []));
       const session = (id: string) => `/api/session/${encodeURIComponent(id)}`;
       const spend = (permit: Permit) => Effect.sync(() => permit.spend("peer"));
@@ -142,36 +135,27 @@ export class OpenCodeClient extends Context.Service<OpenCodeClient, { readonly c
         agents: at("/api/agent"),
         mcp: at("/api/mcp"),
         skills: at("/api/skill"),
-        createSession: (permit, input) =>
-          Effect.gen(function* () {
+        createSession: (permit, input) => Effect.gen(function* () {
             yield* spend(permit);
             const slash = input.model?.indexOf("/") ?? -1;
             const model = input.model && slash > 0 ? { providerID: input.model.slice(0, slash), id: input.model.slice(slash + 1) } : null;
             const made = yield* call(Session, "/api/session", {
-              id: input.id, title: input.title, location: { directory: input.directory }, ...(input.agent ? { agent: input.agent } : {}), ...(model ? { model } : {}),
-            });
-            return { url: made.data?.url ?? null };
-          }),
+              id: input.id, title: input.title, location: { directory: input.directory }, ...(input.agent ? { agent: input.agent } : {}), ...(model ? { model } : {}),});
+            return { url: made.data?.url ?? null }; }),
         prompt: (permit, id, input) => spend(permit).pipe(Effect.andThen(call(Anything, `${session(id)}/prompt`, { id: input.id, text: input.text })), Effect.asVoid),
         messages: (id) =>
           call(Messages, `${session(id)}/message?order=desc&limit=200`).pipe(
             Effect.map((m) =>
-              (m.data ?? [])
-                .map((row) => ({ id: row.id ?? "", type: row.type ?? "", text: (row.content ?? []).map((c) => c.text ?? "").join(""), outcome: row.outcome ?? null }))
-                .reverse(),
-            ),
-          ),
+              (m.data ?? []) .map((row) => ({ id: row.id ?? "", type: row.type ?? "", text: (row.content ?? []).map((c) => c.text ?? "").join(""), outcome: row.outcome ?? null }))
+                .reverse())),
         exists: (id) => call(Anything, session(id)).pipe(Effect.as(true), Effect.orElseSucceed(() => false)),
-        interrupt: (permit, id) => spend(permit).pipe(Effect.andThen(call(Anything, `${session(id)}/interrupt`, {})), Effect.ignore),
-      };
+        interrupt: (permit, id) => spend(permit).pipe(Effect.andThen(call(Anything, `${session(id)}/interrupt`, {})), Effect.ignore),};
     };
 
       const connect = Effect.gen(function* () {
         const found = yield* registered;
         if (config.url) return peer(config.url, config.password, config.password ? null : found?.url === config.url ? found.password : null);
-        return found ? peer(found.url, config.password, found.password) : null;
-      });
-      return OpenCodeClient.of({ connect });
-    }),
+        return found ? peer(found.url, config.password, found.password) : null; });
+      return OpenCodeClient.of({ connect }); }),
   ).pipe(Layer.provide(FetchHttpClient.layer));
 }

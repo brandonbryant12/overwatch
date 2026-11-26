@@ -16,8 +16,7 @@ export type FailureKind = typeof FailureKind.Type;
 export class SourceFailure extends Schema.TaggedError<SourceFailure>()("SourceFailure", { kind: FailureKind, detail: Schema.String }) {
   override get message() {
     return this.detail;
-  }
-}
+  }}
 
 const SIGNIN = /\b(unauthori[sz]ed|401)\b|must be logged in|token (has )?expired|expired token|invalid_grant|re-?authenticat|credentials? (are|is|were) (invalid|expired)|api key is invalid/i;
 const RATE = /\b429\b|rate.?limit|too many requests/i;
@@ -73,6 +72,4 @@ export function fixFor(kind: FailureKind, source: Pick<Source, "kind" | "id"> & 
     default: {
       const unknown: never = source.kind;
       throw new Error(`no repair for source kind ${String(unknown)}`);
-    }
-  }
-}
+    }}}

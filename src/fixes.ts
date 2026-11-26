@@ -26,7 +26,7 @@ import type { Plan } from "./inbox.ts";
 import { emptyFolder, OpenCodeClient } from "./opencode.ts";
 import { sha, type ProviderTime } from "./parse.ts";
 import { clean, errorText, outbound } from "./redact.ts";
-import { json, type Clean, type Permit, Store, type Writer } from "./store.ts";
+import { json, type Clean, type Permit, Store, type Writer, sql } from "./store.ts";
 import { type Options, type Proposal, Tools } from "./tools.ts";
 import { approvalKey, fixGateKey } from "./trial.ts";
 
@@ -51,11 +51,9 @@ const unresolved = (message: string) => new Unresolved({ message });
 
 /** The deployment a problem began after, ordered by provider times: the latest whose rollout could precede its first line. */
 const rolloutBefore = Effect.fnUntraced(function* (app: string, environment: string, onset: number) {
-  const store = yield* Store;
-  return yield* store.get<{ seq: number; revision: string; previous: string | null; after_ms: number | null; by_ms: number; exact: number }>(
+  return yield* sql.get<{ seq: number; revision: string; previous: string | null; after_ms: number | null; by_ms: number; exact: number }>(
     `SELECT d.*, r.after_ms, r.by_ms, r.exact FROM deploys d JOIN rollouts r ON r.seq = d.seq WHERE d.app = ? AND d.environment = ? AND coalesce(r.after_ms, r.by_ms) <= ? ORDER BY d.seq DESC LIMIT 1`,
-    app, environment, onset);
-});
+    app, environment, onset); });
 
 /** Both trial gates for the configured model and this app's policy, or why not. */
 const gatesStand = Effect.fnUntraced(function* (app: string) {
@@ -63,16 +61,14 @@ const gatesStand = Effect.fnUntraced(function* (app: string) {
   const config = yield* AppConfig;
   if ((yield* store.meta(approvalKey(config))) !== "on") return `the investigation trial has not passed for ${config.opencode.model ?? "the configured model"}`;
   if ((yield* store.meta(fixGateKey(config, app))) !== "on") return `the fix trial (overwatch trial --fixes) has not passed for ${config.opencode.model ?? "the model"} and ${app}'s fix policy`;
-  return null;
-});
+  return null; });
 
 /** The facts an attempt is admitted on, or the first rule that stops it (blocked: the gates; ineligible: the problem). */
 export const admission = Effect.fnUntraced(function* (incident: string, jobId: string) {
-  const store = yield* Store;
   const config = yield* AppConfig;
-  const inc = yield* store.get<{ id: string; app: string; environment: string; source: string; reading: string; active: number; way: string | null; exact: number; first_seq: number; title: string }>("SELECT * FROM incidents WHERE id = ?", incident);
+  const inc = yield* sql.get<{ id: string; app: string; environment: string; source: string; reading: string; active: number; way: string | null; exact: number; first_seq: number; title: string }>("SELECT * FROM incidents WHERE id = ?", incident);
   if (!inc) return yield* apiError(404, `no item ${incident}`);
-  const job = yield* store.get<{ subject: string; kind: string; state: string; result: string | null }>("SELECT subject, kind, state, result FROM jobs WHERE id = ?", jobId);
+  const job = yield* sql.get<{ subject: string; kind: string; state: string; result: string | null }>("SELECT subject, kind, state, result FROM jobs WHERE id = ?", jobId);
   if (!job) return yield* apiError(404, `no investigation ${jobId}`);
   if (job.kind !== "investigation" || job.subject !== incident) return yield* apiError(409, "that investigation is not about this problem");
   const policy = config.apps[inc.app]?.fixes;
@@ -87,21 +83,20 @@ export const admission = Effect.fnUntraced(function* (incident: string, jobId: s
   if (!r.observed) return halt("ineligible", "it was not observed in telemetry (code only)");
   if (!inc.active || inc.way) return halt("ineligible", inc.way ? "the problem has been put away" : "the problem is no longer active");
   if (!inc.exact) return halt("ineligible", "its count is a lower bound: some of its history was not measured");
-  const onset = (yield* store.get<{ at_ms: number }>("SELECT at_ms FROM onsets WHERE incident = ?", incident))?.at_ms;
+  const onset = (yield* sql.get<{ at_ms: number }>("SELECT at_ms FROM onsets WHERE incident = ?", incident))?.at_ms;
   if (onset === undefined) return halt("ineligible", "no provider time for its first occurrence (only log problems qualify)");
   const deploy = yield* rolloutBefore(inc.app, inc.environment, onset);
   if (!deploy?.previous || deploy.after_ms === null) return halt("ineligible", "no deployment with a known previous revision was observed before it began");
   if (onset <= deploy.by_ms) return halt("ineligible", `its first line (${new Date(onset).toISOString()}) is not strictly after the rollout (${deploy.exact ? "at" : "observed by"} ${new Date(deploy.by_ms).toISOString()})`);
-  const latest = (yield* store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", inc.app, inc.environment))!;
+  const latest = (yield* sql.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", inc.app, inc.environment))!;
   if (latest.revision !== deploy.revision) return halt("ineligible", `a newer deployment (${latest.revision.slice(0, 12)}) replaced the one it began after`);
-  const before = (yield* store.all<{ data: string }>("SELECT data FROM events WHERE kind = 'slice' AND subject = ? AND seq < ? ORDER BY seq DESC LIMIT 50", inc.source, deploy.seq))
+  const before = (yield* sql.all<{ data: string }>("SELECT data FROM events WHERE kind = 'slice' AND subject = ? AND seq < ? ORDER BY seq DESC LIMIT 50", inc.source, deploy.seq))
     .some((e) => { const d = JSON.parse(e.data) as { ordinary?: boolean; to: number; readings: Record<string, { state: string }> }; return d.ordinary && d.readings[inc.reading]?.state === "ok" && d.to <= deploy.after_ms!; });
   if (!before) return halt("ineligible", "no full, measured, ordinary interval before the rollout shows it absent");
-  const fresh = (yield* store.get<{ ok_ms: ProviderTime | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = ?", inc.source, inc.reading))?.ok_ms ?? null;
+  const fresh = (yield* sql.get<{ ok_ms: ProviderTime | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = ?", inc.source, inc.reading))?.ok_ms ?? null;
   const every = config.watchers.find((w) => w.app === inc.app && w.environment === inc.environment)?.everyMs ?? 600_000;
   if (fresh === null || clock.now() - fresh > LIMITS.freshIntervals * every) return halt("ineligible", "its telemetry is not fresh");
-  return { state: "queued" as const, reason: null as string | null, inc, policy, previous: deploy.previous as string | null, deployed: deploy.revision as string | null };
-});
+  return { state: "queued" as const, reason: null as string | null, inc, policy, previous: deploy.previous as string | null, deployed: deploy.revision as string | null }; });
 
 const attemptId = (incident: string, jobId: string, deployed: string | null, policy: Policy | undefined, again = 0) => `fx_${sha(incident, jobId, deployed, policy ?? null, ...(again ? [again] : [])).slice(0, 24)}`;
 
@@ -118,8 +113,7 @@ function failedBecause(f: Verification) {
 /** A pull request as `gh pr list --json` reports it. */
 const PullRequest = Schema.Struct({
   number: Schema.Number, url: Schema.String, state: Schema.String, isDraft: Schema.Boolean, baseRefName: Schema.String, headRefName: Schema.String,
-  headRefOid: Schema.optionalKey(Schema.String), headRepository: Schema.optionalKey(Schema.NullOr(Schema.Struct({ name: Schema.optionalKey(Schema.String) }))), body: Schema.optionalKey(Schema.String),
-});
+  headRefOid: Schema.optionalKey(Schema.String), headRepository: Schema.optionalKey(Schema.NullOr(Schema.Struct({ name: Schema.optionalKey(Schema.String) }))), body: Schema.optionalKey(Schema.String),});
 const PullRequests = Schema.fromJsonString(Schema.Array(PullRequest));
 /** A branch's rules as `gh api …/rules/branches/…` reports them: a list of rules, or an object saying whether it is protected. */
 const Rules = Schema.fromJsonString(Schema.Union([Schema.Array(Schema.Unknown), Schema.Struct({ protected: Schema.Boolean })]));
@@ -133,8 +127,7 @@ const toView = (r: Row, base: string) => {
   const action = r.state === "verified" ? { key: "P", label: "Open draft pull request", effect: `pushes branch ow/fix/${r.id} and opens a draft pull request against ${base} in ${d.repo ?? "the configured repository"}` } : null;
   return {
     id: r.id, state: r.state, reason: r.reason, host: d.host ?? null, step: d.step ?? null, action, subject: r.incident, jobId: r.job_id, origin: r.origin, previous: r.previous, deployed: r.deployed,
-    base: r.base, head: r.head, proposal: d.proposal ?? null, diff: r.diff, paths: d.paths ?? [], verification: d.verification ?? [], pr: d.pr ?? null, publishedMs: d.publishedMs ?? null, repository: d.repo ?? null, seq: r.seq,
-  };
+    base: r.base, head: r.head, proposal: d.proposal ?? null, diff: r.diff, paths: d.paths ?? [], verification: d.verification ?? [], pr: d.pr ?? null, publishedMs: d.publishedMs ?? null, repository: d.repo ?? null, seq: r.seq,};
 };
 
 export interface FixesShape {
@@ -175,8 +168,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
       const row = Effect.fnUntraced(function* (id: string) {
         const r = yield* store.get<Row>("SELECT * FROM fixes WHERE id = ?", id);
         if (!r) return yield* apiError(404, `no fix ${id}`);
-        return r;
-      });
+        return r; });
       const view = (id: string) => Effect.map(row(id), (r) => toView(r, config.apps[r.app]?.fixes?.base ?? "main"));
 
       const admit = Effect.fnUntraced(function* (w: Writer, incident: string, jobId: string, origin: string) {
@@ -193,8 +185,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           ON CONFLICT (id) DO UPDATE SET state = excluded.state, reason = excluded.reason, previous = excluded.previous, deployed = excluded.deployed, version = version + 1,
             base = NULL, candidate = NULL, head = NULL, diff = NULL, data = json_patch(excluded.data, json_object('host', json_extract(data, '$.host')))`,
           id as Clean, incident as Clean, jobId as Clean, a.inc.app as Clean, a.inc.environment as Clean, origin as Clean, a.state as Clean, a.reason as Clean | null, a.previous as Clean | null, a.deployed as Clean | null, seq, json({ title: a.inc.title }));
-        return id;
-      });
+        return id; });
 
       /** The one way an attempt changes: compare-and-set on the version the caller read; a newer decision wins. */
       const set = Effect.fnUntraced(function* (w: Writer, r: Row, state: string, reason: string | null, change: Partial<Row> = {}, data: Data = {}) {
@@ -203,8 +194,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         const changed = (yield* w.run(`UPDATE fixes SET state = ?, reason = ?, data = ?, version = version + 1${cols.map((c) => `, ${c} = ?`).join("")} WHERE id = ? AND version = ?`,
           state as Clean, reason as Clean | null, json(merged), ...cols.map((c) => (change as Record<string, Clean>)[c]!), r.id as Clean, r.version)).changes;
         if (!changed) return yield* new Superseded();
-        yield* w.event("fix", r.incident as Clean, { id: r.id, state, reason });
-      });
+        yield* w.event("fix", r.incident as Clean, { id: r.id, state, reason }); });
       const update = (r: Row, state: string, reason: string | null, change: Partial<Row> = {}, data: Data = {}) =>
         store.tx((w) => set(w, r, state, reason, change, data)).pipe(Effect.andThen(row(r.id)), Effect.catchTag("ApiError", Effect.die));
       /** A fact about the host, recorded whatever the attempt's state: the owner is told what exists there. */
@@ -221,15 +211,13 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           yield* fs.makeDirectory(mirror(app), { recursive: true }).pipe(Effect.orDie);
           yield* exec("git", ["init", "-q", "--bare", mirror(app)]);
         }
-        return r.stdout.trim();
-      });
+        return r.stdout.trim(); });
       /** The remote's base tip, fetched into the mirror. */
       const tip = Effect.fnUntraced(function* (app: string) {
         const policy = config.apps[app]!.fixes!, url = yield* remote(app);
         const r = yield* git(app).run(["fetch", "-q", "--no-tags", url, `+refs/heads/${policy.base}:refs/ow/base`]);
         if (r.code !== 0) return yield* unresolved(`the base branch ${policy.base} could not be read from ${policy.remote}`);
-        return (yield* git(app).out(["rev-parse", "refs/ow/base"], "base")).trim();
-      });
+        return (yield* git(app).out(["rev-parse", "refs/ow/base"], "base")).trim(); });
       const repository = Effect.fnUntraced(function* (app: string) {
         const known = repos.get(app);
         if (known) return known;
@@ -240,8 +228,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           ? { host: m[1] === "github.com" ? null : m[1]!, slug: `${m[2]}/${m[3]}`, name: m[1] === "github.com" ? `${m[2]}/${m[3]}` : `${m[1]}/${m[2]}/${m[3]}` }
           : { host: null, slug: `local/${last}`, name: `local/${last}` };
         repos.set(app, repo);
-        return repo;
-      });
+        return repo; });
 
       /** What the fixer may choose: the commits of the rollout, and the JSON scalars that differ from the previous deployment. */
       const options = Effect.fnUntraced(function* (r: Row, policy: Policy, base: string) {
@@ -255,13 +242,11 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           if (!a || !b || was!.code || now!.code) continue;
           for (const k of Object.keys(b)) if (k in a && scalar(a[k]) && scalar(b[k]) && a[k] !== b[k]) keys.push({ path: file, key: k });
         }
-        return { commits: log.split("\n").filter(Boolean).map((l) => ({ sha: l.slice(0, 40), subject: clean(l.slice(41), 200) })), keys } satisfies Options;
-      });
+        return { commits: log.split("\n").filter(Boolean).map((l) => ({ sha: l.slice(0, 40), subject: clean(l.slice(41), 200) })), keys } satisfies Options; });
 
       const claims = (jobId: string) =>
         Effect.map(store.all<{ claims: string; body: string }>("SELECT f.claims, f.body FROM findings f JOIN work k ON k.run_id = f.run_id WHERE k.job_id = ? AND f.verdict = 'real'", jobId), (rows) =>
-          rows.flatMap((f) => [String((JSON.parse(f.body) as { cause?: string }).cause ?? ""), ...(JSON.parse(f.claims) as Array<{ statement: string }>).map((c) => c.statement)]).filter(Boolean).slice(0, 12),
-        );
+          rows.flatMap((f) => [String((JSON.parse(f.body) as { cause?: string }).cause ?? ""), ...(JSON.parse(f.claims) as Array<{ statement: string }>).map((c) => c.statement)]).filter(Boolean).slice(0, 12));
 
       /** One fixer conversation through the shared driver; a proposal already filed for this attempt is final. */
       const propose = Effect.fnUntraced(function* (r: Row, opts: Options) {
@@ -271,20 +256,17 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           const frozen = JSON.parse(job.inputs) as { title: string; app: string; environment: string; telemetry: Record<string, Array<{ at: number; text: string; origin: "telemetry" | "generated" }>> };
           yield* withSlot(converse(emptyDir, {
             jobId: r.job_id, role: "fixer", workId: r.id, title: `Overwatch fix proposal: ${frozen.app}/${frozen.environment}`, nudge: FIXER_NUDGE,
-            prompt: fixerPrompt(frozen.title, yield* claims(r.job_id), opts, config.apps[r.app]!.fixes!), context: { telemetry: frozen.telemetry, repo: null, options: opts },
-          }));
+            prompt: fixerPrompt(frozen.title, yield* claims(r.job_id), opts, config.apps[r.app]!.fixes!), context: { telemetry: frozen.telemetry, repo: null, options: opts },}));
         }
         const p = yield* prior;
         if (!p) return yield* stop("refused", "the fixer filed no proposal after a nudge, a fresh session and its nudge");
-        return yield* accepted(p);
-      });
+        return yield* accepted(p); });
 
       /** Eligibility, the fixer's selection, derivation, the whole-tree check and the isolated verify: a verified candidate, or the rule that stopped it. */
       const drive = Effect.fnUntraced(function* (start: Row) {
         let r = start;
         const policy = config.apps[r.app]?.fixes;
-        const outcome = yield* Effect.exit(
-          Effect.gen(function* () {
+        const outcome = yield* Effect.exit(Effect.gen(function* () {
             if (!policy) return yield* stop("blocked", `fix proposals are no longer enabled for ${r.app}`);
             if (r.state === "queued") {
               const again = yield* admission(r.incident, r.job_id);
@@ -306,13 +288,10 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
                 // A real verify failure revokes the fix gate until a new complete passing trial.
                 const current = r;
                 return yield* store.tx((w) =>
-                  Effect.andThen(set(w, current, "verify_failed", failedBecause(failed), {}, { verification: results }), w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'off')", fixGateKey(config, current.app) as Clean)),
-                );
+                  Effect.andThen(set(w, current, "verify_failed", failedBecause(failed), {}, { verification: results }), w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'off')", fixGateKey(config, current.app) as Clean)));
               }
               yield* update(r, "verified", null, { head: r.candidate }, { verification: results, repo: (yield* repository(r.app)).name });
-            }
-          }),
-        );
+            }}));
         if (Exit.isSuccess(outcome)) return;
         if (Cause.hasInterruptsOnly(outcome.cause)) return yield* Effect.failCause(outcome.cause as Cause.Cause<never>);
         const e = Cause.squash(outcome.cause);
@@ -322,8 +301,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         if (now.version !== r.version) return;
         if (Predicate.isTagged(e, "Unresolved")) return void (yield* update(now, "unresolved", `${(e as Unresolved).message}; press f to try again`).pipe(Effect.catchTag("Superseded", () => Effect.void)));
         if (!Predicate.isTagged(e, "FixStop")) return yield* Effect.failCause(outcome.cause);
-        yield* update(now, (e as FixStop).state, (e as FixStop).message).pipe(Effect.catchTag("Superseded", () => Effect.void));
-      });
+        yield* update(now, (e as FixStop).state, (e as FixStop).message).pipe(Effect.catchTag("Superseded", () => Effect.void)); });
 
       const work = Effect.gen(function* () {
         for (const j of yield* store.all<{ id: string; subject: string }>(
@@ -331,8 +309,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           if ((yield* admission(j.subject, j.id)).state === "queued") yield* store.tx((w) => admit(w, j.subject, j.id, "automatic"));
         }
         const next = yield* store.get<Row>(`SELECT * FROM fixes WHERE state IN (${ACTIVE.map((s) => `'${s}'`).join(",")}) ORDER BY seq LIMIT 1`);
-        if (next) yield* drive(next);
-      });
+        if (next) yield* drive(next); });
 
       const tick: Effect.Effect<void> = Effect.suspend(() => {
         if (busy) return Effect.sync(() => void (again = true)); // a pass that arrives mid-work runs once it ends, never dropped
@@ -344,11 +321,8 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
               busy = false;
               if (!again) return Effect.void;
               again = false;
-              return tick;
-            })),
-          ),
-        ).pipe(Effect.asVoid);
-      });
+              return tick; }))),
+        ).pipe(Effect.asVoid); });
 
       /** Why a verified candidate cannot be published right now, or null: the problem, both gates, and the deployment. */
       const unready = Effect.fnUntraced(function* (r: Row) {
@@ -358,26 +332,21 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         if (gates) return gates;
         const latest = yield* store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", r.app, r.environment);
         if (latest?.revision !== r.deployed) return `a newer deployment (${latest?.revision.slice(0, 12)}) replaced the one this fix answers; press f to derive again`;
-        return ["verified", "published"].includes(r.state) ? null : `only a verified candidate can be published; this attempt is ${r.state}`;
-      });
+        return ["verified", "published"].includes(r.state) ? null : `only a verified candidate can be published; this attempt is ${r.state}`; });
 
       /** The intent for one host step, recorded before it runs, with a permit bound to exactly its arguments. */
       const intent = (r: Row, step: string, kind: "host" | "push", bind: string[]): Effect.Effect<Permit, Full> =>
-        store.tx((w) =>
-          Effect.gen(function* () {
+        store.tx((w) => Effect.gen(function* () {
             yield* w.run("UPDATE fixes SET data = json_set(data, '$.step', ?) WHERE id = ?", step as Clean, r.id as Clean);
             yield* w.event("fix_step", r.incident as Clean, { id: r.id, step });
-            return yield* w.permit(kind, r.id, { step }, bind);
-          }),
-        );
+            return yield* w.permit(kind, r.id, { step }, bind); }));
 
       /** A `gh` call against the one resolved repository, bound to exactly these arguments; a timeout is unresolved. */
       const host = Effect.fnUntraced(function* (r: Row, step: string, args: string[]) {
         const repo = yield* repository(r.app), call = [...args, ...(args[0] === "api" ? (repo.host ? ["--hostname", repo.host] : []) : ["--repo", repo.name])];
         const result = yield* effect(yield* intent(r, step, "host", call), "gh", call, { cwd: config.apps[r.app]!.checkout, timeoutMs: 30_000 });
         if (result.timedOut) return yield* unresolved(`the host did not answer the ${step} within 30 s`);
-        return result;
-      });
+        return result; });
 
       /** The draft for this attempt on the host, confirmed exactly (repository, head branch and commit, base, marker, draft, open), or null. */
       const find = Effect.fnUntraced(function* (r: Row, branch: string, policy: Policy, head: string | null) {
@@ -388,8 +357,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         const name = (yield* repository(r.app)).name.split("/").at(-1);
         const exact = rows.find((p) => p.headRefName === branch && (p.headRefOid ?? head) === r.head && (!p.headRepository?.name || p.headRepository.name === name) && p.baseRefName === policy.base && p.isDraft && p.state === "OPEN" && (p.body ?? "").includes(`overwatch-attempt: ${r.id}`));
         if (!exact && rows.length) return yield* unresolved(`a pull request for ${branch} exists (#${rows[0]!.number}) that is not this attempt's draft (head, base, marker or draft state differ); Overwatch does not adopt it`);
-        return exact ?? null;
-      });
+        return exact ?? null; });
 
       const title = (r: Row) => `Overwatch draft fix: ${(JSON.parse(r.data) as Data).summary ?? "change"} (${r.app}/${r.environment})`;
 
@@ -417,8 +385,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
           "A model selected this change from a short list Overwatch computed (revert one commit of the deployment, or restore one setting to its previous value). Overwatch derived the bytes from Git objects and checked the whole tree: only the allowed files, the same modes, at most 3 files and 80 changed lines. It does not merge anything.",
           "Uncertain: whether this change alone resolves the problem; a release of a merge and three quiet intervals will tell.", "",
           `<!-- overwatch-attempt: ${r.id} -->`,
-        ].join("\n");
-      });
+        ].join("\n"); });
 
       /**
        * The host steps of one keypress, in order, each with its intent recorded first, reconciling from the host before
@@ -440,8 +407,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
             const ref = Effect.fnUntraced(function* (name: string) {
               const listed = yield* git(r.app).run(["ls-remote", url, `refs/heads/${name}`]);
               if (listed.code !== 0) return yield* unresolved(`the remote could not be read: ${clean(listed.stderr.trim(), 200)}`);
-              return listed.stdout.split(/\s/)[0] || null;
-            });
+              return listed.stdout.split(/\s/)[0] || null; });
             let there = yield* ref(branch);
             const onHost = there ? `the branch ${branch} (head ${there.slice(0, 12)}); delete it on the host if you do not want it.` : "nothing.";
             const at = yield* ref(policy.base);
@@ -466,21 +432,17 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
               const text = outbound(yield* body(r));
               const made = yield* Effect.acquireUseRelease(
                 scratch("ow-pr-"),
-                (tmp) =>
-                  Effect.gen(function* () {
+                (tmp) => Effect.gen(function* () {
                     const file = path.join(tmp, "body.md");
                     yield* fs.writeFileString(file, text).pipe(Effect.orDie);
-                    return yield* host(r, "draft creation", ["pr", "create", "--draft", "--base", policy.base, "--head", branch, "--title", outbound(title(r)), "--body-file", file]);
-                  }),
-                (tmp) => fs.remove(tmp, { recursive: true, force: true }).pipe(Effect.ignore),
-              );
+                    return yield* host(r, "draft creation", ["pr", "create", "--draft", "--base", policy.base, "--head", branch, "--title", outbound(title(r)), "--body-file", file]); }),
+                (tmp) => fs.remove(tmp, { recursive: true, force: true }).pipe(Effect.ignore));
               if (made.code !== 0) return yield* unresolved(`draft creation failed on the host: ${clean(made.stderr.trim(), 200) || `exit ${made.code}`}`);
               pr = yield* find(r, branch, policy, yield* ref(branch));
               if (!pr) return yield* unresolved("the host reported draft creation, but no draft for this attempt can be found");
             }
             yield* hosted(r, `draft #${pr.number} (${pr.url}) and its branch ${branch}; close the draft on the host to withdraw it.`);
-            yield* update(yield* row(id), "published", null, {}, { pr: { number: pr.number, url: clean(pr.url, 300), draft: pr.isDraft, state: pr.state }, publishedMs: clock.now() });
-          });
+            yield* update(yield* row(id), "published", null, {}, { pr: { number: pr.number, url: clean(pr.url, 300), draft: pr.isDraft, state: pr.state }, publishedMs: clock.now() }); });
           const outcome = yield* Effect.exit(steps);
           if (Exit.isFailure(outcome)) {
             if (Cause.hasInterruptsOnly(outcome.cause)) return yield* Effect.failCause(outcome.cause as Cause.Cause<never>);
@@ -489,13 +451,10 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
             yield* store.tx((w) =>
               Effect.andThen(
                 w.run("UPDATE fixes SET reason = ? WHERE id = ?", outbound(`Stopped at ${d.step ?? "the start"}: ${errorText(Cause.squash(outcome.cause), 300)}. On the host: ${d.host ?? "nothing"} Press P to check the host and continue.`) as Clean, id as Clean),
-                w.event("fix", r.incident as Clean, { id, state: r.state, stopped: d.step ?? null }),
-              ),
-            );
+                w.event("fix", r.incident as Clean, { id, state: r.state, stopped: d.step ?? null })));
           }
           return yield* view(id);
-        }).pipe(Effect.ensuring(Effect.sync(() => publishing.delete(id))));
-      });
+        }).pipe(Effect.ensuring(Effect.sync(() => publishing.delete(id)))); });
 
       /**
        * `trial --fixes`: a revert exercise that offers only commits, a setting exercise that offers only settings, and a
@@ -509,16 +468,12 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         for (const kind of ["revert", "setting", "abstain"] as const) {
           yield* Effect.acquireUseRelease(
             scratch("ow-calibration-"),
-            (repo) =>
-              Effect.gen(function* () {
-                const job = yield* store.tx((w) =>
-                  Effect.gen(function* () {
+            (repo) => Effect.gen(function* () {
+                const job = yield* store.tx((w) => Effect.gen(function* () {
                     const id = `job_${randomBytes(12).toString("hex")}`;
                     const seq = yield* w.event("job", id as Clean, { kind: "fix calibration", exercise: kind });
                     yield* w.run("INSERT INTO jobs (id, kind, subject, title, state, reason, created_seq) VALUES (?, 'trial', ?, ?, 'running', NULL, ?)", id as Clean, `calibration-${kind}` as Clean, `Overwatch fix calibration ${kind}` as Clean, seq);
-                    return id;
-                  }),
-                );
+                    return id; }));
                 const commits = yield* seed(repo);
                 const opts: Options = { commits: kind === "revert" ? [{ sha: commits.regressed, subject: "lower the timeout" }] : [], keys: kind === "setting" ? [{ path: "settings.json", key: "timeout" }] : [] };
                 const ask = kind === "abstain"
@@ -526,8 +481,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
                   : `The deployment ${commits.regressed.slice(0, 12)} lowered the timeout in settings.json from 30 to 3 and checkout calls now fail.`;
                 const { runId } = yield* withSlot(converse(emptyDir, {
                   jobId: job, role: "fixer", title: `Overwatch fix calibration ${kind}`, prompt: fixerPrompt(ask, [], opts, policy), nudge: FIXER_NUDGE,
-                  context: { telemetry: { pods: [{ at: Date.parse("2026-01-20T12:00:00Z"), text: "ERROR checkout: payments call timed out after 3ms", origin: "telemetry" }] }, repo: null, options: opts },
-                }));
+                  context: { telemetry: { pods: [{ at: Date.parse("2026-01-20T12:00:00Z"), text: "ERROR checkout: payments call timed out after 3ms", origin: "telemetry" }] }, repo: null, options: opts },}));
                 const p = runId ? yield* store.get<{ body: string; refused: string | null }>("SELECT * FROM proposals WHERE run_id = ?", runId) : undefined;
                 const chosen = p && !p.refused ? (JSON.parse(p.body) as Proposal) : null;
                 let ok = chosen?.kind === kind;
@@ -538,70 +492,51 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
                   if (ok) verified++;
                 }
                 results.push({ kind, ok });
-                yield* store.tx((w) => w.run("UPDATE jobs SET state = 'completed' WHERE id = ?", job as Clean));
-              }),
-            (repo) => fs.remove(repo, { recursive: true, force: true }).pipe(Effect.ignore),
-          );
+                yield* store.tx((w) => w.run("UPDATE jobs SET state = 'completed' WHERE id = ?", job as Clean)); }),
+            (repo) => fs.remove(repo, { recursive: true, force: true }).pipe(Effect.ignore));
         }
         const passed = investigationPassed && verified === 2 && !forbidden;
-        yield* store.tx((w) =>
-          Effect.gen(function* () {
+        yield* store.tx((w) => Effect.gen(function* () {
             for (const app of Object.keys(config.apps).filter((a) => config.apps[a]!.fixes)) yield* w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", fixGateKey(config, app) as Clean, (passed ? "on" : "off") as Clean);
-            yield* w.event("job", null, { fixGate: { passed, attempted: 2, verified, results } });
-          }),
-        );
-        return { passed, attempted: 2, verified };
-      });
+            yield* w.event("job", null, { fixGate: { passed, attempted: 2, verified, results } }); }));
+        return { passed, attempted: 2, verified }; });
 
       return Fixes.of({
         request: (incident, b) =>
-          local(
-            Effect.gen(function* () {
+          local(Effect.gen(function* () {
               const jobId = Predicate.isString(b.jobId) ? b.jobId : "";
               yield* admission(incident, jobId); // 404 and 409 before a receipt is taken
-              return { op: "fix", subject: incident, body: { jobId }, change: (w) => local(Effect.map(admit(w, incident, jobId, "manual"), (attemptId) => ({ attemptId }))) } satisfies Plan<{ attemptId: string }, Full>;
-            }),
-          ),
+              return { op: "fix", subject: incident, body: { jobId }, change: (w) => local(Effect.map(admit(w, incident, jobId, "manual"), (attemptId) => ({ attemptId }))) } satisfies Plan<{ attemptId: string }, Full>; })),
         /**
          * The owner's keypress. Its transaction checks that the item is the one the owner was shown (basisSeq), the
          * problem is not put away, both gates stand and the deployment is still the finding's; then the host steps run
          * while the owner waits (publish()). A repeat reconciles and continues.
          */
         publication: (id, basis) =>
-          local(
-            Effect.gen(function* () {
+          local(Effect.gen(function* () {
               yield* row(id);
               return {
                 op: "publish",
                 subject: id,
                 body: {},
                 change: (w) =>
-                  local(
-                    Effect.gen(function* () {
+                  local(Effect.gen(function* () {
                       const r = yield* row(id), decided = (yield* store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = ?", r.incident))?.decided_seq;
                       if (basis === null) return yield* apiError(400, "basisSeq (the item's decidedSeq you were shown) is required to publish");
                       if (basis !== decided) return yield* apiError(409, "this item was decided again since you looked; look again");
                       const why = yield* unready(r);
                       if (why) return yield* apiError(409, why);
                       yield* w.event("publish", r.incident as Clean, { id });
-                      return { attemptId: id } as { attemptId: string; fix?: View };
-                    }),
-                  ),
+                      return { attemptId: id } as { attemptId: string; fix?: View }; })),
                 after: () => local(Effect.map(publish(id), (fix) => ({ attemptId: id, fix }))),
-              } satisfies Plan<{ attemptId: string; fix?: View }, Full>;
-            }),
-          ),
+              } satisfies Plan<{ attemptId: string; fix?: View }, Full>; })),
         view: (id) => view(id),
-        forItem: (incident) =>
-          Effect.gen(function* () {
+        forItem: (incident) => Effect.gen(function* () {
             const out: View[] = [];
             for (const r of yield* store.all<Row>("SELECT * FROM fixes WHERE incident = ? ORDER BY seq", incident)) out.push(toView(r, config.apps[r.app]?.fixes?.base ?? "main"));
-            return out;
-          }),
+            return out; }),
         tick,
-        calibrate: (investigationPassed) => local(calibrate(investigationPassed)),
-      });
-    }),
+        calibrate: (investigationPassed) => local(calibrate(investigationPassed)),}); }),
   ).pipe(Layer.provide(Layer.mergeAll(Tools.layer, OpenCodeClient.layer, Slots.layer)));
 }
 
@@ -616,8 +551,7 @@ export function gitAt(dir: string): Git {
   return {
     run,
     out: (args, what, env) =>
-      Effect.flatMap(run(args, env), (r) => (r.code !== 0 ? Effect.fail(stop("stale", `${what}: ${clean(r.stderr.trim().split("\n")[0] ?? "", 200)}`)) : Effect.succeed(r.stdout))),
-  };
+      Effect.flatMap(run(args, env), (r) => (r.code !== 0 ? Effect.fail(stop("stale", `${what}: ${clean(r.stderr.trim().split("\n")[0] ?? "", 200)}`)) : Effect.succeed(r.stdout))),};
 }
 
 const accepted = (p: { body: string; refused: string | null }): Effect.Effect<Proposal, FixStop> =>
@@ -656,8 +590,7 @@ export const derive = Effect.fnUntraced(function* (git: Git, row: Pick<Row, "id"
     if (restored === null) return yield* stop("refused", `${p.path} cannot be restored without reformatting it`);
     tree = yield* Effect.acquireUseRelease(
       scratch("ow-fix-"),
-      (tmp) =>
-        Effect.gen(function* () {
+      (tmp) => Effect.gen(function* () {
           const file = path.join(tmp, "blob");
           yield* fs.writeFileString(file, restored).pipe(Effect.orDie);
           const blob = (yield* git.out(["hash-object", "-w", file], "blob")).trim();
@@ -665,10 +598,8 @@ export const derive = Effect.fnUntraced(function* (git: Git, row: Pick<Row, "id"
           yield* git.out(["read-tree", base], "tree", index);
           const mode = (yield* git.out(["ls-tree", base, "--", p.path], "mode")).split(" ")[0];
           yield* git.out(["update-index", "--cacheinfo", `${mode},${blob},${p.path}`], "index", index);
-          return (yield* git.out(["write-tree"], "tree", index)).trim();
-        }),
-      (tmp) => fs.remove(tmp, { recursive: true, force: true }).pipe(Effect.ignore),
-    );
+          return (yield* git.out(["write-tree"], "tree", index)).trim(); }),
+      (tmp) => fs.remove(tmp, { recursive: true, force: true }).pipe(Effect.ignore));
     summary = `Restore ${p.key} in ${p.path} to ${JSON.stringify(was[p.key])}, its value at ${row.previous!.slice(0, 12)}`;
     message = `Restore ${p.key} in ${p.path} to its value at ${row.previous}`;
   }
@@ -676,8 +607,7 @@ export const derive = Effect.fnUntraced(function* (git: Git, row: Pick<Row, "id"
   const commit = (yield* git.out(["commit-tree", tree, "-p", base, "-m", `${message}\n\nProposed by Overwatch (attempt ${row.id}); a model selected the change, code derived it.`], "commit", author)).trim();
   const diff = yield* git.out(["diff", base, commit], "diff");
   if (Buffer.byteLength(diff) > LIMIT.bytes) return yield* stop("refused", `the change is larger than ${LIMIT.bytes / 1024} KiB`);
-  return { commit, diff: clean(diff, LIMIT.bytes), paths, summary };
-});
+  return { commit, diff: clean(diff, LIMIT.bytes), paths, summary }; });
 
 /**
  * What the verifier depends on in the base: the files its commands name and, transitively, every relative module they

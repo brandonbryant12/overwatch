@@ -8,7 +8,7 @@ import { Effect, Schema } from "effect";
 import { AppConfig, type Source } from "./config.ts";
 import { clock } from "./clock.ts";
 import { afterChange, announce, groupNow } from "./inbox.ts";
-import { json, Store, type Clean, type Writer } from "./store.ts";
+import { json, Store, type Clean, type Writer, sql } from "./store.ts";
 import { sha, type ProviderTime } from "./parse.ts";
 
 const DAY_MS = 86_400_000;
@@ -80,13 +80,11 @@ export function forecast(source: Source, rows: ReadonlyArray<{ series: string; a
 
 /** Time left for every capacity source, from its stored samples. */
 export const forecasts = Effect.gen(function* () {
-  const store = yield* Store;
   const config = yield* AppConfig;
   const out: Forecast[] = [];
   for (const s of config.sources.filter((x) => x.capacity))
-    out.push(forecast(s, yield* store.all<{ series: string; at_ms: ProviderTime; value: number | null }>("SELECT series, at_ms, value FROM samples WHERE source = ? ORDER BY id", s.id), clock.now()));
-  return out;
-});
+    out.push(forecast(s, yield* sql.all<{ series: string; at_ms: ProviderTime; value: number | null }>("SELECT series, at_ms, value FROM samples WHERE source = ? ORDER BY id", s.id), clock.now()));
+  return out; });
 
 /**
  * A comparison's working data, stored as JSON by this module. A finished comparison may carry none (`{}`, as the demo
@@ -97,9 +95,7 @@ const Data = Schema.fromJsonString(
     prodSeq: Schema.optional(Schema.Number),
     baseline: Schema.optional(Schema.Array(Schema.String)),
     marks: Schema.optional(Schema.Record(Schema.String, Schema.Number)),
-    counts: Schema.optional(Schema.Array(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Number)))),
-  }),
-);
+    counts: Schema.optional(Schema.Array(Schema.Record(Schema.String, Schema.Record(Schema.String, Schema.Number)))),}));
 type Data = { prodSeq?: number; baseline: string[]; marks: Record<string, number>; counts: Array<Record<string, Record<string, number>>> };
 const decodeData = Schema.decodeUnknownSync(Data);
 const readData = (text: string): Data => {
@@ -108,16 +104,13 @@ const readData = (text: string): Data => {
 };
 /** What compare() reads of a slice event: whether it was ordinary and fully measured, and where it ends. */
 const SliceEvent = Schema.fromJsonString(
-  Schema.Struct({ ordinary: Schema.optional(Schema.Boolean), to: Schema.optional(Schema.Number), readings: Schema.optional(Schema.Record(Schema.String, Schema.Struct({ state: Schema.String }))) }),
-);
+  Schema.Struct({ ordinary: Schema.optional(Schema.Boolean), to: Schema.optional(Schema.Number), readings: Schema.optional(Schema.Record(Schema.String, Schema.Struct({ state: Schema.String }))) }));
 const readSlice = Schema.decodeUnknownSync(SliceEvent);
 type Row = { id: string; app: string; staging_revision: string; production_revision: string | null; start_seq: number; state: string; data: string };
 
 /** Counts by problem title in one environment: titles are the normalized fingerprints both sides share. */
 const tally = Effect.fnUntraced(function* (app: string, env: string) {
-  const store = yield* Store;
-  return Object.fromEntries((yield* store.all<{ title: string; n: number }>("SELECT title, sum(count) AS n FROM incidents WHERE app = ? AND environment = ? AND reading <> 'comparison' GROUP BY title", app, env)).map((r) => [r.title, r.n]));
-});
+  return Object.fromEntries((yield* sql.all<{ title: string; n: number }>("SELECT title, sum(count) AS n FROM incidents WHERE app = ? AND environment = ? AND reading <> 'comparison' GROUP BY title", app, env)).map((r) => [r.title, r.n])); });
 
 /**
  * One step of each app's comparison, after a collection pass. A staging revision change (not the first observation)
@@ -142,13 +135,10 @@ export const compare = Effect.gen(function* () {
       for (const s of sources) marks[s.id] = (yield* latest(s))?.seq ?? 0;
       const stagingTally = yield* tally(app, staging), productionTally = yield* tally(app, production);
       const data: Data = { prodSeq: pr?.seq ?? 0, baseline: [...new Set([...Object.keys(stagingTally), ...Object.keys(productionTally)])], marks, counts: [{ staging: stagingTally, production: productionTally }] };
-      yield* store.tx((w) =>
-        Effect.gen(function* () {
+      yield* store.tx((w) => Effect.gen(function* () {
           const id = `cmp_${sha(app, st.revision, st.seq).slice(0, 24)}`;
           yield* w.run("INSERT OR IGNORE INTO comparisons (id, app, staging_revision, production_revision, start_seq, state, reason, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", id as Clean, app as Clean, st.revision as Clean, (pr?.revision ?? null) as Clean | null, st.seq, (same ? "same_release" : "pending") as Clean, (same ? "staging runs the production revision" : "waiting for two aligned intervals") as Clean, json(data));
-          yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id, state: same ? "same_release" : "pending", stagingRevision: st.revision, productionRevision: pr?.revision ?? null });
-        }),
-      );
+          yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id, state: same ? "same_release" : "pending", stagingRevision: st.revision, productionRevision: pr?.revision ?? null }); }));
       continue;
     }
     // A newer production rollout invalidates any comparison made against the old one, finished or not.
@@ -156,12 +146,9 @@ export const compare = Effect.gen(function* () {
     const seen = readData(current.data).prodSeq ?? pr?.seq ?? 0;
     if (pr && pr.seq > seen && (pr.revision !== current.production_revision || current.state === "same_release")) {
       const same = pr.revision === current.staging_revision;
-      yield* store.tx((w) =>
-        Effect.gen(function* () {
+      yield* store.tx((w) => Effect.gen(function* () {
           yield* w.run("UPDATE comparisons SET state = ?, reason = ?, data = json_set(data, '$.prodSeq', ?) WHERE id = ?", (same ? "same_release" : "unknown") as Clean, (same ? "production now runs the staging revision" : `production rolled out ${pr.revision.slice(0, 12)} since; this comparison no longer describes it`) as Clean, pr.seq, current.id as Clean);
-          yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state: same ? "same_release" : "unknown", productionRevision: pr.revision });
-        }),
-      );
+          yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state: same ? "same_release" : "unknown", productionRevision: pr.revision }); }));
       continue;
     }
     if (current.state !== "pending") continue;
@@ -173,16 +160,13 @@ export const compare = Effect.gen(function* () {
     const unmeasured = now.find(({ s, e }) => {
       if (e!.kind !== "slice") return true;
       const d = readSlice(e!.data);
-      return !d.ordinary || s.readings.some((r) => d.readings?.[r] && d.readings[r]!.state !== "ok");
-    });
+      return !d.ordinary || s.readings.some((r) => d.readings?.[r] && d.readings[r]!.state !== "ok"); });
     // Aligned: every source's interval ends at the same provider time (within a second), or the two are not comparable.
     const ends = now.map(({ e }) => (e!.kind === "slice" ? readSlice(e!.data).to! : 0));
     const moved = (pr && pr.revision !== current.production_revision) ? "production rolled out another revision" : null;
-    const finish = (w: Writer, state: string, reason: string | null, sc: number | null, pc: number | null, incident: string | null = null) =>
-      Effect.gen(function* () {
+    const finish = (w: Writer, state: string, reason: string | null, sc: number | null, pc: number | null, incident: string | null = null) => Effect.gen(function* () {
         yield* w.run("UPDATE comparisons SET state = ?, reason = ?, staging_count = ?, production_count = ?, data = ?, incident = ? WHERE id = ?", state as Clean, reason as Clean | null, sc, pc, json(data), incident as Clean | null, current.id as Clean);
-        yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state, reason, stagingCount: sc, productionCount: pc });
-      });
+        yield* w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state, reason, stagingCount: sc, productionCount: pc }); });
     if (!unmeasured && !moved && Math.max(...ends) - Math.min(...ends) > 1000) {
       yield* store.tx((w) => finish(w, "unknown", `staging and production intervals are not aligned (their ends differ by ${Math.round((Math.max(...ends) - Math.min(...ends)) / 1000)} s); they cannot be compared`, null, null));
       continue;
@@ -204,8 +188,7 @@ export const compare = Effect.gen(function* () {
       .map((t) => ({ t, first: delta("staging", t, c0, c1), second: delta("staging", t, c1, c2), prod: delta("production", t, c0, c2) }))
       .filter((x) => x.first > 0 && x.second > 0 && x.first + x.second >= 3 && x.prod === 0)
       .sort((x, y) => y.first + y.second - (x.first + x.second));
-    yield* store.tx((w) =>
-      Effect.gen(function* () {
+    yield* store.tx((w) => Effect.gen(function* () {
         const top = signals[0];
         if (!top) return yield* finish(w, "no_signal", "no new staging-only problem in two compared intervals (low traffic cannot certify a release)", null, null);
         const id = `inc_${sha(app, staging, "comparison", current.staging_revision, top.t).slice(0, 32)}`, seq = yield* w.next();
@@ -216,17 +199,12 @@ export const compare = Effect.gen(function* () {
           VALUES (?, ?, ?, ?, ?, 'warn', ?, 1, ?, ?, ?, 'comparison', 1, 0, ?)`, id as Clean, app as Clean, staging as Clean, `${app}/${staging}/comparison` as Clean, title as Clean, top.first + top.second, clock.now(), clock.now(), seq, seq);
         yield* afterChange(w, id, undefined, top.first + top.second, seq);
         yield* announce(w, id, before, seq);
-        yield* finish(w, "regression", `${top.t}: ${top.first + top.second} in staging over two intervals, none in production`, top.first + top.second, 0, id);
-      }),
-    );
-  }
-});
+        yield* finish(w, "regression", `${top.t}: ${top.first + top.second} in staging over two intervals, none in production`, top.first + top.second, 0, id); }));
+  }});
 
 /** Each app's latest comparison, as the API and the page show it. */
 export const comparisons = Effect.gen(function* () {
-  const store = yield* Store;
   const config = yield* AppConfig;
-  return (yield* store.all<Row & { reason: string | null; staging_count: number | null; production_count: number | null; incident: string | null }>(
+  return (yield* sql.all<Row & { reason: string | null; staging_count: number | null; production_count: number | null; incident: string | null }>(
     "SELECT * FROM comparisons c WHERE start_seq = (SELECT max(start_seq) FROM comparisons WHERE app = c.app) ORDER BY app"))
-    .map((c) => ({ app: c.app, staging: config.apps[c.app]?.promotion?.staging ?? null, production: config.apps[c.app]?.promotion?.production ?? null, stagingRevision: c.staging_revision, productionRevision: c.production_revision, state: c.state === "pending" ? "unknown" : c.state, reason: c.state === "pending" ? "waiting for two aligned fully measured intervals" : c.reason, stagingCount: c.staging_count, productionCount: c.production_count, incident: c.incident, sinceSeq: c.start_seq }));
-});
+    .map((c) => ({ app: c.app, staging: config.apps[c.app]?.promotion?.staging ?? null, production: config.apps[c.app]?.promotion?.production ?? null, stagingRevision: c.staging_revision, productionRevision: c.production_revision, state: c.state === "pending" ? "unknown" : c.state, reason: c.state === "pending" ? "waiting for two aligned fully measured intervals" : c.reason, stagingCount: c.staging_count, productionCount: c.production_count, incident: c.incident, sinceSeq: c.start_seq })); });

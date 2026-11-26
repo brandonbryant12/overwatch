@@ -30,8 +30,7 @@ const Failure = Schema.Struct({ error: Schema.String });
 /** Each tool as MCP lists it: its closed input schema from its parameters Schema. Arguments reach `Tools.call` as sent. */
 const READS = new Set(["ow_telemetry", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search"]);
 const definitions = TOOLS.map((t) =>
-  Tool.dynamic(t.name, { description: t.description, parameters: inputSchema(t.parameters), success: Schema.Unknown, failure: Failure }).annotate(Tool.Readonly, READS.has(t.name)),
-);
+  Tool.dynamic(t.name, { description: t.description, parameters: inputSchema(t.parameters), success: Schema.Unknown, failure: Failure }).annotate(Tool.Readonly, READS.has(t.name)));
 const toolkit = Toolkit.make(...definitions);
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) => HttpServerResponse.jsonUnsafe(body, { status, headers });
@@ -48,29 +47,20 @@ const owner = Effect.gen(function* () {
     exists: (sessionId) => Effect.flatMap(opencode.connect, (oc) => (oc ? oc.exists(sessionId) : Effect.succeed(false))),
     inbox: local(inbox),
     get: (id) =>
-      local(
-        Effect.gen(function* () {
+      local(Effect.gen(function* () {
           const d = yield* detail(id);
-          return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null };
-        }),
-      ),
+          return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null }; })),
     search: (text) => local(search(text)),
     act: (id, body) =>
-      local(
-        Effect.gen(function* () {
+      local(Effect.gen(function* () {
           const action = yield* act(id, body, yield* basisOf(body));
-          return { ...(yield* snapshot(collector.view, true)), action };
-        }),
-      ),
-  } satisfies Owner;
-});
+          return { ...(yield* snapshot(collector.view, true)), action }; })),
+  } satisfies Owner; });
 
-const handlers = toolkit.toLayer(
-  Effect.gen(function* () {
+const handlers = toolkit.toLayer(Effect.gen(function* () {
     const tools = yield* Tools;
     const ownerTools = yield* owner;
-    const handle = (name: string) => (params: unknown) =>
-      Effect.gen(function* () {
+    const handle = (name: string) => (params: unknown) => Effect.gen(function* () {
         const client = yield* Effect.serviceOption(McpSchema.McpServerClient);
         const sessionId = Option.getOrUndefined(client)?.requestMetadata?.["ai.opencode/sessionID"];
         return yield* tools.call(sessionId, name, params, ownerTools);
@@ -80,33 +70,25 @@ const handlers = toolkit.toLayer(
           if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause as Cause.Cause<never>);
           const e = Cause.squash(cause);
           if (Predicate.isTagged(e, "Refusal") || Predicate.isTagged(e, "ApiError")) return Effect.fail({ error: errorText(e, 30_000) as string });
-          return Effect.logError(`tool ${name}: ${errorText(e)}`).pipe(Effect.andThen(Effect.fail({ error: "the tool failed" })));
-        }),
-      );
-    return Object.fromEntries(TOOLS.map((t) => [t.name, handle(t.name)])) as never;
-  }),
-);
+          return Effect.logError(`tool ${name}: ${errorText(e)}`).pipe(Effect.andThen(Effect.fail({ error: "the tool failed" }))); }));
+    return Object.fromEntries(TOOLS.map((t) => [t.name, handle(t.name)])) as never; }));
 
 /** The bearer credential and POST only, before MCP sees the request. */
 const Guard = Effect.gen(function* () {
   const config = yield* AppConfig;
   const token = config.mcpToken ? yield* secret(config.mcpToken) : null;
   const expected = Buffer.from(token ? `Bearer ${Redacted.value(token)}` : "");
-  return HttpRouter.middleware((app) =>
-    Effect.gen(function* () {
+  return HttpRouter.middleware((app) => Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       // No server-initiated stream: Streamable HTTP clients are told so with 405, and carry on.
       if (request.method !== "POST") return json(405, { error: { code: "method_not_allowed", message: "POST only" } }, { allow: "POST" });
       const given = Buffer.from(request.headers.authorization ?? "");
       if (!token || given.length !== expected.length || !timingSafeEqual(given, expected)) return json(401, { error: { code: "unauthorized", message: "a valid bearer credential is required" } });
-      return yield* app;
-    }),
-  ).layer;
-});
+      return yield* app; }),
+  ).layer; });
 
 /** `POST /mcp` (and any other method there, answered 405) on the `HttpRouter`. */
-export const McpRoutes = Layer.unwrap(
-  Effect.gen(function* () {
+export const McpRoutes = Layer.unwrap(Effect.gen(function* () {
     const config = yield* AppConfig;
     const origins = [`http://127.0.0.1:${config.port}`, `http://localhost:${config.port}`];
     return McpServer.layerHttp({
@@ -119,6 +101,5 @@ export const McpRoutes = Layer.unwrap(
         // One text block holding the result as JSON, as the interfaces document says.
         content: Object.fromEntries(TOOLS.map((t) => [t.name, (value: unknown) => [{ type: "text" as const, text: JSON.stringify(value) }]])),
       }).pipe(Layer.provide(handlers)),
-    }).pipe(Layer.provide(yield* Guard));
-  }),
+    }).pipe(Layer.provide(yield* Guard)); }),
 ).pipe(Layer.provide(Layer.mergeAll(Tools.layer, OpenCodeClient.layer)), Layer.orDie);

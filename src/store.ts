@@ -36,28 +36,24 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 40),
       subject TEXT, actor TEXT NOT NULL, data TEXT NOT NULL CHECK (json_valid(data)))`,
     columns: ["seq", "at_ms", "kind", "subject", "actor", "data"],
-    json: ["data"],
-  },
+    json: ["data"],},
   { name: "meta", ddl: `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`, columns: ["key", "value"] },
   {
     name: "sources",
     ddl: `CREATE TABLE sources (id TEXT PRIMARY KEY, checkpoint_ms INTEGER, failure TEXT CHECK (failure IN ('signin','permission','rate','unreachable','config')),
       streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0), next_ms INTEGER, suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0,1)), fix TEXT, endpoint TEXT,
       delay_ms INTEGER CHECK (delay_ms >= 0))`,
-    columns: ["id", "checkpoint_ms", "failure", "streak", "next_ms", "suspended", "fix", "endpoint", "delay_ms"],
-  },
+    columns: ["id", "checkpoint_ms", "failure", "streak", "next_ms", "suspended", "fix", "endpoint", "delay_ms"],},
   {
     name: "readings",
     ddl: `CREATE TABLE readings (source TEXT NOT NULL, reading TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')),
       at_ms INTEGER NOT NULL, ok_ms INTEGER, PRIMARY KEY (source, reading))`,
-    columns: ["source", "reading", "state", "at_ms", "ok_ms"],
-  },
+    columns: ["source", "reading", "state", "at_ms", "ok_ms"],},
   {
     name: "coverage",
     ddl: `CREATE TABLE coverage (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL,
       to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')), missed INTEGER CHECK (missed >= 0))`,
-    columns: ["id", "seq", "source", "reading", "from_ms", "to_ms", "state", "missed"],
-  },
+    columns: ["id", "seq", "source", "reading", "from_ms", "to_ms", "state", "missed"],},
   {
     name: "incidents",
     ddl: `CREATE TABLE incidents (id TEXT PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
@@ -67,35 +63,29 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       way TEXT CHECK (way IS NULL OR json_valid(way)), returned TEXT CHECK (returned IS NULL OR json_valid(returned)),
       seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0, decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0))`,
     columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq", "decided_seq"],
-    json: ["way", "returned"],
-  },
+    json: ["way", "returned"],},
   {
     name: "occurrences",
     ddl: `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL DEFAULT '', at_ms INTEGER NOT NULL, incident TEXT NOT NULL DEFAULT '')`,
     columns: ["key", "source", "stream", "at_ms", "incident"],
-    refs: { incident: "incidents.id" },
-  },
+    refs: { incident: "incidents.id" },},
   {
     name: "baselines",
     ddl: `CREATE TABLE baselines (key TEXT PRIMARY KEY, source TEXT NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), seen_ms INTEGER NOT NULL)`,
-    columns: ["key", "source", "count", "seen_ms"],
-  },
+    columns: ["key", "source", "count", "seen_ms"],},
   {
     name: "saturated",
     ddl: `CREATE TABLE saturated (source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL, to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), PRIMARY KEY (source, reading, from_ms))`,
-    columns: ["source", "reading", "from_ms", "to_ms"],
-  },
+    columns: ["source", "reading", "from_ms", "to_ms"],},
   {
     name: "metrics",
     ddl: `CREATE TABLE metrics (source TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, at_ms INTEGER NOT NULL,
       over INTEGER NOT NULL DEFAULT 0 CHECK (over >= 0), under INTEGER NOT NULL DEFAULT 0 CHECK (under >= 0), breach INTEGER NOT NULL DEFAULT 0 CHECK (breach IN (0,1)), PRIMARY KEY (source, name))`,
-    columns: ["source", "name", "value", "at_ms", "over", "under", "breach"],
-  },
+    columns: ["source", "name", "value", "at_ms", "over", "under", "breach"],},
   {
     name: "deploys",
     ddl: `CREATE TABLE deploys (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, revision TEXT NOT NULL, previous TEXT)`,
-    columns: ["seq", "app", "environment", "revision", "previous"],
-  },
+    columns: ["seq", "app", "environment", "revision", "previous"],},
   {
     name: "jobs",
     ddl: `CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, title TEXT NOT NULL,
@@ -103,8 +93,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       inputs TEXT CHECK (inputs IS NULL OR json_valid(inputs)), result TEXT CHECK (result IS NULL OR json_valid(result)), attribution TEXT,
       closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0,1)))`,
     columns: ["id", "kind", "subject", "title", "state", "reason", "created_seq", "inputs", "result", "attribution", "closed"],
-    json: ["inputs", "result"],
-  },
+    json: ["inputs", "result"],},
   {
     name: "runs",
     ddl: `CREATE TABLE runs (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL CHECK (attempt >= 1),
@@ -113,21 +102,18 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       UNIQUE (job_id, attempt))`,
     columns: ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms", "role", "slot", "work_id"],
     refs: { job_id: "jobs.id" },
-    json: ["code"],
-  },
+    json: ["code"],},
   {
     name: "messages",
     ddl: `CREATE TABLE messages (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), purpose TEXT NOT NULL CHECK (purpose IN ('prompt','nudge')))`,
     columns: ["id", "run_id", "purpose"],
-    refs: { run_id: "runs.id" },
-  },
+    refs: { run_id: "runs.id" },},
   {
     name: "evidence",
     ddl: `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL,
       text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`,
     columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
-    refs: { run_id: "runs.id" },
-  },
+    refs: { run_id: "runs.id" },},
   {
     // What a piece of evidence is, apart from what its source is called. A piece without a row here is not
     // telemetry: an origin that was never recorded cannot make a verdict observed.
@@ -135,22 +121,19 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE origins (handle TEXT PRIMARY KEY REFERENCES evidence(handle) ON DELETE CASCADE,
       origin TEXT NOT NULL CHECK (origin IN ('telemetry','code','history','generated')))`,
     columns: ["handle", "origin"],
-    refs: { handle: "evidence.handle" },
-  },
+    refs: { handle: "evidence.handle" },},
   {
     name: "hourly",
     ddl: `CREATE TABLE hourly (incident TEXT NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), PRIMARY KEY (incident, hour))`,
     columns: ["incident", "hour", "count"],
-    refs: { incident: "incidents.id" },
-  },
+    refs: { incident: "incidents.id" },},
   {
     name: "asks",
     ddl: `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')),
       text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL,
       state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT, message TEXT)`,
     columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason", "message"],
-    refs: { job_id: "jobs.id" },
-  },
+    refs: { job_id: "jobs.id" },},
   {
     // Agent work, one item per reading, challenge or answer: the queue the two slots take from, owner questions first.
     name: "work",
@@ -158,56 +141,48 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0,
       ask_key TEXT, run_id TEXT REFERENCES runs(id), reason TEXT, seq INTEGER NOT NULL)`,
     columns: ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"],
-    refs: { job_id: "jobs.id", run_id: "runs.id" },
-  },
+    refs: { job_id: "jobs.id", run_id: "runs.id" },},
   {
     // Idempotent owner requests (investigate, open, correct): the key binds to the operation and its payload.
     name: "requests",
     ddl: `CREATE TABLE requests (key TEXT PRIMARY KEY, op TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL CHECK (json_valid(result)))`,
     columns: ["key", "op", "digest", "result"],
-    json: ["result"],
-  },
+    json: ["result"],},
   {
     name: "corrections",
     ddl: `CREATE TABLE corrections (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), text TEXT NOT NULL, date TEXT NOT NULL)`,
     columns: ["seq", "app", "subject", "job_id", "text", "date"],
-    refs: { job_id: "jobs.id" },
-  },
+    refs: { job_id: "jobs.id" },},
   {
     name: "notifications",
     ddl: `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES incidents(id), cause_seq INTEGER NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER,
       reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`,
     columns: ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"],
-    refs: { subject: "incidents.id" },
-  },
+    refs: { subject: "incidents.id" },},
   {
     // The latest lines of each problem (cleaned), what an investigation reads as telemetry.
     name: "lines",
     ddl: `CREATE TABLE lines (incident TEXT NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, text TEXT NOT NULL)`,
     columns: ["incident", "source", "at_ms", "text"],
-    refs: { incident: "incidents.id" },
-  },
+    refs: { incident: "incidents.id" },},
   {
     // When a problem was first observed, by the provider's own time (a log line's timestamp): its onset.
     name: "onsets",
     ddl: `CREATE TABLE onsets (incident TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)`,
     columns: ["incident", "at_ms"],
-    refs: { incident: "incidents.id" },
-  },
+    refs: { incident: "incidents.id" },},
   {
     // When a deploy rolled out: the provider's rollout time when it gives one (exact), else the interval between the
     // last observation of the previous revision and the first of this one. Keyed by the deploy's seq.
     name: "rollouts",
     ddl: `CREATE TABLE rollouts (seq INTEGER PRIMARY KEY, after_ms INTEGER, by_ms INTEGER NOT NULL, exact INTEGER NOT NULL CHECK (exact IN (0,1)))`,
-    columns: ["seq", "after_ms", "by_ms", "exact"],
-  },
+    columns: ["seq", "after_ms", "by_ms", "exact"],},
   {
     // Measured used capacity by the provider's time, per series (metric, unit and ceiling); a null value is a gap.
     name: "samples",
     ddl: `CREATE TABLE samples (id INTEGER PRIMARY KEY, source TEXT NOT NULL, series TEXT NOT NULL, at_ms INTEGER NOT NULL, value REAL)`,
-    columns: ["id", "source", "series", "at_ms", "value"],
-  },
+    columns: ["id", "source", "series", "at_ms", "value"],},
   {
     // A staging release compared with unchanged production over two aligned intervals.
     name: "comparisons",
@@ -216,8 +191,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       data TEXT NOT NULL CHECK (json_valid(data)), incident TEXT)`,
     columns: ["id", "app", "staging_revision", "production_revision", "start_seq", "state", "reason", "staging_count", "production_count", "data", "incident"],
     refs: { incident: "incidents.id" },
-    json: ["data"],
-  },
+    json: ["data"],},
   {
     // A fix attempt: one per (problem, investigation, reviewed revision, policy). Its intents are written before any
     // outside step: the candidate before verification, the head and branch before any ref changes.
@@ -227,24 +201,21 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0)`,
     columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq", "version"],
     refs: { incident: "incidents.id", job_id: "jobs.id", run_id: "runs.id" },
-    json: ["data"],
-  },
+    json: ["data"],},
   {
     // What a fixer session selected: one proposal per run, final once stored.
     name: "proposals",
     ddl: `CREATE TABLE proposals (run_id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)), refused TEXT)`,
     columns: ["run_id", "body", "refused"],
     refs: { run_id: "runs.id" },
-    json: ["body"],
-  },
+    json: ["body"],},
   {
     name: "findings",
     ddl: `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')),
       claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`,
     columns: ["id", "run_id", "verdict", "claims", "code", "body"],
     refs: { run_id: "runs.id" },
-    json: ["claims", "code", "body"],
-  },
+    json: ["claims", "code", "body"],},
   {
     // Each cited handle, kept by a trigger on findings: evidence a finding cites cannot be deleted (RESTRICT), so
     // retention and restore get the rule from the database. Derived: never copied, rebuilt by the trigger.
@@ -253,9 +224,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       handle TEXT NOT NULL REFERENCES evidence(handle) ON DELETE RESTRICT, PRIMARY KEY (finding, handle))`,
     columns: ["finding", "handle"],
     refs: { finding: "findings.id", handle: "evidence.handle" },
-    derived: true,
-  },
-];
+    derived: true,}];
 
 const INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms)",
@@ -267,8 +236,7 @@ const INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms)",
   "CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq)",
   "CREATE INDEX IF NOT EXISTS samples_series ON samples (source, id)",
-  "CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id)",
-];
+  "CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id)"];
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
 const ADDED_TABLES = new Set(["onsets", "rollouts", "samples", "comparisons", "fixes", "proposals", "origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
@@ -278,8 +246,7 @@ const TRIGGERS: ReadonlyArray<string> = [
   `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
   INSERT OR IGNORE INTO citations (finding, handle)
     SELECT NEW.id, json_extract(p.value, '$.handle') FROM json_each(NEW.claims) c, json_each(c.value, '$.pieces') p;
-END`,
-];
+END`];
 
 const MAINTENANCE: ReadonlyArray<string> = [
   "CREATE TABLE maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), active INTEGER NOT NULL CHECK (active IN (0,1)))",
@@ -288,8 +255,7 @@ const MAINTENANCE: ReadonlyArray<string> = [
   `CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events WHEN (SELECT active FROM maintenance) = 0
   BEGIN SELECT RAISE(ABORT, 'events are append-only outside maintenance'); END`,
   ...INDEXES,
-  ...TRIGGERS,
-];
+  ...TRIGGERS];
 
 /**
  * Columns added within version 1 (additive, each with a default), with their definitions. Opening a file that lacks
@@ -323,8 +289,7 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["asks", "reason", "reason TEXT"],
   ["asks", "message", "message TEXT"],
   ["fixes", "version", "version INTEGER NOT NULL DEFAULT 0"],
-  ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
-];
+  ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"]];
 
 /** Every declared reference, whatever its column is called. SQL REFERENCES are also checked by the database. */
 export function references(): Array<[table: string, column: string, parent: string, key: string]> {
@@ -344,8 +309,7 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
   ["a finding cites evidence that is not stored for its own run", `SELECT count(*) FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
     WHERE NOT EXISTS (SELECT 1 FROM evidence v WHERE v.handle = json_extract(p.value, '$.handle') AND v.run_id = f.run_id)`],
   ["an incident's times or a source's state are impossible", `SELECT (SELECT count(*) FROM incidents WHERE last_ms < first_ms)
-    + (SELECT count(*) FROM sources WHERE (failure IS NULL) <> (streak = 0))`],
-];
+    + (SELECT count(*) FROM sources WHERE (failure IS NULL) <> (streak = 0))`]];
 
 /** Literal, case-insensitive matching across Unicode: compatibility-normalised, then folded through upper case (ß matches SS). */
 export const fold = (text: string) => text.normalize("NFKC").toUpperCase().toLowerCase();
@@ -362,8 +326,7 @@ export class Json {
   readonly value: unknown;
   constructor(value: unknown) {
     this.value = value;
-  }
-}
+  }}
 export const json = (value: unknown) => new Json(value);
 export type Param = number | bigint | null | Clean | Id | Json;
 
@@ -374,8 +337,7 @@ function tick() {
   if (trace.killAfter !== null && trace.count >= trace.killAfter) {
     process.kill(process.pid, "SIGKILL");
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
-  }
-}
+  }}
 
 /** Normalises one value at the boundary: strings are cleaned, JSON is cleaned throughout and serialised. */
 function normal(value: unknown): number | bigint | null | string {
@@ -411,8 +373,7 @@ export class Permit {
     const missing = this.bind.find((b) => !args.includes(b));
     if (missing !== undefined) throw new Error(`this permit was not minted for that ${kind} (it binds ${missing})`);
     this.#live = false;
-  }
-}
+  }}
 
 /** The innermost message of an error from SQLite, for diagnostics. */
 const reason = (error: unknown): string => {
@@ -456,32 +417,28 @@ export class Writer {
     return this.#open.pipe(
       Effect.flatMap((sql) => orDieSql(Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw))),
       Effect.map(changed),
-      Effect.tap(() => Effect.sync(tick)),
-    );
+      Effect.tap(() => Effect.sync(tick)));
   }
   /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
   next(): Effect.Effect<number> {
     return this.#open.pipe(
       Effect.flatMap((sql) => sql.unsafe<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")),
       Effect.orDie,
-      Effect.map((rows) => (rows[0]?.seq ?? 0) + 1),
-    );
+      Effect.map((rows) => (rows[0]?.seq ?? 0) + 1));
   }
   /** Records an outbound effect's intent; the permit for it is live once this transaction commits. */
   permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Effect.Effect<Permit> {
     return Effect.map(this.event("intent", subject, { kind, bind, ...(data as object) }), (seq) => {
       const p = new Permit(kind, seq, bind);
       this.permits.push(p);
-      return p;
-    });
+      return p; });
   }
   /** Appends to the log and returns its seq. */
   event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): Effect.Effect<number> {
     return Effect.suspend(() =>
       this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data)),
     ).pipe(Effect.map((r) => r.lastInsertRowid));
-  }
-}
+  }}
 
 type Value = number | string | null;
 
@@ -531,8 +488,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
   // switch would come before it.
   const sql = yield* SqliteClient.make({ filename: file, busyTimeout: 0, disableWAL: true }).pipe(
     Effect.provide(Reactivity.layer),
-    Effect.mapError((e) => new Busy({ message: `cannot open ${file}: ${reason(e)}` })),
-  );
+    Effect.mapError((e) => new Busy({ message: `cannot open ${file}: ${reason(e)}` })));
   const exec = (query: string) => Effect.suspend(() => sql.unsafe(query).raw);
   const value = <T>(query: string) => Effect.map(sql.unsafe<Record<string, T>>(query), (rows) => Object.values(rows[0] ?? {})[0] as T);
 
@@ -541,9 +497,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
     Effect.andThen(sql.withTransaction(Effect.void)),
     Effect.mapError((e) => {
       const message = reason(e);
-      return /locked|busy/i.test(message) ? new Busy({ message: `${file} is in use by another process` }) : new Incompatible({ message: `${file} is not an Overwatch database (${message})` });
-    }),
-  );
+      return /locked|busy/i.test(message) ? new Busy({ message: `${file} is in use by another process` }) : new Incompatible({ message: `${file} is not an Overwatch database (${message})` }); }));
   yield* Effect.forEach(["PRAGMA synchronous = FULL", "PRAGMA foreign_keys = ON"], exec).pipe(Effect.orDie);
   const app = yield* value<number>("PRAGMA application_id").pipe(Effect.orDie);
   const version = yield* value<number>("PRAGMA user_version").pipe(Effect.orDie);
@@ -554,8 +508,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
       .pipe(Effect.orDie);
   } else if (app === APPLICATION_ID && version === USER_VERSION) {
     yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
+      .withTransaction(Effect.gen(function* () {
           for (const t of TABLES) if (ADDED_TABLES.has(t.name)) yield* exec(t.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
           for (const [table, column, definition] of ADDED) {
             const has = (yield* sql.unsafe(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`, [column])).length > 0;
@@ -563,15 +516,12 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
           }
           for (const statement of [...INDEXES, ...TRIGGERS]) yield* exec(statement);
           yield* exec(`INSERT OR IGNORE INTO citations (finding, handle) SELECT f.id, json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
-            WHERE json_extract(p.value, '$.handle') IN (SELECT handle FROM evidence)`);
-        }),
-      )
+            WHERE json_extract(p.value, '$.handle') IN (SELECT handle FROM evidence)`); }))
       .pipe(Effect.orDie);
   }
   if (app !== 0 && (app !== APPLICATION_ID || version !== USER_VERSION)) {
     return yield* new Incompatible({
-      message: app !== APPLICATION_ID ? `${file} is not an Overwatch database` : `${file} has schema version ${version}; this program reads version ${USER_VERSION}`,
-    });
+      message: app !== APPLICATION_ID ? `${file} is not an Overwatch database` : `${file} has schema version ${version}; this program reads version ${USER_VERSION}`,});
   } else if (app === 0 && (version !== 0 || tables !== 0)) {
     return yield* new Incompatible({ message: `${file} is not an Overwatch database` });
   }
@@ -593,8 +543,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
     Effect.suspend(() => {
       const writer = new Writer(sql);
       return sql
-        .withTransaction(
-          Effect.gen(function* () {
+        .withTransaction(Effect.gen(function* () {
             // References are checked when the change commits, as one whole: a violation rolls the transaction back.
             yield* exec("PRAGMA defer_foreign_keys = ON").pipe(Effect.orDie);
             const result = yield* work(writer);
@@ -602,17 +551,13 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
               Effect.sync(() => {
                 tick();
                 for (const p of writer.permits) issue(p);
-              }).pipe(Effect.andThen(PubSub.publish(commits, undefined)), Effect.asVoid),
-            );
-            return result;
-          }),
-        )
+              }).pipe(Effect.andThen(PubSub.publish(commits, undefined)), Effect.asVoid));
+            return result; }))
         .pipe(
           // A failed COMMIT (a deferred reference) is a defect, like any broken constraint; the change is undone whole.
           Effect.catchIf(SqlError.isSqlError, (e) => Effect.die(new Error(reason(e), { cause: e }))),
           Effect.ensuring(Effect.sync(() => writer.end())),
-        ) as Effect.Effect<A, E, R>;
-    });
+        ) as Effect.Effect<A, E, R>; });
 
   const tx = <A, E, R>(work: (w: Writer) => Effect.Effect<A, E, R>): Effect.Effect<A, E | Full, R> =>
     Effect.suspend(() => guard ?? Effect.void).pipe(Effect.andThen(transact(work)));
@@ -622,16 +567,12 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
    * caller can carry a business write through it. Its events are only `compacted`.
    */
   const maintain = (work: (w: Writer) => Effect.Effect<number>, step: string, throughSeq: number) =>
-    transact((w) =>
-      Effect.gen(function* () {
+    transact((w) => Effect.gen(function* () {
         const removed = yield* work(w);
         yield* w.event("compacted", null, { step, removed, throughSeq });
-        return removed;
-      }),
-    );
+        return removed; }));
 
-  const expire = (now: number): Effect.Effect<number> =>
-    Effect.gen(function* () {
+  const expire = (now: number): Effect.Effect<number> => Effect.gen(function* () {
       const day = 86_400_000;
       const old = (days: number, trial: boolean) =>
         `SELECT r.id FROM runs r JOIN jobs j ON j.id = r.job_id WHERE r.state = 'terminal' AND (j.kind = 'trial') = ${trial ? 1 : 0} AND r.started_ms < ${now - days * day}`;
@@ -642,34 +583,26 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         `DELETE FROM messages WHERE run_id IN (${old(14, false)})`,
         `DELETE FROM coverage WHERE to_ms < ${now - 30 * day}`,
         `DELETE FROM hourly WHERE hour < ${Math.floor((now - 30 * day) / 3_600_000)}`,
-        `DELETE FROM lines WHERE at_ms < ${now - 30 * day}`,
-      ];
+        `DELETE FROM lines WHERE at_ms < ${now - 30 * day}`];
       let any = false;
       for (const query of due) if ((yield* get(query.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1")) !== undefined) any = true;
       if (!any) return 0;
       return yield* maintain(
-        (w) =>
-          Effect.gen(function* () {
+        (w) => Effect.gen(function* () {
             let removed = 0;
             for (const query of due) removed += (yield* w.run(query)).changes;
-            return removed;
-          }),
+            return removed; }),
         "age",
-        0,
-      );
-    });
+        0); });
 
   const restore = (source: string) =>
-    Effect.scoped(
-      Effect.gen(function* () {
+    Effect.scoped(Effect.gen(function* () {
         const backup = yield* SqliteClient.make({ filename: source, readonly: true }).pipe(
           Effect.provide(Reactivity.layer),
-          Effect.mapError(() => new Incompatible({ message: `${source} does not open as a database` })),
-        );
+          Effect.mapError(() => new Incompatible({ message: `${source} does not open as a database` })));
         const one = <T>(query: string) => Effect.map(backup.unsafe<Record<string, T>>(query), (rows) => Object.values(rows[0] ?? {})[0] as T);
         const [app, version, integrity] = yield* Effect.all([one<number>("PRAGMA application_id"), one<number>("PRAGMA user_version"), one<string>("PRAGMA integrity_check")]).pipe(
-          Effect.mapError(() => new Incompatible({ message: `${source} is not an Overwatch backup: it is not a database` })),
-        );
+          Effect.mapError(() => new Incompatible({ message: `${source} is not an Overwatch backup: it is not a database` })));
         if (app !== APPLICATION_ID) return yield* new Incompatible({ message: `${source} is not an Overwatch backup` });
         if (version !== USER_VERSION) return yield* new Incompatible({ message: `${source} has schema version ${version}; this program restores version ${USER_VERSION}` });
         if (integrity !== "ok") return yield* new Incompatible({ message: `${source} fails SQLite's integrity check` });
@@ -677,8 +610,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         const present = new Set((yield* read<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table'")).map((r) => r.name));
         for (const t of TABLES) if (!present.has(t.name) && !ADDED_TABLES.has(t.name)) return yield* new Incompatible({ message: `${source} has no ${t.name} table` });
         const high = (yield* read<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'"))[0]?.seq ?? 0;
-        yield* tx((w) =>
-          Effect.gen(function* () {
+        yield* tx((w) => Effect.gen(function* () {
             // References are checked once, on the whole staged copy, by the database's own foreign keys.
             yield* w.run("UPDATE maintenance SET active = 1");
             for (const t of [...TABLES].reverse()) yield* w.run(`DELETE FROM ${t.name}`);
@@ -690,8 +622,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
               const insert = `INSERT INTO ${t.name} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
               for (const row of yield* read<Record<string, unknown>>(`SELECT ${columns.map((c) => `"${c}"`).join(", ")} FROM main."${t.name}"`)) {
                 yield* w.run(insert, ...columns.map((c) => valueOf(row[c], t.json?.includes(c) ?? false)));
-              }
-            }
+              }}
             // The backup's own high-water mark: a row beyond it is an invariant violation, not a reason to raise it.
             yield* w.run("DELETE FROM sqlite_sequence WHERE name = 'events'");
             yield* w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
@@ -705,19 +636,14 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
               const violations = Object.values((yield* get<Record<string, number>>(query)) ?? {})[0] ?? 0;
               if (violations > 0) return yield* Effect.fail(`${what} (${violations})`);
             }
-            yield* w.run("UPDATE maintenance SET active = 0");
-          }),
+            yield* w.run("UPDATE maintenance SET active = 0"); }),
         ).pipe(
           Effect.catchCause((cause): Effect.Effect<never, Incompatible | Full> => {
             const failure = Cause.findErrorOption(cause);
             if (failure._tag === "Some" && Predicate.isTagged(failure.value, "Full")) return Effect.fail(failure.value as Full);
             const text = failure._tag === "Some" ? String(failure.value) : reason(Cause.squash(cause));
-            return Effect.fail(new Incompatible({ message: `${source} cannot be restored: ${clean(text, 300)}` }));
-          }),
-        );
-        return { file: source, seq: yield* seq };
-      }),
-    );
+            return Effect.fail(new Incompatible({ message: `${source} cannot be restored: ${clean(text, 300)}` })); }));
+        return { file: source, seq: yield* seq }; }));
 
   const shape: StoreShape = {
     file,
@@ -730,21 +656,18 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
     setGuard: (next) => Effect.sync(() => void (guard = next)),
     changes: Stream.fromPubSub(commits),
     checkpoint: exec("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.orDie, Effect.asVoid),
-    backup: (target) =>
-      Effect.gen(function* () {
+    backup: (target) => Effect.gen(function* () {
         if (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => false))) return yield* new BackupError({ message: `${target} exists; choose a new file` });
         const at = yield* seq;
         yield* Effect.suspend(() => sql.unsafe("VACUUM INTO ?", [target]).raw).pipe(Effect.mapError((e) => new BackupError({ message: reason(e) })));
-        return { file: target, seq: at };
-      }),
+        return { file: target, seq: at }; }),
     restore,
     liveBytes: Effect.gen(function* () {
       const wal = yield* fs.stat(`${file}-wal`).pipe(
         Effect.map((info) => Number(info.size)),
         Effect.orElseSucceed(() => 0), // no log yet
       );
-      return ((yield* pragma("page_count")) - (yield* pragma("freelist_count"))) * (yield* pragma("page_size")) + wal;
-    }),
+      return ((yield* pragma("page_count")) - (yield* pragma("freelist_count"))) * (yield* pragma("page_size")) + wal; }),
     /**
      * Gives free pages back to the file system: at most `maxBytes` per call, for any page size. Incremental vacuum
      * moves pages from the end of the file into free slots and truncates it; with auto-vacuum every (usable / 5)th
@@ -753,8 +676,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
      * into a copy (up to twice the space, on a disk that may be short of it) and holds the only connection for as long
      * as that takes, so no poll could commit meanwhile. Returns the free pages left.
      */
-    reclaim: (maxBytes = LIMITS.reclaimBytes) =>
-      Effect.gen(function* () {
+    reclaim: (maxBytes = LIMITS.reclaimBytes) => Effect.gen(function* () {
         if ((yield* pragma("freelist_count")) === 0) return 0;
         const size = yield* pragma("page_size"), budget = Math.floor(maxBytes / size), perMap = Math.floor(size / 5);
         // n data pages and at most ceil(n / perMap) + 1 pointer-map pages must fit in the budget.
@@ -762,8 +684,7 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         if (pages === 0) return yield* pragma("freelist_count");
         yield* all(`PRAGMA incremental_vacuum(${pages})`);
         yield* exec("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.orDie);
-        return yield* pragma("freelist_count");
-      }),
+        return yield* pragma("freelist_count"); }),
     /**
      * Age: what has outlived its use goes, on every pass, whatever the disk: trial messages and uncited trial
      * evidence after seven days; real messages and uncited evidence after fourteen; coverage rows and hourly counts
@@ -775,27 +696,20 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
      * Makes room under pressure: old events (counts and the sequence are kept), then what age allows. Nothing else is
      * removed; if that is not enough, the caller pauses collection. Cited evidence is never removed.
      */
-    retain: (now, over, keepEvents = 10_000) =>
-      Effect.gen(function* () {
+    retain: (now, over, keepEvents = 10_000) => Effect.gen(function* () {
         if (yield* over) {
           const throughSeq = Math.max(0, (yield* seq) - keepEvents);
           yield* maintain(
-            (w) =>
-              Effect.gen(function* () {
+            (w) => Effect.gen(function* () {
                 yield* w.run("UPDATE maintenance SET active = 1");
                 const removed = (yield* w.run("DELETE FROM events WHERE seq <= ?", throughSeq)).changes;
                 yield* w.run("UPDATE maintenance SET active = 0");
-                return removed;
-              }),
+                return removed; }),
             "events",
-            throughSeq,
-          );
+            throughSeq);
         }
-        if (yield* over) yield* expire(now);
-      }),
-  };
-  return shape;
-});
+        if (yield* over) yield* expire(now); }),};
+  return shape; });
 
 /** The database service: owned for as long as the layer's scope lasts. */
 export class Store extends Context.Service<Store, StoreShape>()("overwatch/Store") {
@@ -817,10 +731,16 @@ function valueOf(value: unknown, isJson: boolean): Param {
 /** The discovery record a running service leaves: it routes requests and never establishes ownership. */
 export const Discovery = Schema.Struct({ url: Schema.String, pid: Schema.Number, version: Schema.optional(Schema.Number) });
 export type Discovery = typeof Discovery.Type;
-export const readDiscovery = (dataDir: string): Effect.Effect<Discovery | null, never, FileSystem.FileSystem | Path.Path> =>
-  Effect.gen(function* () {
+export const readDiscovery = (dataDir: string): Effect.Effect<Discovery | null, never, FileSystem.FileSystem | Path.Path> => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const text = yield* fs.readFileString(path.join(dataDir, "service.json"));
     return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Discovery))(text);
   }).pipe(Effect.orElseSucceed(() => null));
+
+/** Reads through the Store service, for code that only reads (`yield* sql.get(...)`); a change still goes through `tx`. */
+export const sql = {
+  all: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Store.use((s) => s.all<T>(query, ...params)),
+  get: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Store.use((s) => s.get<T>(query, ...params)),
+  seq: Store.use((s) => s.seq),
+};

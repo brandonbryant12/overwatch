@@ -24,8 +24,7 @@ export const clock = {
   },
   get manual() {
     return manual !== null;
-  },
-};
+  },};
 
 export { Expired };
 
@@ -39,6 +38,4 @@ export const bounded = <A, E, R>(work: Effect.Effect<A, E, R>, deadline: number)
     Effect.gen(function* () {
       do yield* Effect.sleep("50 millis");
       while (clock.mono() < deadline);
-      return yield* new Expired();
-    }),
-  );
+      return yield* new Expired(); }));

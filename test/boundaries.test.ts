@@ -8,15 +8,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 import { createServer } from "node:http";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect, Exit, Layer, ManagedRuntime } from "effect";
 import { Collector, endpoint, IDENTITY } from "../src/collect.ts";
-import { parseConfig, type Source } from "../src/config.ts";
-import { HttpError, keyed } from "../src/inbox.ts";
+import { AppConfig, parseConfig, type Source } from "../src/config.ts";
+import { keyed } from "../src/inbox.ts";
 import { Store, type Clean, type Writer } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
 import { snapshot } from "../src/snapshot.ts";
+import { Platform, run, withStore } from "./effect.ts";
 
 // A Datadog that answers whatever the property puts in `reply`.
 const reply: { monitors: unknown; logs: unknown; query: unknown } = { monitors: [], logs: { data: [] }, query: { series: [] } };
@@ -38,21 +38,24 @@ function rig(readings: string[]) {
     apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { dd: { type: "datadog", baseUrl: base, apiKey: "env:OW_TEST_DD_A", appKey: "env:OW_TEST_DD_B", query: "service:shop", metric: "avg:shop.errors{*}", readings } } } } } },
     watchers: [{ app: "shop", environment: "prod", every: "1m" }],
   }, join(dataDir, "c.json"));
-  const store = Store.own(dataDir);
-  const collector = new Collector(store, config, dataDir);
-  collector.setSpace({ freeBytes: 1024 ** 4, dbBytes: 0 });
+  // The database, the configuration and a collector over them, alive until close().
+  const runtime = ManagedRuntime.make(Collector.layer.pipe(Layer.provideMerge(Store.layer(dataDir)), Layer.provideMerge(AppConfig.layer(config)), Layer.provideMerge(Platform)));
+  const go = <A>(effect: Effect.Effect<A, unknown, Collector | Store | AppConfig>) => runtime.runPromise(effect);
   let now = Date.UTC(2026, 10, 1), mono = 1e6;
   clock.set(now, mono);
+  const ready = go(Collector.use((c) => c.setSpace({ freeBytes: 1024 ** 4, dbBytes: 0 })));
   return {
-    store,
     get now() { return now; },
     async step() {
+      await ready;
       now += 60_000; mono += 60_000; clock.set(now, mono);
-      await collector.pass();
+      await go(Collector.use((c) => c.pass));
     },
-    snap: () => snapshot(store, config, collector, true),
-    reading: (r: string) => store.get<{ state: string; ok_ms: number | null }>("SELECT state, ok_ms FROM readings WHERE reading = ?", r),
-    count: () => store.get<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM incidents")!.n,
+    snap: () => go(Collector.use((c) => snapshot(c.view, true))),
+    reading: (r: string) => go(Store.use((s) => s.get<{ state: string; ok_ms: number | null }>("SELECT state, ok_ms FROM readings WHERE reading = ?", r))),
+    readingAt: () => go(Store.use((s) => s.get<{ at_ms: number }>("SELECT at_ms FROM readings"))),
+    count: () => go(Store.use((s) => s.get<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM incidents"))).then((r) => r!.n),
+    close: () => runtime.dispose(),
   };
 }
 const recognisedMonitors = (v: unknown) =>
@@ -67,7 +70,7 @@ test("class: a reading is complete only when the adapter recognised the reply; a
       reply.monitors = monitors;
       reply.logs = logs;
       await r.step();
-      const m = r.reading("monitors"), l = r.reading("logs");
+      const m = await r.reading("monitors"), l = await r.reading("logs");
       const numericId = (x: unknown) => typeof x === "number" || (typeof x === "string" && x.trim() !== "" && Number.isFinite(Number(x)));
       if (m?.state === "ok") assert.ok(recognisedMonitors(monitors) && (monitors as Array<{ id: unknown }>).every((x) => typeof x.id === "number" || x.id !== ""), JSON.stringify(monitors));
       if (recognisedMonitors(monitors) && (monitors as Array<{ id: unknown }>).every((x) => numericId(x.id))) assert.equal(m?.state, "ok");
@@ -75,7 +78,7 @@ test("class: a reading is complete only when the adapter recognised the reply; a
       if (l?.state === "ok") assert.ok(listed, JSON.stringify(logs));
       if (!listed) assert.notEqual(l?.state, "ok");
       seen[m?.state === "ok" ? "ok" : "gap"]++;
-      r.store.close();
+      await r.close();
     }),
     { numRuns: 60 },
   );
@@ -90,9 +93,9 @@ test("class: monitors certify quiet only when every member is in a known measure
       const r = rig(["monitors"]);
       reply.monitors = states.map((overall_state, i) => ({ id: i + 1, name: `m${i}`, overall_state }));
       await r.step();
-      assert.equal(r.reading("monitors")?.state === "ok", states.every((x) => known.includes(x)), JSON.stringify(states));
-      if (!states.every((x) => known.includes(x))) assert.notEqual(r.snap().environments[0]!.health, "quiet");
-      r.store.close();
+      assert.equal((await r.reading("monitors"))?.state === "ok", states.every((x) => known.includes(x)), JSON.stringify(states));
+      if (!states.every((x) => known.includes(x))) assert.notEqual((await r.snap()).environments[0]!.health, "quiet");
+      await r.close();
     }),
     { numRuns: 40 },
   );
@@ -105,8 +108,8 @@ test("class: a metric point is a measurement only inside the queried window, on 
       const end = r.now + 60_000;
       reply.query = { series: [{ metric: "shop.errors", pointlist: [[end + offset, 1]] }] };
       await r.step();
-      assert.equal(r.reading("metrics")?.state === "ok", offset <= 0 && offset >= -60_000, String(offset));
-      r.store.close();
+      assert.equal((await r.reading("metrics"))?.state === "ok", offset <= 0 && offset >= -60_000, String(offset));
+      await r.close();
     }),
     { numRuns: 40 },
   );
@@ -120,17 +123,17 @@ test("class: freshness is the provider's observation time, never the time Overwa
       await r.step();
       // A point dated outside the queried window (one interval) proves nothing about it: a gap, never fresh.
       if (age > 60_000) {
-        assert.equal(r.reading("metrics")?.state, "gap");
-        assert.notEqual(r.snap().environments[0]!.health, "quiet");
-        return r.store.close();
+        assert.equal((await r.reading("metrics"))?.state, "gap");
+        assert.notEqual((await r.snap()).environments[0]!.health, "quiet");
+        return r.close();
       }
       // Stored, and as every consumer sees it: the snapshot's reading age and the environment's health.
-      assert.equal(r.reading("metrics")?.ok_ms, r.now - age);
-      assert.equal(r.store.get<{ at_ms: number }>("SELECT at_ms FROM readings")!.at_ms, r.now - age);
-      const env = r.snap().environments[0]!;
+      assert.equal((await r.reading("metrics"))?.ok_ms, r.now - age);
+      assert.equal((await r.readingAt())!.at_ms, r.now - age);
+      const env = (await r.snap()).environments[0]!;
       assert.equal(env.readings[0]!.okMs, r.now - age);
       if (age > env.freshForMs) assert.equal(env.health, "stale");
-      r.store.close();
+      await r.close();
     }),
     { numRuns: 25 },
   );
@@ -150,8 +153,8 @@ test("class: a monitor's count is its transitions into alerting, not the time it
         if (alerting && !was) expected++;
         was = alerting;
       }
-      assert.equal(r.count(), expected, states.join(" → "));
-      r.store.close();
+      assert.equal(await r.count(), expected, states.join(" → "));
+      await r.close();
     }),
     { numRuns: 40 },
   );
@@ -165,41 +168,43 @@ test("class: a new source kind inherits no identity and no endpoint", () => {
   );
 });
 
-test("class: a receipt commits with its change or not at all, and a key binds one request forever", () => {
+test("class: a receipt commits with its change or not at all, and a key binds one request forever", async () => {
   const keys = ["rk_" + "a".repeat(24), "rk_" + "b".repeat(24), "rk_" + "c".repeat(24)];
-  fc.assert(
-    fc.property(fc.array(fc.record({ key: fc.nat(2), subject: fc.nat(1), body: fc.nat(1), fails: fc.boolean() }), { maxLength: 12 }), (calls) => {
-      const store = Store.own(scratch("ow-receipt-"));
-      clock.set(Date.UTC(2026, 10, 1), 1e6);
-      const first = new Map<number, { subject: number; body: number; result: unknown }>();
-      for (const c of calls) {
-        const run = () => keyed(store, keys[c.key], { op: "probe", subject: `s${c.subject}`, body: { b: c.body }, change: (w: Writer) => {
-          const seq = w.event("probe", null, { b: c.body });
-          if (c.fails) throw new Error("the change failed");
-          return { seq };
-        } });
-        const prior = first.get(c.key);
-        if (prior && (prior.subject !== c.subject || prior.body !== c.body)) assert.throws(run, (e) => e instanceof HttpError && e.status === 409);
-        else if (prior) assert.deepEqual(run(), prior.result);
-        else if (c.fails) assert.throws(run, /failed/);
-        else first.set(c.key, { subject: c.subject, body: c.body, result: run() });
-      }
-      // Receipts and the changes they protect: equal in number, because they commit together.
-      assert.equal(store.get<{ n: number }>("SELECT count(*) AS n FROM requests")!.n, first.size);
-      assert.equal(store.get<{ n: number }>("SELECT count(*) AS n FROM events WHERE kind = 'probe'")!.n, first.size);
-      store.close();
-    }),
+  await fc.assert(
+    fc.asyncProperty(fc.array(fc.record({ key: fc.nat(2), subject: fc.nat(1), body: fc.nat(1), fails: fc.boolean() }), { maxLength: 12 }), (calls) =>
+      run(withStore(scratch("ow-receipt-"), (store) => Effect.gen(function* () {
+        clock.set(Date.UTC(2026, 10, 1), 1e6);
+        const first = new Map<number, { subject: number; body: number; result: unknown }>();
+        for (const c of calls) {
+          const attempt = Effect.exit(keyed(keys[c.key], { op: "probe", subject: `s${c.subject}`, body: { b: c.body }, change: (w: Writer) => Effect.gen(function* () {
+            const seq = yield* w.event("probe", null, { b: c.body });
+            if (c.fails) return yield* Effect.fail({ _tag: "ChangeFailed" as const, message: "the change failed" });
+            return { seq };
+          }) }));
+          const prior = first.get(c.key);
+          const exit = yield* attempt;
+          const error = Exit.isFailure(exit) ? (exit.cause.reasons[0] as { error?: { _tag: string; status?: number; message?: string } }).error : undefined;
+          if (prior && (prior.subject !== c.subject || prior.body !== c.body)) assert.ok(error?._tag === "ApiError" && error.status === 409);
+          else if (prior) assert.deepEqual(Exit.isSuccess(exit) ? exit.value : error, prior.result);
+          else if (c.fails) assert.match(String(error?.message), /failed/);
+          else if (Exit.isSuccess(exit)) first.set(c.key, { subject: c.subject, body: c.body, result: exit.value });
+          else assert.fail(String(error?.message));
+        }
+        // Receipts and the changes they protect: equal in number, because they commit together.
+        assert.equal((yield* store.get<{ n: number }>("SELECT count(*) AS n FROM requests"))!.n, first.size);
+        assert.equal((yield* store.get<{ n: number }>("SELECT count(*) AS n FROM events WHERE kind = 'probe'"))!.n, first.size);
+      }))),
+    ),
   );
 });
 
-test("class: a writer kept past its transaction cannot write, so nothing writes without admission", () => {
-  const store = Store.own(scratch("ow-writer-"));
-  let kept: Writer | null = null;
-  store.tx((w) => {
-    kept = w;
-  });
-  assert.throws(() => kept!.event("late", null, {}), /ended/);
-  assert.throws(() => kept!.run("DELETE FROM events" as Clean), /ended/);
-  assert.equal(Object.keys(store).some((k) => /db|writer/i.test(k)), false);
-  store.close();
-});
+test("class: a writer kept past its transaction cannot write, so nothing writes without admission", () =>
+  run(withStore(scratch("ow-writer-"), (store) => Effect.gen(function* () {
+    let kept: Writer | null = null;
+    yield* store.tx((w) => Effect.sync(() => void (kept = w)));
+    const message = (e: Effect.Effect<unknown>) => Effect.map(Effect.exit(e), (x) => (Exit.isFailure(x) ? String((x.cause.reasons[0] as { defect?: unknown }).defect) : "wrote"));
+    assert.match(yield* message(kept!.event("late", null, {})), /ended/);
+    assert.match(yield* message(kept!.run("DELETE FROM events" as Clean)), /ended/);
+    // The connection and the writer are not reachable from the store's shape.
+    assert.equal(Object.keys(store).some((k) => /db|writer|sql/i.test(k)), false);
+  }))));

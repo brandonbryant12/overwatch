@@ -77,8 +77,7 @@ const Telemetry = Schema.Struct({
   since: Schema.optionalKey(Schema.NullOr(Int)),
   until: Schema.optionalKey(Schema.NullOr(Int)),
   query: Schema.optionalKey(Text),
-  cursor: Schema.optionalKey(Text),
-});
+  cursor: Schema.optionalKey(Text),});
 const CodeSearch = Schema.Struct({ pattern: Text, path: Schema.optionalKey(Text) });
 const CodeRead = Schema.Struct({ path: Text, from: Int, to: Int });
 const History = Schema.Struct({ path: Schema.optionalKey(Text), ref: Schema.optionalKey(Text) });
@@ -96,8 +95,7 @@ const ActInput = Schema.Struct({
   when: Schema.optionalKey(Text),
   reason: Schema.optionalKey(Text),
   actionSeq: Schema.optionalKey(Int),
-  throughSeq: Schema.optionalKey(Int),
-});
+  throughSeq: Schema.optionalKey(Int),});
 const Claim = Schema.Struct({ statement: Text, evidence: Texts });
 const findingFields = {
   verdict: Schema.Literals(["real", "not_real", "unsure"]),
@@ -108,8 +106,7 @@ const findingFields = {
   impact: Text,
   affected: Texts,
   since: Schema.NullOr(Int),
-  status: Text,
-};
+  status: Text,};
 const FindingInput = Schema.Struct({ ...findingFields, claims: Schema.Array(Claim) });
 /** The finding with its claims undecoded: each claim is judged on its own, with the handles the run may cite. */
 const FindingShape = Schema.Struct({ ...findingFields, claims: Schema.Array(Schema.Unknown) });
@@ -124,8 +121,7 @@ export const TOOLS = [
   {
     name: "ow_proposal",
     description: "Select exactly one change from the options you were given: {kind:\"revert\", commit} (commit may be left out when there is one), {kind:\"setting\", path, key}, or {kind:\"abstain\"}. You never write the change itself.",
-    parameters: ProposalInput,
-  },
+    parameters: ProposalInput,},
   { name: "ow_inbox", description: "The owner's inbox: four groups of problem IDs, as the page shows them.", parameters: Empty },
   { name: "ow_get", description: "One problem in full: counts, way out, history, findings, investigations, questions.", parameters: GetInput },
   { name: "ow_search", description: "Literal, case-insensitive search over problems, evidence, findings and questions.", parameters: SearchInput },
@@ -184,12 +180,10 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
       const authored = new Map<string, string[]>();
 
       /** Stores pieces with their typed origin (what the evidence is, whatever its source is called), reusing a handle for the same text. */
-      const deliver = (run: RunRow, source: string, texts: ReadonlyArray<string>, origin: Origin | ReadonlyArray<Origin>) =>
-        Effect.gen(function* () {
+      const deliver = (run: RunRow, source: string, texts: ReadonlyArray<string>, origin: Origin | ReadonlyArray<Origin>) => Effect.gen(function* () {
           let truncated = false;
           const pieces: Piece[] = [];
-          yield* store.tx((w) =>
-            Effect.gen(function* () {
+          yield* store.tx((w) => Effect.gen(function* () {
               for (const [n, raw] of texts.entries()) {
                 const bounded = clean(raw, LIMITS.pieceBytes * 4);
                 const text = truncate(bounded, LIMITS.pieceBytes) as Clean;
@@ -210,11 +204,8 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
                 yield* w.run("INSERT INTO origins (handle, origin) VALUES (?, ?)", handle as Clean, (Predicate.isString(origin) ? origin : origin[n]!) as Clean);
                 pieces.push({ handle, source, text });
               }
-              yield* w.event("evidence", run.id as Clean, { source, pieces: pieces.length, truncated });
-            }),
-          );
-          return { pieces, truncated };
-        });
+              yield* w.event("evidence", run.id as Clean, { source, pieces: pieces.length, truncated }); }));
+          return { pieces, truncated }; });
 
       const telemetry = Effect.fnUntraced(function* (run: RunRow, context: RunContext, args: unknown) {
         const input = yield* decode(Telemetry, args, "ow_telemetry");
@@ -235,8 +226,7 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         const slice = ordered.slice(offset, offset + PAGE);
         const page = yield* deliver(run, source, slice.map((l) => `${new Date(l.at).toISOString()} ${l.text}`), slice.map((l) => l.origin ?? "telemetry"));
         const nextCursor = offset + PAGE < ordered.length ? `c${offset + PAGE}_${bind}` : null;
-        return { pieces: page.pieces, truncated: page.truncated, nextCursor };
-      });
+        return { pieces: page.pieces, truncated: page.truncated, nextCursor }; });
 
       const relative = (value: string | undefined, required: boolean) => {
         if (value === undefined && !required) return Effect.succeed(null);
@@ -269,13 +259,11 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         if (input.ref !== undefined && input.ref !== at) return yield* refusal(`ref must be the pinned commit ${at}`);
         const file = yield* relative(input.path, false);
         const r = yield* git("log", "-n", "20", "--format=%H %ad %s", "--date=iso-strict", at, ...(file ? ["--", file] : []));
-        return yield* deliver(run, "history", r.stdout.split("\n").filter(Boolean), "history");
-      });
+        return yield* deliver(run, "history", r.stdout.split("\n").filter(Boolean), "history"); });
 
       const refuser = Effect.fnUntraced(function* (run: RunRow) {
         const valid = yield* store.all<Piece>("SELECT handle FROM evidence WHERE run_id = ? ORDER BY rowid", run.id);
-        return (why: string) => refusal(`${why}. Handles you may cite: ${valid.map((p) => p.handle).join(", ") || "none yet; call ow_telemetry first"}`);
-      });
+        return (why: string) => refusal(`${why}. Handles you may cite: ${valid.map((p) => p.handle).join(", ") || "none yet; call ow_telemetry first"}`); });
 
       /** The stored pieces for handles delivered to this run; any other handle refuses the whole filing. */
       const cite = Effect.fnUntraced(function* (run: RunRow, handles: ReadonlyArray<string>) {
@@ -285,14 +273,12 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
           if (!piece) return yield* (yield* refuser(run))("a cited handle was not delivered to this session");
           pieces.push({ handle: piece.handle, source: piece.source, text: piece.text });
         }
-        return pieces;
-      });
+        return pieces; });
 
       const file = Effect.fnUntraced(function* (run: RunRow, pinned: Code, verdict: string, claims: ReadonlyArray<{ statement: string; pieces: Piece[] }>, body: Record<string, unknown>) {
         const id = `f_${randomBytes(12).toString("hex")}`;
         // One valid filing closes the attempt, atomically with the finding.
-        const closed = yield* store.tx((w) =>
-          Effect.gen(function* () {
+        const closed = yield* store.tx((w) => Effect.gen(function* () {
             const done = (yield* w.run("UPDATE runs SET state = 'terminal' WHERE id = ? AND state = 'active'", run.id as Clean)).changes;
             if (done === 0) return false;
             yield* w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES (?, ?, ?, ?, ?, ?)", id as Clean, run.id as Clean, verdict as Clean, json(claims), json(pinned), json(body));
@@ -301,13 +287,10 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
             const seq = yield* w.event("finding", (job.kind === "trial" ? run.id : job.subject) as Clean, { id, run: run.id, verdict });
             // An investigation's readings are votes: only its single adjudication can bring the problem back.
             if (job.kind !== "trial" && job.kind !== "investigation") yield* afterFinding(w, job.subject, seq, verdict);
-            return true;
-          }),
-        );
+            return true; }));
         if (!closed) return yield* refusal("this investigation has already been closed");
         const stored = (yield* store.get<{ claims: string }>("SELECT claims FROM findings WHERE id = ?", id))!;
-        return { id, verdict, claims: JSON.parse(stored.claims), code: pinned };
-      });
+        return { id, verdict, claims: JSON.parse(stored.claims), code: pinned }; });
 
       const finding = Effect.fnUntraced(function* (run: RunRow, pinned: Code, args: unknown) {
         const input = yield* decode(FindingShape, args, "ow_finding");
@@ -324,8 +307,7 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
           claims.push({ statement: clean(claim.value.statement, 2000), pieces: yield* cite(run, claim.value.evidence) });
         }
         const { verdict, claims: _, ...body } = input;
-        return yield* file(run, pinned, verdict, claims, body);
-      });
+        return yield* file(run, pinned, verdict, claims, body); });
 
       /** A challenger's one filing: an outcome, a reason and its own evidence, stored as a finding of its run. */
       const challenge = Effect.fnUntraced(function* (run: RunRow, pinned: Code, args: unknown) {
@@ -334,8 +316,7 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         if (input.evidence.length === 0) return yield* (yield* refuser(run))("evidence must list at least one handle");
         const pieces = yield* cite(run, input.evidence);
         const verdict = input.outcome === "upheld" ? "real" : input.outcome === "disproved" ? "not_real" : "unsure";
-        return yield* file(run, pinned, verdict, [{ statement: clean(input.reason, 2000), pieces }], { challenge: input.outcome, reason: input.reason });
-      });
+        return yield* file(run, pinned, verdict, [{ statement: clean(input.reason, 2000), pieces }], { challenge: input.outcome, reason: input.reason }); });
 
       /**
        * A fixer's one filing: a selection from what code offered, never bytes, a path or a commit of its own. Anything
@@ -360,18 +341,14 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
           if (path === undefined || key === undefined || !options.keys.some((k) => k.path === path && k.key === key)) refused = `path and key must be one of: ${options.keys.map((k) => `${k.path} ${k.key}`).join(", ") || "none offered"}`;
           else body = { kind, path, key };
         } else body = { kind: "abstain" };
-        const stored = yield* store.tx((w) =>
-          Effect.gen(function* () {
+        const stored = yield* store.tx((w) => Effect.gen(function* () {
             if ((yield* w.run("UPDATE runs SET state = 'terminal' WHERE id = ? AND state = 'active'", run.id as Clean)).changes === 0) return false;
             yield* w.run("INSERT INTO proposals (run_id, body, refused) VALUES (?, ?, ?)", run.id as Clean, json(body ?? { kind: "refused", input: JSON.stringify(args ?? null).slice(0, 500) }), refused as Clean | null);
             yield* w.event("proposal", run.id as Clean, { kind: body?.kind ?? null, refused });
-            return true;
-          }),
-        );
+            return true; }));
         if (!stored) return yield* refusal("this proposal session has already filed");
         if (refused) return yield* refusal(`refused: ${refused}. The attempt has ended.`);
-        return { accepted: body };
-      });
+        return { accepted: body }; });
 
       /** The owner tools, for a session OpenCode confirms and Overwatch does not run. */
       const ownerCall = Effect.fnUntraced(function* (sessionId: string, name: string, args: unknown, o: Owner | null) {
@@ -390,8 +367,7 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         }
         const { id, until, ...rest } = yield* decode(ActInput, args, name);
         if (!id) return yield* refusal("id is required");
-        return yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) });
-      });
+        return yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) }); });
 
       const call = Effect.fnUntraced(function* (sessionId: unknown, name: string, args: unknown, owner: Owner | null) {
         if (!Predicate.isString(sessionId) || !sessionId) return yield* refusal("the call carries no OpenCode session id");
@@ -423,15 +399,11 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
             return yield* proposal(run, context.options ?? { commits: [], keys: [] }, args);
           default:
             return yield* refusal(`unknown tool ${clean(name, 60)}`);
-        }
-      });
+        }});
 
       return Tools.of({
         contexts,
         authored,
         list: () => TOOLS.map((t) => ({ name: t.name, description: t.description, inputSchema: inputSchema(t.parameters) })),
-        call: (sessionId, name, args, owner = null) => call(sessionId, name, args, owner).pipe(Effect.provide(services)),
-      });
-    }),
-  );
+        call: (sessionId, name, args, owner = null) => call(sessionId, name, args, owner).pipe(Effect.provide(services)),}); }));
 }

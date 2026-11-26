@@ -7,14 +7,13 @@
 import { Effect } from "effect";
 import { AppConfig } from "./config.ts";
 import { apiError } from "./errors.ts";
-import { Store } from "./store.ts";
+import { Store, sql } from "./store.ts";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: number, throughSeq?: number) {
-  const store = yield* Store;
   const config = yield* AppConfig;
-  const current = yield* store.seq;
+  const current = yield* sql.seq;
   const after = afterSeq ?? 0, through = throughSeq ?? current;
   if (audience !== "owner" && audience !== "team") return yield* apiError(400, "audience is owner or team");
   if (!Number.isSafeInteger(after) || !Number.isSafeInteger(through) || after < 0 || through < after || through > current) return yield* apiError(400, "afterSeq and throughSeq must satisfy 0 ≤ afterSeq ≤ throughSeq ≤ the current seq");
@@ -22,30 +21,30 @@ export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: 
   const inside = (sql: string) => `${sql} > ${after} AND ${sql} <= ${through}`;
   const places = config.watchers.map((w) => ({ app: w.app, environment: w.environment }));
   const name = (p: { app: string; environment: string }) => `${p.app} ${p.environment}`;
-  const fresh = yield* store.all<{ app: string; environment: string; title: string; severity: string }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
-  const returned = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'returned' AND ${inside("seq")} ORDER BY seq`);
-  const decided = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'adjudicated' AND ${inside("seq")} ORDER BY seq`);
-  const deploys = yield* store.all<{ app: string; environment: string; revision: string }>(`SELECT * FROM deploys WHERE ${inside("seq")} ORDER BY seq`);
-  const failed = yield* store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'source_failed' AND ${inside("seq")} ORDER BY seq`);
-  const gaps = yield* store.all<{ source: string; reading: string; state: string }>(`SELECT DISTINCT source, reading, state FROM coverage WHERE state <> 'ok' AND ${inside("seq")}`);
+  const fresh = yield* sql.all<{ app: string; environment: string; title: string; severity: string }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
+  const returned = yield* sql.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'returned' AND ${inside("seq")} ORDER BY seq`);
+  const decided = yield* sql.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'adjudicated' AND ${inside("seq")} ORDER BY seq`);
+  const deploys = yield* sql.all<{ app: string; environment: string; revision: string }>(`SELECT * FROM deploys WHERE ${inside("seq")} ORDER BY seq`);
+  const failed = yield* sql.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'source_failed' AND ${inside("seq")} ORDER BY seq`);
+  const gaps = yield* sql.all<{ source: string; reading: string; state: string }>(`SELECT DISTINCT source, reading, state FROM coverage WHERE state <> 'ok' AND ${inside("seq")}`);
   // Open as of the fence: the disposition and quiet state are replayed from events up to `through`, so a later
   // Done, return or quiet cannot rewrite a past brief.
   const open: Array<{ id: string; app: string; environment: string; title: string; severity: string; active: number }> = [];
-  for (const i of yield* store.all<{ id: string; app: string; environment: string; title: string; severity: string; active: number }>(
+  for (const i of yield* sql.all<{ id: string; app: string; environment: string; title: string; severity: string; active: number }>(
     `SELECT id, app, environment, title, severity, active FROM incidents WHERE first_seq <= ${through} ORDER BY severity, first_seq`,
   )) {
-    const last = (kinds: string, cmp: string) => store.get<{ kind: string; data: string }>(`SELECT kind, data FROM events WHERE subject = ? AND kind IN (${kinds}) AND seq ${cmp} ${through} ORDER BY seq DESC LIMIT 1`, i.id);
+    const last = (kinds: string, cmp: string) => sql.get<{ kind: string; data: string }>(`SELECT kind, data FROM events WHERE subject = ? AND kind IN (${kinds}) AND seq ${cmp} ${through} ORDER BY seq DESC LIMIT 1`, i.id);
     const way = yield* last("'action','returned'", "<=");
     if (way?.kind === "action" && (JSON.parse(way.data) as { way: unknown }).way) continue;
     const quiet = yield* last("'quieted','returned'", "<=");
     if (quiet ? quiet.kind === "returned" : i.active === 1 || !!(yield* last("'quieted'", ">"))) open.push(i);
   }
-  const earliest = (yield* store.get<{ s: number | null }>("SELECT min(seq) AS s FROM events"))?.s ?? null;
-  const title = (id: string) => store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", id);
+  const earliest = (yield* sql.get<{ s: number | null }>("SELECT min(seq) AS s FROM events"))?.s ?? null;
+  const title = (id: string) => sql.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", id);
   // The evidence a decision rests on: the handles cited by the readings that agree with the verdict.
   const cited = (findings: string[]) =>
     findings.length
-      ? Effect.map(store.all<{ handle: string }>(`SELECT DISTINCT handle FROM citations WHERE finding IN (${findings.map(() => "?").join(",")}) ORDER BY handle`, ...findings), (rows) => rows.map((c) => c.handle))
+      ? Effect.map(sql.all<{ handle: string }>(`SELECT DISTINCT handle FROM citations WHERE finding IN (${findings.map(() => "?").join(",")}) ORDER BY handle`, ...findings), (rows) => rows.map((c) => c.handle))
       : Effect.succeed([] as string[]);
 
   const changed: string[] = [];
@@ -55,8 +54,7 @@ export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: 
       changed.push(team
         ? `${name(p)}: ${plural(here.filter((i) => i.severity === "error").length, "new error")} and ${plural(here.filter((i) => i.severity !== "error").length, "new warning")} appeared.`
         : `${name(p)}: new ${here.map((i) => `${i.severity} «${i.title}»`).join("; ")}.`);
-    }
-  }
+    }}
   for (const d of deploys) changed.push(team ? `${d.app} ${d.environment} received a new release.` : `${d.app} ${d.environment}: deployed ${d.revision.slice(0, 12)}.`);
   for (const r of returned) {
     const t = yield* title(r.subject), data = JSON.parse(r.data) as { reason: string };
@@ -76,14 +74,12 @@ export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: 
   const impact = places.flatMap((p) => {
     const errors = open.filter((i) => i.app === p.app && i.environment === p.environment && i.severity === "error");
     if (!errors.length) return [];
-    return [team ? `${name(p)}: ${plural(errors.length, "error problem")} active; the effect on people is not recorded.` : `${name(p)}: ${errors.map((i) => `«${i.title}»`).join("; ")}; impact not recorded.`];
-  });
+    return [team ? `${name(p)}: ${plural(errors.length, "error problem")} active; the effect on people is not recorded.` : `${name(p)}: ${errors.map((i) => `«${i.title}»`).join("; ")}; impact not recorded.`]; });
 
   const still = places.flatMap((p) => {
     const here = open.filter((i) => i.app === p.app && i.environment === p.environment);
     if (!here.length) return [];
-    return [team ? `${name(p)}: ${plural(here.length, "problem")} still open.` : `${name(p)}: ${here.map((i) => `${i.severity} «${i.title}»`).join("; ")}.`];
-  });
+    return [team ? `${name(p)}: ${plural(here.length, "problem")} still open.` : `${name(p)}: ${here.map((i) => `${i.severity} «${i.title}»`).join("; ")}.`]; });
 
   const next: string[] = [];
   const unchecked = new Map<string, Set<string>>();
@@ -103,5 +99,4 @@ export const brief = Effect.fn("brief")(function* (audience: string, afterSeq?: 
     section("Still open", still, "None recorded."),
     section("Next check", [...new Set(next)], "None recorded."),
   ].join("\n\n");
-  return { audience, afterSeq: after, throughSeq: through, text };
-});
+  return { audience, afterSeq: after, throughSeq: through, text }; });

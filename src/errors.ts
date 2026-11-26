@@ -5,10 +5,7 @@
 import { Schema } from "effect";
 
 /** A request the API refuses, with the HTTP status it answers. */
-export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", {
-  status: Schema.Number,
-  message: Schema.String,
-}) {}
+export class ApiError extends Schema.TaggedError<ApiError>()("ApiError", { status: Schema.Number, message: Schema.String }) {}
 export const apiError = (status: number, message: string) => new ApiError({ status, message });
 
 /** The disk is short: nothing is admitted until there is room again. */
@@ -33,11 +30,7 @@ export class Unavailable extends Schema.TaggedError<Unavailable>()("Unavailable"
 export class Expired extends Schema.TaggedError<Expired>()("Expired", {}) {}
 
 /** The command line's outcome when it is not success: its exit code, error kind and message. */
-export class CliExit extends Schema.TaggedError<CliExit>()("CliExit", {
-  code: Schema.Number,
-  kind: Schema.String,
-  message: Schema.String,
-}) {}
+export class CliExit extends Schema.TaggedError<CliExit>()("CliExit", { code: Schema.Number, kind: Schema.String, message: Schema.String }) {}
 export const cliExit = (code: number, kind: string, message: string) => new CliExit({ code, kind, message });
 
 /** A backup that cannot be written (the target exists, or SQLite refused). */

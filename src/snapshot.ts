@@ -13,7 +13,7 @@ import { AppConfig, LIMITS } from "./config.ts";
 import { clock } from "./clock.ts";
 import { approvalKey } from "./trial.ts";
 import { inbox, rows as incidentRows } from "./inbox.ts";
-import { Store } from "./store.ts";
+import { Store, sql } from "./store.ts";
 import type { ProviderTime } from "./parse.ts";
 
 /** What the snapshot reads from a running collector: whether collection is paused, and when a reading last succeeded. */
@@ -41,8 +41,7 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
   const now = clock.now(), mono = clock.mono();
   const rows = new Map((yield* store.all<SourceRow>("SELECT * FROM sources")).map((r) => [r.id, r]));
   const readings = new Map(
-    (yield* store.all<{ source: string; reading: string; state: string; ok_ms: ProviderTime | null }>("SELECT source, reading, state, ok_ms FROM readings")).map((r) => [`${r.source}|${r.reading}`, r]),
-  );
+    (yield* store.all<{ source: string; reading: string; state: string; ok_ms: ProviderTime | null }>("SELECT source, reading, state, ok_ms FROM readings")).map((r) => [`${r.source}|${r.reading}`, r]));
   const errors = new Set((yield* store.all<{ place: string }>("SELECT DISTINCT app || '/' || environment AS place FROM incidents WHERE severity = 'error' AND active = 1")).map((r) => r.place));
 
   const environments = config.watchers.map((w) => {
@@ -69,8 +68,7 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
         measured.push({ source: s.id, reading, state: r?.state ?? null, okMs: Number.isFinite(age) ? now - age : null });
         if (age > limit) worse("stale");
         else if (r!.state !== "ok") worse("partial");
-      }
-    }
+      }}
     return {
       app: w.app,
       environment: w.environment,
@@ -78,14 +76,11 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
       health,
       readings: measured,
       freshForMs: limit,
-      excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),
-    };
-  });
+      excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),}; });
 
   const sources = config.sources.map((s) => {
     const r = rows.get(s.id);
-    return { id: s.id, subject: `src:${s.id}`, app: s.app, environment: s.environment, kind: s.kind, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1, fix: r?.failure ? r.fix : null };
-  });
+    return { id: s.id, subject: `src:${s.id}`, app: s.app, environment: s.environment, kind: s.kind, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1, fix: r?.failure ? r.fix : null }; });
 
   // One cause per failure; everything unreachable at once, across several independent endpoints, is one: offline.
   const failing = config.sources.filter((s) => rows.get(s.id)?.failure);
@@ -124,25 +119,19 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
     // Real work at the top; the trial's calibration work in its own namespace.
     jobs: yield* jobs(false),
     findings: yield* findings(false),
-    trial: { jobs: yield* jobs(true), findings: yield* findings(true) },
-  };
-});
+    trial: { jobs: yield* jobs(true), findings: yield* findings(true) },}; });
 
 const jobs = Effect.fnUntraced(function* (trial: boolean) {
-  const store = yield* Store;
-  return (yield* store.all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null }>(
+  return (yield* sql.all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null }>(
       `SELECT j.id, j.state, j.kind, j.subject, j.reason, (SELECT session_id FROM runs r WHERE r.job_id = j.id ORDER BY attempt DESC LIMIT 1) AS session_id
        FROM jobs j WHERE (j.kind = 'trial') = ? ORDER BY j.created_seq, j.id`,
       trial ? 1 : 0,
-    )).map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason }));
-});
+    )).map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason })); });
 
 const findings = Effect.fnUntraced(function* (trial: boolean) {
-  const store = yield* Store;
-  return (yield* store.all<{ id: string; verdict: string; claims: string; code: string }>(
+  return (yield* sql.all<{ id: string; verdict: string; claims: string; code: string }>(
       "SELECT f.id, f.verdict, f.claims, f.code FROM findings f JOIN runs r ON r.id = f.run_id JOIN jobs j ON j.id = r.job_id WHERE (j.kind = 'trial') = ? ORDER BY f.rowid",
       trial ? 1 : 0,
-    )).map((f) => ({ id: f.id, verdict: f.verdict, claims: JSON.parse(f.claims), code: JSON.parse(f.code) }));
-});
+    )).map((f) => ({ id: f.id, verdict: f.verdict, claims: JSON.parse(f.claims), code: JSON.parse(f.code) })); });
 
 export type Snapshot = Effect.Success<ReturnType<typeof snapshot>>;

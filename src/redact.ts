@@ -26,9 +26,7 @@ const PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
   ["cookie", /\b(set-cookie|cookie)\s*:\s*[^\r\n]+/gi],
   [
     "named_secret",
-    /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_.-]*["']?[ \t]*[:=][ \t]*)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s"',;&})\]]+)/gi,
-  ],
-];
+    /\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_.-]*["']?[ \t]*[:=][ \t]*)(?!\[REDACTED)("[^"\n]*"|'[^'\n]*'|[^\s"',;&})\]]+)/gi]];
 
 const TOKEN = /[A-Za-z0-9+/_-]{20,}={0,2}/g;
 const RUN = /[A-Za-z0-9]{16,}/g;
@@ -72,15 +70,13 @@ export function clean(input: string, maxBytes = 16_384): Clean {
   for (const [kind, pattern] of PATTERNS) {
     out = out.replace(pattern, (match, ...groups) => {
       if (kind === "named_secret" || kind === "dsn_password") return `${groups[0]}[REDACTED:${kind}]`;
-      return `[REDACTED:${kind}]`;
-    });
+      return `[REDACTED:${kind}]`; });
   }
   out = out.replace(TOKEN, (token) => {
     if (HEX_OR_UUID.test(token)) return token;
     const runs = token.match(RUN) ?? [];
     const joined = /[+=]/.test(token) && token.length >= 32 ? [token.replace(/[^A-Za-z0-9]/g, "")] : [];
-    return [...runs, ...joined].some(looksGenerated) ? `[REDACTED:high_entropy:${digest(token)}]` : token;
-  });
+    return [...runs, ...joined].some(looksGenerated) ? `[REDACTED:high_entropy:${digest(token)}]` : token; });
   return truncate(out, maxBytes) as Clean;
 }
 

@@ -70,8 +70,7 @@ export const install = Effect.fn("launchd.install")(function* (configFile: strin
   yield* launch(["bootout", `${domain()}/${LABEL}`]); // an earlier copy, if loaded; its absence is fine
   const r = yield* launch(["bootstrap", domain(), file]);
   if (!r.ok) return yield* new LaunchdError({ message: `launchctl bootstrap failed: ${r.text}` });
-  return { label: LABEL, plist: file, config, log: join(dataDir, "service.log") };
-});
+  return { label: LABEL, plist: file, config, log: join(dataDir, "service.log") }; });
 
 /**
  * Unloads and removes the agent, then asks launchd what is still loaded. Three outcomes: unloaded (the plist is

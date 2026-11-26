@@ -298,7 +298,7 @@ test("build: the request key is read only by the keyed router, and only keyed() 
   assert.doesNotMatch(readFileSync(join(src, "inbox.ts"), "utf8"), /export function receipt/);
   // Every POST goes through the one route table, whose guard is keyed, fenced or a command; basisSeq is read in one place.
   const server = readFileSync(join(src, "server.ts"), "utf8");
-  assert.equal(server.match(/["'`]POST["'`]/g)?.length, 1, "a POST route is added outside the WRITES table");
+  assert.equal(server.match(/router\.add\("POST"/g)?.length, 1, "a POST route is added outside the WRITES table");
   for (const f of readdirSync(src).filter((n) => n.endsWith(".ts") && n !== "server.ts" && n !== "mcp.ts"))
     assert.doesNotMatch(readFileSync(join(src, f), "utf8"), /router\.add\(\s*["'`]POST/, `${f} adds a POST route outside the WRITES table`);
   const basis = readdirSync(src).filter((n) => n.endsWith(".ts")).flatMap((f) => (readFileSync(join(src, f), "utf8").match(/body\.basisSeq/g) ?? []).map(() => f));

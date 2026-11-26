@@ -86,8 +86,7 @@ const NOT_READY = "pods not ready";
  */
 export const METRIC_RULES: ReadonlyArray<{ name: string; over: number; samples: number }> = [
   { name: MEMORY, over: 90, samples: 2 },
-  { name: NOT_READY, over: 0, samples: 2 },
-];
+  { name: NOT_READY, over: 0, samples: 2 }];
 type Hysteresis = { over: number; under: number; breach: boolean };
 
 /** One sample through a rule: the runs over and under the limit, and whether the problem is open. */
@@ -163,8 +162,7 @@ export class Slice {
         this.buckets.get(bucket)!.inexact = true;
         return;
       }
-      this.admitted.push({ key, stream, at, bucket, text: text.slice(0, 4000) });
-    });
+      this.admitted.push({ key, stream, at, bucket, text: text.slice(0, 4000) }); });
   }
 
   /**
@@ -179,8 +177,7 @@ export class Slice {
 
   get capped() {
     return this.fresh > LIMITS.occurrencesPerSlice;
-  }
-}
+  }}
 
 export interface Space {
   freeBytes: number;
@@ -230,17 +227,14 @@ const make = Effect.gen(function* () {
     // Unknown free space is not a reason to stop.
     const free = Effect.try(() => statfsSync(config.dataDir)).pipe(
       Effect.map((s) => Number(s.bavail) * Number(s.bsize)),
-      Effect.orElseSucceed(() => Number.MAX_SAFE_INTEGER),
-    );
-    return Effect.all({ freeBytes: free, dbBytes: store.liveBytes });
-  });
+      Effect.orElseSucceed(() => Number.MAX_SAFE_INTEGER));
+    return Effect.all({ freeBytes: free, dbBytes: store.liveBytes }); });
 
   /**
    * Whether there is room to admit: the free-space floor and the database budget. Over the budget, `maintain` first
    * makes room in the declared order, and measures again. No room: collection pauses with the reason `disk`.
    */
-  const room = (maintain: boolean) =>
-    Effect.gen(function* () {
+  const room = (maintain: boolean) => Effect.gen(function* () {
       let measured = yield* space;
       if (maintain && measured.dbBytes > LIMITS.databaseBudgetBytes) {
         yield* store.retain(clock.now(), Effect.map(space, (s) => s.dbBytes > LIMITS.databaseBudgetBytes));
@@ -248,8 +242,7 @@ const make = Effect.gen(function* () {
       }
       const ok = measured.freeBytes >= LIMITS.freeFloorBytes && measured.dbBytes <= LIMITS.databaseBudgetBytes;
       paused = ok ? null : "disk";
-      return ok;
-    });
+      return ok; });
 
   // Every write, wherever it comes from, is admitted by the same disk check.
   yield* store.setGuard(Effect.flatMap(room(false), (ok) => (ok ? Effect.void : Effect.fail(new Full({ message: "collection is paused for disk space" })))));
@@ -266,8 +259,7 @@ const make = Effect.gen(function* () {
     if (clock.now() >= row.next_ms) return true;
     if (!nextMono.has(source.id)) nextMono.set(source.id, clock.mono() + Math.min(row.next_ms - clock.now(), row.delay_ms ?? source.everyMs));
     if (clock.mono() >= nextMono.get(source.id)!) return true;
-    return row.failure !== null && wakeAt !== null && clock.mono() >= wakeAt;
-  });
+    return row.failure !== null && wakeAt !== null && clock.mono() >= wakeAt; });
 
   /**
    * Where reading starts: the checkpoint, never before the 14-day floor. Older time is the gap [checkpoint, floor).
@@ -281,10 +273,8 @@ const make = Effect.gen(function* () {
     const gap: Span | null = start < floor ? { from: start, to: floor } : null;
     if (gap) start = floor;
     const saturated = (yield* store.all<{ from_ms: number; to_ms: number }>("SELECT from_ms, to_ms FROM saturated WHERE source = ?", source.id)).map(
-      (s): Span => ({ from: s.from_ms, to: s.to_ms }),
-    );
-    return { now, start, floor, gap, overlap, saturated, ordinary: now - start > 0 && now - start <= 2 * source.everyMs };
-  });
+      (s): Span => ({ from: s.from_ms, to: s.to_ms }));
+    return { now, start, floor, gap, overlap, saturated, ordinary: now - start > 0 && now - start <= 2 * source.everyMs }; });
   type Window = Effect.Success<ReturnType<typeof window>>;
 
   const known = (key: string) => Effect.map(store.get("SELECT 1 FROM occurrences WHERE key = ?", key), (row) => row !== undefined);
@@ -293,8 +283,7 @@ const make = Effect.gen(function* () {
   const pods = Effect.fnUntraced(function* (t: Target, source: Source) {
     const listed = yield* kubectl(t, "get", ["pods", "-l", source.selector!, "-o", "json"]);
     if (listed.code !== 0) return yield* new SourceFailure({ kind: classify(listed.stderr), detail: listed.stderr || `kubectl exited ${listed.code}` });
-    return parsePods(listed.stdout);
-  });
+    return parsePods(listed.stdout); });
 
   /** A reading the source refused (permission, configuration) is recorded as failed; any other failure fails the pass. */
   const refusedReading = (target: Slice, reading: string, stderr: string): Effect.Effect<void, SourceFailure> => {
@@ -326,8 +315,7 @@ const make = Effect.gen(function* () {
       yield* commit(s, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = stuck ? Math.max(end, w.now - LIMITS.sliceMs) : end;
-    } while (start < w.now);
-  });
+    } while (start < w.now); });
 
   /**
    * One slice of logs. A container's records are kept only if its identity (its current and previous instance) is
@@ -369,9 +357,7 @@ const make = Effect.gen(function* () {
               ordinals.set(stamp + digest, ordinal + 1);
               const key = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
               seen.add(key);
-              lines.push({ key, stream, at, ...p, text });
-            }),
-          );
+              lines.push({ key, stream, at, ...p, text }); }));
           if (read.code !== 0) {
             if (instance.previous && /previous terminated container|not found/i.test(read.stderr)) worse("gap");
             else {
@@ -384,14 +370,12 @@ const make = Effect.gen(function* () {
           else if (read.cutTail) worse("gap");
           const through = read.capped || read.cutTail ? lastAt : s.span.to;
           const lost = (yield* store.all<{ key: string; incident: string }>("SELECT key, incident FROM occurrences WHERE stream = ? AND at_ms >= ? AND at_ms < ?", stream, s.span.from, through)).filter(
-            (r) => !seen.has(r.key),
-          );
+            (r) => !seen.has(r.key));
           if (lost.length) worse("gap");
           for (const r of lost) if (r.incident) s.uncertain.add(r.incident);
         }
         reads.push({ uid: pod.uid, container: container.name, identity: identity(container), lines });
-      }
-    }
+      }}
     const after = yield* pods(t, source);
     for (const r of reads) {
       const now = after.find((p) => p.uid === r.uid)?.containers.find((c) => c.name === r.container);
@@ -404,8 +388,7 @@ const make = Effect.gen(function* () {
     }
     if (s.capped && state.state === "ok") state = { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: at };
     s.readings.set("logs", state);
-    return after;
-  });
+    return after; });
 
   /**
    * What the cluster says now: warning events, the running revision and readiness, memory use against limits. The
@@ -422,8 +405,7 @@ const make = Effect.gen(function* () {
           s.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
         s.readings.set("events", observe(true, answered(now)));
-      }
-    }
+      }}
     if (source.readings.includes("workloads")) {
       const r = yield* kubectl(t, "get", ["deployments", "-l", source.selector!, "-o", "json"]);
       if (r.code !== 0) yield* refusedReading(s, "workloads", r.stderr);
@@ -435,8 +417,7 @@ const make = Effect.gen(function* () {
         if (s.revision && last && last.revision !== s.revision) {
           const rs = yield* kubectl(t, "get", ["replicasets", "-l", source.selector!, "-o", "json"]);
           if (rs.code === 0) s.rollout = parseRollout(rs.stdout, s.revision);
-        }
-      }
+        }}
       s.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(listed.filter((p) => !p.ready).length), at: answered(now) });
     }
     if (source.readings.includes("usage")) {
@@ -451,8 +432,7 @@ const make = Effect.gen(function* () {
         s.readings.set("usage", observe(worst !== null, answered(now)));
       }
       s.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: answered(now) });
-    }
-  });
+    }});
 
   const datadogSource = Effect.fnUntraced(function* (source: Source) {
     const w = yield* window(source, LIMITS.overlapMs.datadog);
@@ -468,8 +448,7 @@ const make = Effect.gen(function* () {
             if (log.at === null || log.id === null) return Effect.sync(() => void (unplaced = true)); // cannot be placed or counted once
             const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
-            return p ? s.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message) : Effect.void;
-          });
+            return p ? s.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message) : Effect.void; });
           s.readings.set("logs", s.capped ? { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
         }
         if (end === w.now && source.readings.includes("monitors")) {
@@ -499,8 +478,7 @@ const make = Effect.gen(function* () {
       yield* commit(s, gap, end, LIMITS.overlapMs.datadog, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = end;
-    } while (start < w.now);
-  });
+    } while (start < w.now); });
 
   /**
    * The slice, in one transaction (admitted by the store's guard). The last slice of a pass closes the pass's
@@ -509,16 +487,14 @@ const make = Effect.gen(function* () {
   const commit = Effect.fnUntraced(function* (s: Slice, gap: Span | null, checkpoint: number | null, overlap: number, last: { ordinary: boolean } | null) {
     const source = s.source;
     const now = clock.now();
-    yield* store.tx((w) =>
-      Effect.gen(function* () {
+    yield* store.tx((w) => Effect.gen(function* () {
         const seq = yield* w.event("slice", source.id as Clean, {
           from: s.span.from,
           to: s.span.to,
           fresh: s.fresh,
           admitted: s.admitted.length,
           readings: Object.fromEntries(s.readings),
-          ordinary: last?.ordinary ?? false,
-        });
+          ordinary: last?.ordinary ?? false,});
         if (gap) {
           yield* w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, 'all', ?, ?, 'gap', NULL)", seq, source.id as Clean, gap.from, gap.to);
           yield* w.event("coverage_gap", source.id as Clean, { from: gap.from, to: gap.to, reason: "older than the 14-day catch-up limit" });
@@ -547,8 +523,7 @@ const make = Effect.gen(function* () {
           }
           yield* w.run(
             "INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = max(count, excluded.count), seen_ms = excluded.seen_ms",
-            b.key as Clean, source.id as Clean, b.count, now,
-          );
+            b.key as Clean, source.id as Clean, b.count, now);
         }
         // The latest lines of each problem, for investigations: cleaned by the writer, at most linesPerProblem kept.
         for (const [bucket, records] of recent) {
@@ -588,8 +563,7 @@ const make = Effect.gen(function* () {
              ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
             // Both times are the provider's: when it observed (or, failed, when it last refused). Nothing records the
             // time Overwatch asked, so no consumer can take that for freshness.
-            source.id as Clean, reading as Clean, r.state as Clean, r.state === "failed" ? now : Math.min(now, r.observedMs), r.state === "failed" ? null : Math.min(now, r.observedMs),
-          );
+            source.id as Clean, reading as Clean, r.state as Clean, r.state === "failed" ? now : Math.min(now, r.observedMs), r.state === "failed" ? null : Math.min(now, r.observedMs));
           if (r.state !== "failed") okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - r.observedMs));
         }
         if (last) yield* interval(w, source, s.readings, s.metrics, touched, last.ordinary, seq, now);
@@ -606,21 +580,16 @@ const make = Effect.gen(function* () {
             `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, NULL, 0, ?, 0, NULL, ?, ?)
              ON CONFLICT (id) DO UPDATE SET checkpoint_ms = excluded.checkpoint_ms, failure = NULL, streak = 0, next_ms = excluded.next_ms, suspended = 0, fix = NULL,
                endpoint = excluded.endpoint, delay_ms = excluded.delay_ms`,
-            source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean, source.everyMs,
-          );
+            source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean, source.everyMs);
           if (before?.failure) yield* w.event("source_recovered", source.id as Clean, { was: before.failure });
           yield* w.run("DELETE FROM occurrences WHERE source = ? AND at_ms < ?", source.id as Clean, checkpoint - overlap);
           yield* w.run("DELETE FROM saturated WHERE source = ? AND to_ms <= ?", source.id as Clean, checkpoint - overlap);
           yield* w.run("DELETE FROM baselines WHERE source = ? AND seen_ms < ?", source.id as Clean, now - LIMITS.catchUpMs);
           yield* w.run(
             "DELETE FROM coverage WHERE source = ? AND state = 'ok' AND id NOT IN (SELECT id FROM coverage WHERE source = ? ORDER BY id DESC LIMIT 200)",
-            source.id as Clean, source.id as Clean,
-          );
-        }
-      }),
-    );
-    if (checkpoint !== null) nextMono.set(source.id, clock.mono() + source.everyMs);
-  });
+            source.id as Clean, source.id as Clean);
+        }}));
+    if (checkpoint !== null) nextMono.set(source.id, clock.mono() + source.everyMs); });
 
   /**
    * The one place a pass's interval is recorded, whether it was read or failed: every gauge gets a sample (a failure
@@ -638,8 +607,7 @@ const make = Effect.gen(function* () {
         yield* w.run("UPDATE incidents SET active = 0, streak = 0 WHERE id = ?", i.id as Clean);
         yield* w.event("quieted", i.id as Clean, { slice: seq });
       } else if (next.streak !== i.streak) yield* w.run("UPDATE incidents SET streak = ? WHERE id = ?", next.streak, i.id as Clean);
-    }
-  });
+    }});
 
   /** One gauge sample through its rule's hysteresis; the breach that opens is counted as one occurrence of its problem. */
   const metric = Effect.fnUntraced(function* (w: Writer, source: Source, m: Slice["metrics"][number], now: number, seq: number) {
@@ -662,9 +630,7 @@ const make = Effect.gen(function* () {
     }
     yield* w.run(
       "INSERT OR REPLACE INTO metrics (source, name, value, at_ms, over, under, breach) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      source.id as Clean, m.name as Clean, value ?? row!.value, value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0,
-    );
-  });
+      source.id as Clean, m.name as Clean, value ?? row!.value, value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0); });
 
   /**
    * A deploy is recorded with its seq when the running revision changes, with when it rolled out: the provider's time
@@ -677,8 +643,7 @@ const make = Effect.gen(function* () {
     const seq = yield* w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id, rolloutMs: rollout });
     yield* w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, ?, ?, ?, ?)", seq, source.app as Clean, source.environment as Clean, revision as Clean, (last?.revision ?? null) as Clean | null);
     if (last) yield* w.run("INSERT INTO rollouts (seq, after_ms, by_ms, exact) VALUES (?, ?, ?, ?)", seq, rollout ?? lastSeen, rollout ?? now, rollout === null ? 0 : 1);
-    yield* afterDeploy(w, source.app, source.environment, seq, revision);
-  });
+    yield* afterDeploy(w, source.app, source.environment, seq, revision); });
 
   /** A failure: the next attempt (and possibly suspension) in one transaction; the checkpoint stays. */
   const fail = Effect.fnUntraced(function* (source: Source, error: unknown) {
@@ -687,8 +652,7 @@ const make = Effect.gen(function* () {
     const row = yield* store.get<{ streak: number; failure: string | null }>("SELECT streak, failure FROM sources WHERE id = ?", source.id);
     const next = backoff(kind, row?.failure ? row.streak : 0, source.everyMs);
     const now = clock.now();
-    yield* store.tx((w) =>
-      Effect.gen(function* () {
+    yield* store.tx((w) => Effect.gen(function* () {
         const seq = yield* w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
         // A failed pass is still an interval: every reading failed, every gauge unmeasured.
         const failed = new Map(source.readings.map((r) => [r, { state: "failed" as const, missed: null }]));
@@ -698,12 +662,8 @@ const make = Effect.gen(function* () {
           `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
              delay_ms = excluded.delay_ms`,
-          source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean, next.delayMs,
-        );
-      }),
-    );
-    nextMono.set(source.id, clock.mono() + next.delayMs);
-  });
+          source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean, next.delayMs); }));
+    nextMono.set(source.id, clock.mono() + next.delayMs); });
 
   const readers: Readers<Effect.Services<ReturnType<typeof kubernetes>> | Effect.Services<ReturnType<typeof datadogSource>>> = { kubernetes, datadog: datadogSource };
   const reader = (source: Source) => {
@@ -727,9 +687,7 @@ const make = Effect.gen(function* () {
         const error: unknown = Option.isSome(found) ? found.value : Cause.squash(cause);
         if (Predicate.isTagged(error, "Full")) return Effect.fail(error as Full);
         if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) refused.set(endpoint(source), error);
-        return fail(source, error);
-      }),
-    );
+        return fail(source, error); }));
 
   const passOnce = Effect.gen(function* () {
     // Each source's next probe gets its live bound once, from the stored time and delay, counted from when this
@@ -755,31 +713,23 @@ const make = Effect.gen(function* () {
   const shape: CollectorShape = {
     // A pass runs in the collector's own scope, so a caller that stops waiting does not cut it short.
     pass: Effect.gen(function* () {
-      const current = yield* lock.withPermits(1)(
-        Effect.gen(function* () {
+      const current = yield* lock.withPermits(1)(Effect.gen(function* () {
           if (running) return running;
           const done = yield* Deferred.make<void>();
           running = done;
           yield* passOnce.pipe(
             Effect.onExit((exit) => Effect.andThen(Effect.sync(() => void (running = null)), Deferred.done(done, exit))),
-            Effect.forkIn(scope),
-          );
-          return done;
-        }),
-      );
-      return yield* Deferred.await(current);
-    }),
+            Effect.forkIn(scope));
+          return done; }));
+      return yield* Deferred.await(current); }),
     wake: Effect.sync(() => void (wakeAt = clock.mono() + LIMITS.wakeDelayMs)),
     setSpace: (next) => Effect.sync(() => void (override = next)),
     view: {
       get paused() {
         return paused;
       },
-      okAtMono: (source, reading) => okMono.get(`${source}|${reading}`),
-    },
-  };
-  return shape;
-});
+      okAtMono: (source, reading) => okMono.get(`${source}|${reading}`),},};
+  return shape; });
 
 /** The collector: reads every due source into slices and commits each. Datadog is reached through the fetch client. */
 export class Collector extends Context.Service<Collector, CollectorShape>()("overwatch/Collector") {
@@ -797,8 +747,7 @@ function incident(w: Writer, source: Source, bucket: string, title: string, seve
        severity = CASE WHEN ${current ? 1 : 0} = 1 OR excluded.severity = 'error' THEN excluded.severity ELSE severity END,
        active = max(active, excluded.active), streak = CASE WHEN excluded.active = 1 THEN 0 ELSE streak END`,
     incidentId(source, bucket) as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
-    reading as Clean, active ? 1 : 0, seq,
-  );
+    reading as Clean, active ? 1 : 0, seq);
 }
 
 /** What a refusal is shared by: a cluster context, or a Datadog site and key. */

@@ -111,11 +111,8 @@ export const Duration = Schema.String.pipe(
   Schema.decodeTo(Schema.Number, {
     decode: SchemaGetter.transform((text: string) => {
       const m = /^(\d+)(ms|s|m|h|d)$/.exec(text.trim())!;
-      return Number(m[1]) * UNITS[m[2] as keyof typeof UNITS];
-    }),
-    encode: SchemaGetter.transform((ms: number) => `${ms}ms`),
-  }),
-);
+      return Number(m[1]) * UNITS[m[2] as keyof typeof UNITS]; }),
+    encode: SchemaGetter.transform((ms: number) => `${ms}ms`),}));
 export function duration(text: unknown, where: string): number {
   const decoded = Schema.decodeUnknownOption(Duration)(text);
   if (decoded._tag === "None") throw new ConfigError({ message: `${where} must be a duration such as "90s", "2m" or "1h"` });
@@ -127,22 +124,15 @@ const Text = Schema.String.pipe(Schema.check(Schema.makeFilter((s: string) => s.
 const SecretRef = Text.pipe(Schema.check(Schema.isPattern(/^(env:[A-Za-z_][A-Za-z0-9_]*|keychain:[^/]+\/.+)$/, { message: 'must be "env:NAME" or "keychain:service/account"' })));
 const GitName = Text.pipe(Schema.check(Schema.makeFilter((t: string) => /^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$/.test(t) && !t.includes(".."), { message: "must be a Git name" })));
 const Word = Schema.String.pipe(Schema.check(Schema.isPattern(/^\S{1,100}$/)));
-const Words = Schema.Array(Word).pipe(
-  Schema.check(Schema.isMaxLength(50)),
-  Schema.annotate({ message: "must be a list of at most 50 nonempty words without spaces" }),
-);
+const Words = Schema.Array(Word).pipe(Schema.check(Schema.isMaxLength(50)), Schema.annotate({ message: "must be a list of at most 50 nonempty words without spaces" }));
 const FixPath = Schema.String.pipe(
   Schema.check(
     Schema.makeFilter(
       (p: string) => /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,200}$/.test(p) && !p.split("/").includes("..") && !p.endsWith("/") && !FORBIDDEN.test(p),
-      { message: "is not an exact repository-relative file a fix may change" },
-    ),
-  ),
-);
+      { message: "is not an exact repository-relative file a fix may change" })));
 const Argv = Schema.Array(Schema.String.pipe(Schema.check(Schema.isMinLength(1), Schema.isMaxLength(500)))).pipe(
   Schema.check(Schema.isMinLength(1)),
-  Schema.annotate({ message: "each command is a list of nonempty strings" }),
-);
+  Schema.annotate({ message: "each command is a list of nonempty strings" }));
 const FixesConfig = Schema.Struct({
   remote: GitName,
   base: GitName,
@@ -153,15 +143,13 @@ const FixesConfig = Schema.Struct({
 const Capacity = Schema.Struct({
   resource: Schema.Literals(["disk", "memory", "quota"]).annotate({ message: "is disk, memory or quota" }),
   unit: Schema.Literals(["bytes", "units"]).annotate({ message: "is bytes or units" }),
-  limit: Schema.Finite.pipe(Schema.check(Schema.isGreaterThan(0)), Schema.annotate({ message: "is a positive number" })),
-});
+  limit: Schema.Finite.pipe(Schema.check(Schema.isGreaterThan(0)), Schema.annotate({ message: "is a positive number" })),});
 const KubeSource = Schema.Struct({
   type: Schema.Literal("kubernetes"),
   context: Text,
   namespace: Text,
   selector: Text,
-  readings: Schema.optionalKey(Schema.Array(Schema.Literals(READINGS.kubernetes)).pipe(Schema.check(Schema.isUnique()), Schema.annotate({ message: `must list some of: ${READINGS.kubernetes.join(", ")}` }))),
-});
+  readings: Schema.optionalKey(Schema.Array(Schema.Literals(READINGS.kubernetes)).pipe(Schema.check(Schema.isUnique()), Schema.annotate({ message: `must list some of: ${READINGS.kubernetes.join(", ")}` }))),});
 const DatadogSource = Schema.Struct({
   type: Schema.Literal("datadog"),
   baseUrl: Schema.optionalKey(Text),
@@ -170,8 +158,7 @@ const DatadogSource = Schema.Struct({
   query: Text,
   metric: Schema.optionalKey(Text),
   capacity: Schema.optionalKey(Capacity),
-  readings: Schema.optionalKey(Schema.Array(Schema.Literals(READINGS.datadog)).pipe(Schema.check(Schema.isUnique()), Schema.annotate({ message: `must list some of: ${READINGS.datadog.join(", ")}` }))),
-});
+  readings: Schema.optionalKey(Schema.Array(Schema.Literals(READINGS.datadog)).pipe(Schema.check(Schema.isUnique()), Schema.annotate({ message: `must list some of: ${READINGS.datadog.join(", ")}` }))),});
 const SourceConfig = Schema.Union([KubeSource, DatadogSource]).annotate({ message: 'must be a Kubernetes source (type "kubernetes": context, namespace, selector) or a Datadog source (type "datadog": apiKey, appKey, query)' });
 const SourceName = Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/, { message: 'a source name is letters, digits, "-" and "_"' })));
 const AppConfigFile = Schema.Struct({
@@ -179,8 +166,7 @@ const AppConfigFile = Schema.Struct({
   environments: Schema.Record(Schema.String, Schema.Struct({ sources: Schema.Record(SourceName, SourceConfig) })),
   problemPatterns: Schema.optionalKey(Schema.Struct({ error: Schema.optionalKey(Words), warn: Schema.optionalKey(Words) })),
   fixes: Schema.optionalKey(FixesConfig),
-  promotion: Schema.optionalKey(Schema.Struct({ staging: Text, production: Text })),
-});
+  promotion: Schema.optionalKey(Schema.Struct({ staging: Text, production: Text })),});
 const WatcherConfig = Schema.Struct({ app: Text, environment: Text, every: Schema.optionalKey(Duration) });
 /** The configuration file as written, version 2. */
 export const ConfigFile = Schema.Struct({
@@ -192,13 +178,10 @@ export const ConfigFile = Schema.Struct({
     Schema.Struct({
       url: Schema.optionalKey(Schema.String.pipe(Schema.check(Schema.isPattern(/^https?:\/\//, { message: "must be an http(s) URL" })))),
       model: Schema.optionalKey(Text),
-      password: Schema.optionalKey(SecretRef),
-    }),
-  ),
+      password: Schema.optionalKey(SecretRef),})),
   readings: Schema.optionalKey(Schema.Literals([1, 2, 3]).annotate({ message: "must be 1, 2 or 3" })),
   apps: Schema.Record(Schema.String, AppConfigFile),
-  watchers: Schema.Array(WatcherConfig).annotate({ message: "must be a list" }),
-});
+  watchers: Schema.Array(WatcherConfig).annotate({ message: "must be a list" }),});
 export type ConfigFile = typeof ConfigFile.Type;
 
 const validate = Schema.toStandardSchemaV1(ConfigFile, { parseOptions: { onExcessProperty: "error", errors: "first" } });
@@ -248,11 +231,9 @@ export function parseConfig(raw: unknown, file: string): Config {
           if (chosen.includes("metrics") && s.metric === undefined) fail(`${where}.metric is required when metrics is read`);
           if (s.capacity && !chosen.includes("metrics")) fail(`${where}.capacity needs the metrics reading`);
           list.push({ ...common, baseUrl, apiKey: s.apiKey, appKey: s.appKey, query: s.query, ...(s.metric !== undefined ? { metric: s.metric } : {}), ...(s.capacity ? { capacity: s.capacity } : {}) });
-        }
-      }
+        }}
       envSources.set(`${app}/${environment}`, list);
-    }
-  }
+    }}
 
   if (root.watchers.length > LIMITS.watchers) fail(`config.watchers has ${root.watchers.length}; the limit is ${LIMITS.watchers}`);
   const watchers: Watcher[] = [];
@@ -266,8 +247,7 @@ export function parseConfig(raw: unknown, file: string): Config {
     if (list.length > LIMITS.sourcesPerWatcher) fail(`watchers[${i}]: ${key} has ${list.length} sources; the limit is ${LIMITS.sourcesPerWatcher}`);
     const everyMs = w.every ?? (/^(prod|production)$/.test(w.environment) ? 120_000 : 600_000);
     if (everyMs < LIMITS.minEveryMs) fail(`watchers[${i}].every is ${everyMs / 1000}s; the shortest polling interval is 60s`);
-    watchers.push({ app: w.app, environment: w.environment, everyMs, sources: list.map((s) => ({ ...s, everyMs })) });
-  });
+    watchers.push({ app: w.app, environment: w.environment, everyMs, sources: list.map((s) => ({ ...s, everyMs })) }); });
   for (const [app, a] of Object.entries(apps)) {
     if (!a.promotion) continue;
     const every = (env: string) => watchers.find((w) => w.app === app && w.environment === env)?.everyMs;
@@ -283,25 +263,20 @@ export function parseConfig(raw: unknown, file: string): Config {
     opencode: {
       url: root.opencode?.url !== undefined ? root.opencode.url.replace(/\/+$/, "") : null,
       model: root.opencode?.model ?? null,
-      password: root.opencode?.password ?? null,
-    },
+      password: root.opencode?.password ?? null,},
     readings: root.readings ?? 3,
     apps,
     watchers,
-    sources: watchers.flatMap((w) => w.sources),
-  };
+    sources: watchers.flatMap((w) => w.sources),};
 }
 
 /** Reads and validates the configuration file. */
-export const loadConfig = (file: string): Effect.Effect<Config, ConfigError, FileSystem.FileSystem> =>
-  Effect.gen(function* () {
+export const loadConfig = (file: string): Effect.Effect<Config, ConfigError, FileSystem.FileSystem> => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const raw = yield* fs.readFileString(file).pipe(
-      Effect.mapError((e) => new ConfigError({ message: `cannot read ${file}: ${e.reason._tag === "NotFound" ? "ENOENT" : e.reason._tag}` })),
-    );
+      Effect.mapError((e) => new ConfigError({ message: `cannot read ${file}: ${e.reason._tag === "NotFound" ? "ENOENT" : e.reason._tag}` })));
     const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(raw).pipe(Effect.mapError(() => new ConfigError({ message: `${file} is not valid JSON` })));
-    return yield* Effect.try({ try: () => parseConfig(value, file), catch: (e) => (e instanceof ConfigError ? e : new ConfigError({ message: String(e) })) });
-  });
+    return yield* Effect.try({ try: () => parseConfig(value, file), catch: (e) => (e instanceof ConfigError ? e : new ConfigError({ message: String(e) })) }); });
 
 /** The configuration this process runs with, as a service: read with `yield* AppConfig`. */
 export class AppConfig extends Context.Service<AppConfig, Config>()("overwatch/AppConfig") {
