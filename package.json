@@ -1,59 +1,25 @@
 {
   "name": "overwatch",
-  "version": "0.3.0",
-  "description": "Overwatch: a local service that watches your apps, keeps an event-sourced record of what it finds, and investigates with OpenCode 2 agents.",
+  "version": "2.0.0",
+  "description": "Overwatch: one local process that watches Kubernetes and Datadog, counts exactly inside declared limits, and investigates with OpenCode.",
   "type": "module",
-  "exports": {
-    ".": "./src/plugin/index.ts"
-  },
-  "files": [
-    "src",
-    "skills",
-    "web/dist",
-    "bin",
-    "docs",
-    "README.md",
-    "AGENTS.md"
-  ],
-  "keywords": [
-    "opencode",
-    "opencode-plugin",
-    "observability",
-    "kubernetes",
-    "incident",
-    "event-sourcing"
-  ],
+  "private": true,
   "engines": {
     "node": ">=22.13"
   },
-  "scripts": {
-    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
-    "check": "pnpm run typecheck && pnpm test",
-    "test:crash": "OVERWATCH_CRASH_SWEEP=full node --experimental-strip-types --no-warnings --test test/crash.test.ts",
-    "serve": "node --experimental-strip-types --no-warnings src/service/main.ts serve",
-    "overwatch": "node --experimental-strip-types --no-warnings src/service/main.ts",
-    "e2e": "node --experimental-strip-types --no-warnings scripts/e2e.ts",
-    "demo": "node --experimental-strip-types --no-warnings scripts/demo.ts",
-    "build:web": "node --experimental-strip-types --no-warnings scripts/build-web.ts",
-    "prepare": "node --experimental-strip-types --no-warnings scripts/build-web.ts --optional"
-  },
-  "devDependencies": {
-    "@opencode/plugin": "2.4.1",
-    "@types/node": "^22.10.0",
-    "fast-check": "^3.23.2",
-    "rolldown": "1.2.16",
-    "typescript": "^5.8.2"
-  },
-  "dependencies": {
-    "@alchemy.run/domain": "2.0.0-beta.87",
-    "@effect/platform-browser": "4.1.5",
-    "@opencode/client": "2.4.1",
-    "alchemy": "2.0.0-beta.87",
-    "effect": "4.1.5",
-    "foldkit": "0.170.0"
-  },
   "bin": {
     "overwatch": "./bin/overwatch"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "check": "pnpm run typecheck && pnpm test",
+    "accept": "node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "fast-check": "^3.23.2",
+    "typescript": "^5.8.2"
   }
 }
