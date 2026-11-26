@@ -78,7 +78,7 @@ export function command(key, { typing = false, overlay = false, shift = false, m
   if (overlay) return null;
   const map = {
     j: "next", ArrowDown: "next", k: "previous", ArrowUp: "previous", d: "done", l: "later", w: "worse", n: "never", u: "undo",
-    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct", f: "fix",
+    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct", f: "fix", P: "publish",
   };
   if (shift && key === "?") return "help";
   return map[key] ?? null;
@@ -218,12 +218,11 @@ export function timeLeft(f, nowMs) {
 
 /** A fix attempt's state in words: what it is, and the one rule or step that explains it. */
 export const FIX_LABEL = {
-  queued: "Checking eligibility", proposing: "A model is selecting a change", verifying: "Verifying in isolation", publishing: "Publishing a draft",
-  draft: "Draft pull request open", awaiting_deploy: "Merged, waiting for a release", released_quiet: "Released and quiet: ready to close",
-  closed_unmerged: "Closed without merging", blocked: "No proposal: blocked", ineligible: "No proposal: not eligible", refused: "No proposal: refused",
-  verify_failed: "Verify failed", stale: "Void: no longer current", declined: "Declined by you",
+  queued: "Checking eligibility", proposing: "A model is selecting a change", verifying: "Verifying in isolation",
+  verified: "Verified: ready for your review", published: "Draft pull request opened", blocked: "No proposal: blocked", ineligible: "No proposal: not eligible",
+  refused: "No proposal: refused", verify_failed: "Verify failed", stale: "Void: no longer current", unresolved: "The base could not be read",
 };
-export const fixTone = (state) => (["draft", "awaiting_deploy", "released_quiet"].includes(state) ? "live" : ["queued", "proposing", "verifying", "publishing"].includes(state) ? "working" : "stopped");
+export const fixTone = (state) => (["verified", "published"].includes(state) ? "live" : ["queued", "proposing", "verifying"].includes(state) ? "working" : "stopped");
 
 /** A staging comparison in words: regression, no signal, unknown (with the side and reason), or the same release. */
 export function comparisonText(c) {
@@ -246,11 +245,10 @@ export function bytes(v) {
 /** What each fix state waits for: the next observation that would change it. */
 export const FIX_NEXT = {
   queued: "Next: the rules are checked, then a model selects a change.", proposing: "Next: the fixer's selection.", verifying: "Next: the verify commands finish in isolation.",
-  publishing: "Next: the host answers, one step at a time.", draft: "Next: the draft is merged or closed (checked once a minute).",
-  awaiting_deploy: "Next: a deployment that contains the merge, then three quiet intervals.", released_quiet: "Next: close the item with Done; a release without the fix reopens the wait.",
-  closed_unmerged: "The problem stays open; a new investigation can lead to a new proposal.", blocked: "Next: pass overwatch trial --fixes, then press f.",
+  verified: "Nothing leaves this laptop until you press P.", published: "Overwatch is done with it. Whether the fix worked shows on the problem itself; close it with Done.",
+  blocked: "Next: pass overwatch trial --fixes, then press f.",
   ineligible: "Next: a new investigation or deployment; f checks again.", refused: "Nothing further for this finding.", verify_failed: "Next: make the verify command pass from tracked files (docs/setup.md), pass overwatch trial --fixes, then press f for a new attempt.",
-  stale: "Next: press f to try again on the current base.", declined: "Nothing further.", unresolved: "Next: press f once the host answers.",
+  stale: "Next: press f to derive again on the current base.", unresolved: "Next: press f once the remote answers.",
 };
 /** A forecast or comparison without an answer, and what would give one. */
 export function outlookNext(x) {

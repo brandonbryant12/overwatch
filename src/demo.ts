@@ -114,13 +114,13 @@ export function seedDemo(store: Store, config: Config) {
   keyed(store, "rk_d0c1ed9e0000000000000001", ask(store, config, { subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }));
   investigated(store, TIMEOUT);
   investigated(store, POOL);
-  // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, open as a draft.
+  // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, waiting for the owner's P.
   store.tx((w) => {
-    const job = "job_d0c0db050000000000000001", seq = w.event("fix", "inc_d0c0db05" as Clean, { id: "fx_d0c0db05", state: "draft", demo: true });
+    const job = "job_d0c0db050000000000000001", seq = w.event("fix", "inc_d0c0db05" as Clean, { id: "fx_d0c0db05", state: "verified", demo: true });
     const diff = 'diff --git a/config/database.json b/config/database.json\n--- a/config/database.json\n+++ b/config/database.json\n@@ -1,5 +1,5 @@\n {\n   "host": "orders-db",\n-  "pool_size": 5,\n+  "pool_size": 20,\n   "timeout_ms": 2000\n }\n';
     const data = { title: POOL.title, summary: "Restore pool_size in config/database.json to 20, its value at 9f8e7d6c5b4a", paths: ["config/database.json"], proposal: { kind: "setting", path: "config/database.json", key: "pool_size" },
-      verification: [{ argv: ["npm", "test", "--", "config"], exitCode: 0, elapsedMs: 8412, summary: "12 passing" }], pr: { number: 412, url: "https://git.example/shop/pull/412", draft: true, state: "OPEN" } };
-    w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'draft', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq);
+      verification: [{ argv: ["npm", "test", "--", "config"], exitCode: 0, elapsedMs: 8412, summary: "12 passing" }], repo: "git.example/acme/shop" };
+    w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'verified', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq);
   });
   // An answered question on the staging warning, as an agent would have answered it.
   keyed(store, "rk_d0c3f00d0000000000000002", ask(store, config, { subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }));

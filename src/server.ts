@@ -145,7 +145,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
         [/^\/v2\/items\/([^/]+)\/investigate$/, { keyed: ([id]) => agents.investigate(id!), code: 202 }],
         [/^\/v2\/items\/([^/]+)\/corrections$/, { keyed: ([id]) => agents.correct(id!, body) }],
         [/^\/v2\/items\/([^/]+)\/fix$/, { keyed: ([id]) => fixes.request(id!, body), code: 202 }],
-        [/^\/v2\/fixes\/([^/]+)\/decline$/, { keyed: ([id]) => fixes.decline(id!) }],
+        [/^\/v2\/fixes\/([^/]+)\/publish$/, { keyed: ([id]) => fixes.publication(id!, basisOf(body)) }],
         [/^\/v2\/notifications\/([^/]+)\/retry$/, { keyed: ([id]) => agents.retry(id!) }],
         [/^\/v2\/items\/([^/]+)\/action$/, { fenced: ([id], basis) => decided(act(store, config, id!, body, basis)) }],
         [/^\/v2\/backup$/, { command: () => backup(store, body) }],

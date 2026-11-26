@@ -206,14 +206,13 @@ function fixPanel(i, d) {
   if (!list.length) return d?.fixable && (d?.investigations ?? []).some((x) => x.result?.verdict === "real") ? `<section class="panel fixes"><h3>Fix</h3><p class="note">No proposal yet. <kbd>f</kbd> asks for one: it is made only when every rule holds.</p></section>` : "";
   const diff = (text) => text.split("\n").slice(0, 60).map((l) => (l.startsWith("+") && !l.startsWith("+++") ? `<ins>${esc(l)}</ins>` : l.startsWith("-") && !l.startsWith("---") ? `<del>${esc(l)}</del>` : esc(l))).join("\n");
   return `<section class="panel fixes"><h3>Fix proposal</h3>${list.map((f, n) => `<article class="fix ${m.fixTone(f.state)}" data-fix="${esc(f.id)}">
-    <header><b>${esc(m.FIX_LABEL[f.state] ?? f.state)}</b>${f.pr ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener">#${f.pr.number}${f.pr.draft ? " · draft" : ""} · ${esc(String(f.pr.state).toLowerCase())}</a>` : ""}${m.fixTone(f.state) === "working" ? `<button type="button" data-decline="${esc(f.id)}">Decline</button>` : ""}</header>
-    ${f.reason ? `<p class="note">${esc(f.reason)}</p>` : ""}
-    <p class="note next">${esc(f.next ?? m.FIX_NEXT[f.state] ?? "")}</p>
-    ${f.host && !["draft"].includes(f.state) ? `<p class="note warn">On the host: ${esc(f.host)}</p>` : ""}
+    <header><b>${esc(m.FIX_LABEL[f.state] ?? f.state)}</b>${f.pr ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener">Draft #${f.pr.number}</a>${f.publishedMs ? `<span>opened ${esc(m.ago(f.publishedMs, Date.now()))}</span>` : ""}` : ""}</header>
+    ${f.reason ? `<p class="note${f.state === "verified" ? " warn" : ""}">${esc(f.reason)}</p>` : ""}
+    ${f.action ? `<div class="publish"><button type="button" data-publish="${esc(f.id)}">${esc(f.action.label)} <kbd>⇧P</kbd></button><p class="note">Pressing it ${esc(f.action.effect)}. Never merged, never forced.</p></div>` : `<p class="note next">${esc(m.FIX_NEXT[f.state] ?? "")}</p>`}
+    ${f.host && f.state !== "published" ? `<p class="note warn">On the host: ${esc(f.host)}</p>` : ""}
     ${n === 0 && f.diff ? `<p class="eligible">Eligible: three of three readings said real, the challenger upheld it, it was observed in telemetry, and it began strictly after the rollout of <code>${esc(String(f.deployed).slice(0, 12))}</code> (previously <code>${esc(String(f.previous).slice(0, 12))}</code>). A model selected this change; Overwatch derived it from Git and checked it.</p>
       <pre class="diff">${diff(f.diff)}</pre>` : ""}
     ${f.verification.length ? `<ul class="verification">${f.verification.map((v) => `<li class="${v.exitCode === 0 ? "ok" : "failed"}"><code>${esc(v.argv.join(" "))}</code><span>${v.exitCode === null ? "did not finish" : `exit ${v.exitCode}`} · ${v.elapsedMs} ms</span></li>`).join("")}</ul>` : ""}
-    ${f.state === "draft" ? `<p class="note">To withdraw it, close the pull request on the host; the problem stays open and this finding is not proposed again.</p>` : ""}
   </article>`).join("")}</section>`;
 }
 
@@ -395,7 +394,7 @@ function incidentView(i, d) {
       <button type="button" data-action="investigate"${off}>Investigate <kbd>i</kbd></button>
       <button type="button" data-action="open"${off}>Open in OpenCode <kbd>o</kbd></button>
       ${done ? `<button type="button" data-action="correct"${off}>Was this right? <kbd>y</kbd></button>` : ""}
-      ${done && d?.fixable && !(d.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "publishing", "draft", "awaiting_deploy", "released_quiet"].includes(f.state)) ? `<button type="button" data-action="fix"${off}>Propose fix <kbd>f</kbd></button>` : ""}
+      ${done && d?.fixable && !(d.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "verified", "published"].includes(f.state)) ? `<button type="button" data-action="fix"${off}>Propose fix <kbd>f</kbd></button>` : ""}
     </div>
     ${d?.comparison ? `<section class="panel"><h3>Staging against production</h3><p class="note warn">${esc(m.comparisonText(d.comparison))}</p></section>` : ""}
     ${verdictPanel(d)}
@@ -432,7 +431,7 @@ function eventText(e) {
     case "corrected": return `Corrected: “${d.text}”`;
     case "opened": return "Opened in OpenCode";
     case "incident": return d.metric ? `Gauge ${d.state}` : "First counted";
-    case "fix": return d.declined ? "Fix declined" : `Fix: ${m.FIX_LABEL[d.state] ?? d.state}${d.reason ? ` — ${d.reason}` : ""}`;
+    case "fix": return `Fix: ${m.FIX_LABEL[d.state] ?? d.state}${d.reason ? ` — ${d.reason}` : ""}`;
     case "comparison": return d.regression ? `Staging regression: ${d.regression}` : `Staging comparison: ${d.state}`;
     default: return e.kind;
   }
@@ -632,14 +631,18 @@ async function proposeFix() {
     toast(e.message, "error");
   }
 }
-async function declineFix(fixId) {
+/** Shift-P: open the verified candidate's draft pull request, bound to what the owner is looking at (basisSeq). */
+async function publishFix(fixId = (state.detail?.fixes ?? []).find((f) => f.action)?.id) {
+  const id = state.focus;
+  if (!fixId || !isIncident(id) || down()) return;
+  toast("Opening the draft: protection, push, then the pull request, each read back…", "ok");
   try {
-    await call(`fixes/${encodeURIComponent(fixId)}/decline`, {}, { "Idempotency-Key": await requestKey(state.focus) });
-    toast("Declined. The problem stays open; this finding is not proposed again.", "ok");
-    loadDetail(state.focus);
+    const r = await call(`fixes/${encodeURIComponent(fixId)}/publish`, { basisSeq: incident(id)?.decidedSeq }, { "Idempotency-Key": await requestKey(id) });
+    toast(r.fix?.pr ? `Draft #${r.fix.pr.number} opened.` : `Stopped: ${r.fix?.reason ?? "see the item"}`, r.fix?.pr ? "ok" : "error");
   } catch (e) {
     toast(e.message, "error");
   }
+  loadDetail(id);
 }
 
 /** B: a brief to copy. The owner edits it and sends it himself; nothing is sent from here. */
@@ -833,7 +836,7 @@ function help() {
     ["j / ↓", "Next row"], ["k / ↑", "Previous row"], ["d", "Done: back if it happens again"], ["l", "Later: until something changes, a time, or worse"],
     ["w", "Later, until it gets worse"], ["n", "Never: back only if much worse or more severe"], ["u", "Undo the last way out"], ["r", "Show what waits behind “N new”"],
     ["p / Enter", "Ask about what is in focus"], ["i", "Investigate: independent readings and a challenger"], ["o", "Open in OpenCode, with this in focus"],
-    ["y", "Was this right? A line for the app's playbook"], ["b", "Brief: what changed, to edit and copy"], ["Shift+Enter", "Ask in a new request"], ["/ or ⌘K", "Find anything, even put away"], ["t", "Light or dark"], ["Esc", "Close, or leave the bar"],
+    ["f", "Fix: ask for a verified candidate"], ["Shift+P", "Open the verified candidate's draft pull request"], ["y", "Was this right? A line for the app's playbook"], ["b", "Brief: what changed, to edit and copy"], ["Shift+Enter", "Ask in a new request"], ["/ or ⌘K", "Find anything, even put away"], ["t", "Light or dark"], ["Esc", "Close, or leave the bar"],
   ];
   $("[data-overlay]").innerHTML = `<div class="backdrop" data-close></div><div class="sheet keys-sheet" role="dialog" aria-modal="true" aria-label="Keyboard"><h2>Keyboard</h2><dl>${keys.map(([k, v]) => `<div><dt>${k.split(" / ").map((x) => `<kbd>${esc(x)}</kbd>`).join(" ")}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl></div>`;
 }
@@ -917,6 +920,7 @@ document.addEventListener("keydown", (e) => {
     case "investigate": return investigate();
     case "correct": return correctSheet();
     case "fix": return proposeFix();
+    case "publish": return publishFix();
   }
 });
 
@@ -964,8 +968,8 @@ document.addEventListener("click", (e) => {
     return a === "done" ? wayOut({ action: "done" }) : a === "worse" ? wayOut({ action: "later", when: "worse" }) : a === "undo" ? undo()
       : a === "open" ? openInOpenCode() : a === "investigate" ? investigate() : a === "correct" ? correctSheet() : a === "fix" ? proposeFix() : sheet(a);
   }
-  const decline = t.closest("[data-decline]");
-  if (decline) return declineFix(decline.dataset.decline);
+  const publish = t.closest("[data-publish]");
+  if (publish && !publish.disabled) return publishFix(publish.dataset.publish);
 });
 
 document.addEventListener("submit", (e) => {

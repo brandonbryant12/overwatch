@@ -28,18 +28,18 @@ import { Crew, type Options, type Proposal } from "./tools.ts";
 import { converse, withSlot } from "./agents.ts";
 import { approvalKey, fixGateKey } from "./trial.ts";
 
-const LIMIT = { files: 3, lines: 80, bytes: 16_384, commands: 4, commandMs: 60_000, totalMs: 180_000, output: 65_536, followMs: 60_000, retries: 5 };
-const ACTIVE = ["queued", "proposing", "verifying", "publishing"];
+const LIMIT = { files: 3, lines: 80, bytes: 16_384, commands: 4, commandMs: 60_000, totalMs: 180_000, output: 65_536 };
+const ACTIVE = ["queued", "proposing", "verifying"];
 
 interface Row {
   id: string; incident: string; job_id: string; app: string; environment: string; origin: string; state: string; reason: string | null; version: number;
   previous: string | null; deployed: string | null; base: string | null; candidate: string | null; head: string | null; diff: string | null; data: string; seq: number;
 }
 interface Data {
-  proposal?: Proposal; options?: Options; verification?: Verification[]; pr?: { number: number; url: string; draft: boolean; state: string }; merge?: string;
-  releaseSeq?: number | null; checked?: string; contains?: boolean; checkedMs?: number; title?: string; paths?: string[]; summary?: string; retries?: number; retryAt?: number;
-  /** What exists on the host because of this attempt, whatever its state: said to the owner after a stop. */
-  host?: string; next?: string;
+  proposal?: Proposal; options?: Options; verification?: Verification[]; pr?: { number: number; url: string; draft: boolean; state: string }; publishedMs?: number;
+  title?: string; paths?: string[]; summary?: string; repo?: string;
+  /** What exists on the host because of this attempt, and the host step last begun: said to the owner after a stop. */
+  host?: string; step?: string;
 }
 interface Verification { argv: string[]; exitCode: number | null; elapsedMs: number; summary: string }
 
@@ -114,13 +114,14 @@ class Stop extends Error {
     this.state = state;
   }
 }
-/** The host's answer was missing or not the exact object: tried again a bounded number of times, never assumed. */
+/** A host step that did not happen or could not be confirmed: said as it is, never assumed. */
 class Unresolved extends Error {}
 
 export class Fixes extends Crew {
   private busy = false;
   private again = false;
-  private readonly followed = new Set<string>();
+  /** Attempts being published by this process: one keypress at a time per attempt. */
+  private readonly publishing = new Set<string>();
 
   /** POST /v2/items/:id/fix: one attempt per (problem, investigation, deployment, policy); a durable decision either way. */
   request(incident: string, body: Record<string, unknown>): Plan<{ attemptId: string }> {
@@ -136,7 +137,7 @@ export class Fixes extends Crew {
     for (let n = 1; origin === "manual" && this.store.get<Row>("SELECT state FROM fixes WHERE id = ?", id)?.state === "verify_failed"; n++) id = attemptId(incident, jobId, a.deployed, a.policy, n);
     const prior = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", id);
     // Automatic and owner requests coalesce. An owner may ask again after a decision that did not reach a model's
-    // proposal (blocked, ineligible), after a void candidate (stale) or an unresolved host step; nothing else revives.
+    // proposal (blocked, ineligible), after a void candidate (stale) or a base that could not be read; nothing else revives.
     if (prior && !(["blocked", "ineligible"].includes(prior.state) || (["stale", "unresolved"].includes(prior.state) && origin === "manual"))) return id;
     const seq = w.event("fix", incident as Clean, { id, state: a.state, reason: a.reason, origin });
     w.run(`INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, reason, previous, deployed, seq, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -146,27 +147,17 @@ export class Fixes extends Crew {
     return id;
   }
 
-  /** POST /v2/fixes/:id/decline: the owner's stop. It wins over any worker, and says what already exists on the host. */
-  decline(id: string): Plan<{ id: string; state: string }> {
-    this.row(id);
-    return { op: "decline", subject: id, body: {}, change: (w) => {
-      const row = this.row(id), d = JSON.parse(row.data) as Data;
-      if (!["closed_unmerged", "declined"].includes(row.state))
-        this.set(w, row, "declined", `declined by you; nothing more is published or followed.${d.host ? ` On the host: ${d.host}` : ""}`);
-      return { id, state: this.row(id).state };
-    } };
-  }
-
   private row(id: string): Row {
     const row = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", id);
     if (!row) throw new HttpError(404, `no fix ${id}`);
     return row;
   }
 
-  /** GET /v2/fixes/:id, and each attempt on an item. Side-effect free. */
+  /** GET /v2/fixes/:id, and each attempt on an item. Side-effect free. A verified candidate carries its one action. */
   view(id: string) {
-    const r = this.row(id), d = JSON.parse(r.data) as Data;
-    return { id: r.id, state: r.state, reason: r.reason, next: d.next ?? null, host: d.host ?? null, subject: r.incident, jobId: r.job_id, origin: r.origin, previous: r.previous, deployed: r.deployed, base: r.base, head: r.head, proposal: d.proposal ?? null, diff: r.diff, paths: d.paths ?? [], verification: d.verification ?? [], pr: d.pr ?? null, merge: d.merge ?? null, seq: r.seq };
+    const r = this.row(id), d = JSON.parse(r.data) as Data, base = this.config.apps[r.app]?.fixes?.base ?? "main";
+    const action = r.state === "verified" ? { key: "P", label: "Open draft pull request", effect: `pushes branch ow/fix/${r.id} and opens a draft pull request against ${base} in ${d.repo ?? "the configured repository"}` } : null;
+    return { id: r.id, state: r.state, reason: r.reason, host: d.host ?? null, step: d.step ?? null, action, subject: r.incident, jobId: r.job_id, origin: r.origin, previous: r.previous, deployed: r.deployed, base: r.base, head: r.head, proposal: d.proposal ?? null, diff: r.diff, paths: d.paths ?? [], verification: d.verification ?? [], pr: d.pr ?? null, publishedMs: d.publishedMs ?? null, repository: d.repo ?? null, seq: r.seq };
   }
   forItem(incident: string) {
     return this.store.all<{ id: string }>("SELECT id FROM fixes WHERE incident = ? ORDER BY seq", incident).map((r) => this.view(r.id));
@@ -174,8 +165,7 @@ export class Fixes extends Crew {
 
   /** The one way an attempt changes: compare-and-set on the version the caller read; a newer decision wins. */
   private set(w: Writer, row: Row, state: string, reason: string | null, change: Partial<Row> = {}, data: Data = {}) {
-    // A retry's own "next" lasts only while it is the reason; the page says what each state waits for otherwise.
-    const merged = { ...(JSON.parse(this.store.get<{ data: string }>("SELECT data FROM fixes WHERE id = ?", row.id)!.data) as Data), next: undefined, ...data, ...(state !== row.state ? { retries: 0, retryAt: 0 } : {}) };
+    const merged = { ...(JSON.parse(this.store.get<{ data: string }>("SELECT data FROM fixes WHERE id = ?", row.id)!.data) as Data), ...data };
     const cols = Object.keys(change);
     const changed = w.run(`UPDATE fixes SET state = ?, reason = ?, data = ?, version = version + 1${cols.map((c) => `, ${c} = ?`).join("")} WHERE id = ? AND version = ?`,
       state as Clean, reason as Clean | null, json(merged), ...cols.map((c) => (change as Record<string, Clean>)[c]!), row.id as Clean, row.version).changes;
@@ -191,32 +181,7 @@ export class Fixes extends Crew {
     this.store.tx((w) => w.run("UPDATE fixes SET data = json_set(data, '$.host', ?) WHERE id = ?", outbound(text) as Clean, row.id as Clean));
   }
 
-  /**
-   * The permit for one external effect, in the transaction that records its intent, granted only if right now the
-   * attempt is at the version the worker read, the owner has not stopped or decided, both trial gates stand, the
-   * deployment is still the one this fix answers, the base tip (when given) is the one the candidate was derived on,
-   * and, for a push, protection is positively known to allow it.
-   */
-  private gate(row: Row, kind: "host" | "push", step: string, bind: string[], tip?: string | null, allowed?: boolean): Permit {
-    return this.store.tx((w) => {
-      const now = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", row.id)!;
-      if (now.version !== row.version) throw new Superseded();
-      const inc = this.store.get<{ way: string | null; decided_seq: number }>("SELECT way, decided_seq FROM incidents WHERE id = ?", row.incident);
-      if (!inc || inc.way || inc.decided_seq > row.seq) throw new Stop("declined", "you decided the problem since this attempt began; nothing more is published");
-      const gates = gatesStand(this.store, this.config, row.app);
-      if (gates) throw new Stop("blocked", gates);
-      const latest = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", row.app, row.environment);
-      if (latest?.revision !== row.deployed) throw new Stop("stale", `a newer deployment (${latest?.revision.slice(0, 12)}) replaced the one this fix answers`);
-      if (tip !== undefined && tip !== row.base) throw new Stop("stale", `the base branch moved before publication; the candidate is void.${(JSON.parse(now.data) as Data).host ? ` On the host: ${(JSON.parse(now.data) as Data).host}` : ""}`);
-      if (kind === "push" && !allowed) throw new Unresolved("branch protection is not known to allow the push");
-      return w.permit(kind, row.id, { step, version: row.version }, bind);
-    });
-  }
-
-  /**
-   * Each pass: admit automatically (once per investigation, only when eligible), drive one attempt at a time, and
-   * follow published drafts. Runs in the background; passes never overlap it.
-   */
+  /** Each pass: admit automatically (once per investigation, only when eligible) and carry one attempt to a verified candidate. */
   tick() {
     if (this.busy) return void (this.again = true); // a pass that arrives mid-work runs once it ends, never dropped
     this.busy = true;
@@ -231,10 +196,8 @@ export class Fixes extends Crew {
       "SELECT j.id, j.subject FROM jobs j JOIN incidents i ON i.id = j.subject WHERE j.kind = 'investigation' AND j.state = 'completed' AND NOT EXISTS (SELECT 1 FROM fixes f WHERE f.job_id = j.id) ORDER BY j.created_seq DESC LIMIT 20")) {
       if (admission(this.store, this.config, j.subject, j.id).state === "queued") this.store.tx((w) => this.admit(w, j.subject, j.id, "automatic"));
     }
-    const next = this.store.all<Row>(`SELECT * FROM fixes WHERE state IN (${ACTIVE.map((s) => `'${s}'`).join(",")}) ORDER BY seq`)
-      .find((r) => ((JSON.parse(r.data) as Data).retryAt ?? 0) <= clock.now());
+    const next = this.store.get<Row>(`SELECT * FROM fixes WHERE state IN (${ACTIVE.map((s) => `'${s}'`).join(",")}) ORDER BY seq LIMIT 1`);
     if (next) await this.drive(next);
-    for (const row of this.store.all<Row>("SELECT * FROM fixes WHERE state IN ('draft', 'awaiting_deploy', 'released_quiet')")) await this.follow(row).catch((e) => this.log(`fix follow: ${errorText(e)}`));
   }
 
   // ---- Git, in a private bare mirror of the remote: the owner's checkout is never written.
@@ -277,6 +240,7 @@ export class Fixes extends Crew {
     return { commits: log.split("\n").filter(Boolean).map((l) => ({ sha: l.slice(0, 40), subject: clean(l.slice(41), 200) })), keys };
   }
 
+  /** Eligibility, the fixer's selection, derivation, the whole-tree check and the isolated verify: a verified candidate, or the rule that stopped it. */
   private async drive(row: Row) {
     const policy = this.config.apps[row.app]?.fixes;
     try {
@@ -304,22 +268,14 @@ export class Fixes extends Crew {
             w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'off')", fixGateKey(this.config, row.app) as Clean);
           });
         }
-        // Intent: the exact head, before anything is asked of the host.
-        row = this.update(row, "publishing", null, { head: row.candidate }, { verification: results });
+        this.update(row, "verified", null, { head: row.candidate }, { verification: results, repo: (await this.repository(row.app)).name });
       }
-      if (row.state === "publishing") await this.publish(row, policy);
     } catch (e) {
-      if (e instanceof Superseded) return; // the owner or another decision came first; nothing is written
+      if (e instanceof Superseded) return; // another decision came first; nothing is written
       if (e instanceof Unavailable) return this.store.tx((w) => w.run("UPDATE fixes SET reason = ? WHERE id = ?", `waiting for OpenCode: ${errorText(e, 200)}` as Clean, row.id as Clean));
       const now = this.row(row.id);
       if (now.version !== row.version) return;
-      if (e instanceof Unresolved) {
-        const n = ((JSON.parse(now.data) as Data).retries ?? 0) + 1, last = n >= LIMIT.retries;
-        return this.store.tx((w) => this.set(w, now, last ? "unresolved" : now.state, `${e.message}${last ? "" : ` (try ${n} of ${LIMIT.retries})`}`, {}, {
-          retries: n, retryAt: clock.now() + (n < 3 ? 0 : 60_000),
-          next: last ? "Overwatch stopped trying. Press f to try again once the host answers." : `Overwatch tries again ${n < 3 ? "on the next pass" : "in a minute"}; f tries now.`,
-        }));
-      }
+      if (e instanceof Unresolved) return void this.update(now, "unresolved", `${e.message}; press f to try again`);
       if (!(e instanceof Stop)) throw e;
       this.update(now, e.state, e.message);
     }
@@ -346,23 +302,59 @@ export class Fixes extends Crew {
       .flatMap((f) => [String((JSON.parse(f.body) as { cause?: string }).cause ?? ""), ...(JSON.parse(f.claims) as Array<{ statement: string }>).map((c) => c.statement)]).filter(Boolean).slice(0, 12);
   }
 
-  /** A `gh` call as a gated effect; a timeout or a refusal is an unresolved host step, never "nothing there". */
-  /** A `gh` call against the one resolved repository, bound to exactly these arguments. */
-  private async host(row: Row, step: string, args: string[], tip?: string | null) {
+  /** Why a verified candidate cannot be published right now, or null: the problem, both gates, and the deployment. */
+  private unready(row: Row): string | null {
+    const inc = this.store.get<{ way: string | null }>("SELECT way FROM incidents WHERE id = ?", row.incident);
+    if (!inc || inc.way) return "the problem has been put away; nothing is published";
+    const gates = gatesStand(this.store, this.config, row.app);
+    if (gates) return gates;
+    const latest = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", row.app, row.environment);
+    if (latest?.revision !== row.deployed) return `a newer deployment (${latest?.revision.slice(0, 12)}) replaced the one this fix answers; press f to derive again`;
+    return ["verified", "published"].includes(row.state) ? null : `only a verified candidate can be published; this attempt is ${row.state}`;
+  }
+
+  /**
+   * POST /v2/fixes/:id/publish, keyed and fenced: the owner's keypress. Its transaction checks that the item is the one
+   * the owner was shown (basisSeq), the problem is not put away, both gates stand and the deployment is still the
+   * finding's; then the host steps run while the owner waits (publish()). A repeat reconciles and continues.
+   */
+  publication(id: string, basis: number | null): Plan<{ attemptId: string; fix?: ReturnType<Fixes["view"]> }> {
+    this.row(id);
+    return { op: "publish", subject: id, body: {}, change: (w) => {
+      const row = this.row(id), decided = this.store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = ?", row.incident)?.decided_seq;
+      if (basis === null) throw new HttpError(400, "basisSeq (the item's decidedSeq you were shown) is required to publish");
+      if (basis !== decided) throw new HttpError(409, "this item was decided again since you looked; look again");
+      const why = this.unready(row);
+      if (why) throw new HttpError(409, why);
+      w.event("publish", row.incident as Clean, { id });
+      return { attemptId: id };
+    }, after: async () => ({ attemptId: id, fix: await this.publish(id) }) };
+  }
+
+  /** The intent for one host step, recorded before it runs, with a permit bound to exactly its arguments. */
+  private intent(row: Row, step: string, kind: "host" | "push", bind: string[]): Permit {
+    return this.store.tx((w) => {
+      w.run("UPDATE fixes SET data = json_set(data, '$.step', ?) WHERE id = ?", step as Clean, row.id as Clean);
+      w.event("fix_step", row.incident as Clean, { id: row.id, step });
+      return w.permit(kind, row.id, { step }, bind);
+    });
+  }
+
+  /** A `gh` call against the one resolved repository, bound to exactly these arguments; a timeout is unresolved. */
+  private async host(row: Row, step: string, args: string[]) {
     const repo = await this.repository(row.app), call = [...args, ...(args[0] === "api" ? (repo.host ? ["--hostname", repo.host] : []) : ["--repo", repo.name])];
-    const r = await effect(this.gate(row, "host", step, call, tip), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
+    const r = await effect(this.intent(row, step, "host", call), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
     if (r.timedOut) throw new Unresolved(`the host did not answer the ${step} within 30 s`);
     return r;
   }
 
-  /** The draft for this attempt on the host, confirmed exactly (head branch, base, marker, draft, open), or null. */
+  /** The draft for this attempt on the host, confirmed exactly (repository, head branch and commit, base, marker, draft, open), or null. */
   private async find(row: Row, branch: string, policy: Policy, head: string | null) {
     const r = await this.host(row, "draft lookup", ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,headRepository,body"]);
     if (r.code !== 0) throw new Unresolved(`the host could not list drafts for ${branch}: ${clean(r.stderr.trim(), 200) || `exit ${r.code}`}`);
     const rows = parseJson(r.stdout || "[]") as Array<{ number: number; url: string; state: string; isDraft: boolean; baseRefName: string; headRefName: string; headRefOid?: string; headRepository?: { name?: string }; body?: string }> | undefined;
     if (!Array.isArray(rows)) throw new Unresolved("the host's draft list could not be read");
-    // The draft is this attempt's only if all agree: head branch and commit (the host's own, or else the branch head read
-    // back from the remote in this step), head repository, base, marker, draft and open.
+    // The host's own head commit and repository when it reports them; otherwise the branch head read back from the remote.
     const name = (await this.repository(row.app)).name.split("/").at(-1);
     const exact = rows.find((p) => p.headRefName === branch && (p.headRefOid ?? head) === row.head && (!p.headRepository?.name || p.headRepository.name === name) && p.baseRefName === policy.base && p.isDraft && p.state === "OPEN" && (p.body ?? "").includes(`overwatch-attempt: ${row.id}`));
     if (!exact && rows.length) throw new Unresolved(`a pull request for ${branch} exists (#${rows[0]!.number}) that is not this attempt's draft (head, base, marker or draft state differ); Overwatch does not adopt it`);
@@ -370,50 +362,74 @@ export class Fixes extends Crew {
   }
 
   /**
-   * Publication of exactly the verified commit, as a draft on its own branch: protection, push, then draft, each a
-   * gated effect, each read back. Idempotent by branch and marker after a restart.
+   * The host steps of one keypress, in order, each with its intent recorded first, reconciling from the host before
+   * acting: the base tip is still the candidate's; the branch holds nothing or exactly the verified commit; protection
+   * is read positively before a push, which is never forced; the draft is looked up before it is created and read back
+   * after. Anything that fails or cannot be confirmed stops there and says what exists on the host.
    */
-  private async publish(row: Row, policy: Policy) {
-    const url = await this.remote(row.app), branch = `ow/fix/${row.id}`;
-    const ref = async (name: string) => {
-      const r = await this.git(row.app).run(["ls-remote", url, `refs/heads/${name}`]);
-      if (r.code !== 0) throw new Unresolved(`the remote could not be read: ${clean(r.stderr.trim(), 200)}`);
-      return r.stdout.split(/\s/)[0] || null;
-    };
-    const there = await ref(branch);
-    if (there && there !== row.head) throw new Stop("refused", `the branch ${branch} already holds another commit on the host`);
-    if (!there) {
-      // Protection is read positively, now, before every push: rules for this branch name, never a past verdict.
-      const repo = await this.repository(row.app);
-      const r = await this.host(row, "protection check", ["api", `repos/${repo.slug}/rules/branches/${branch}`]);
-      const rules = r.code === 0 ? parseJson(r.stdout) : null;
-      const said = Array.isArray(rules) ? rules.length > 0 : typeof (rules as { protected?: unknown })?.protected === "boolean" ? (rules as { protected: boolean }).protected : null;
-      if (said === true) throw new Stop("refused", `the branch ${branch} is protected on the host`);
-      if (said === null) throw new Unresolved(`branch protection for ${branch} is unknown: ${clean(r.stderr.trim(), 200) || "the host gave no rule set"}`);
-      const push = ["push", "-q", url, `${row.head}:refs/heads/${branch}`];
-      const pushed = await effect(this.gate(row, "push", "push", push, await ref(policy.base), true), "git", ["-C", this.mirror(row.app), ...push], { timeoutMs: 120_000 });
-      if (pushed.code !== 0) throw new Unresolved(`the host refused ${branch}: ${clean(pushed.stderr.trim().split("\n").at(-1) ?? "", 200)}`);
-    }
-    const head = await ref(branch);
-    if (head !== row.head) throw new Unresolved(`the host does not show the verified head on ${branch}`);
-    this.hosted(row, `the branch ${branch} (head ${row.head!.slice(0, 12)}); delete it on the host if you do not want it.`);
-    if ((await ref(policy.base)) !== row.base) throw new Stop("stale", `the base branch moved before the draft was opened; the candidate is void. The branch ${branch} exists on the host; delete it if you do not want it.`);
-    let pr = await this.find(row, branch, policy, head);
-    if (!pr) {
-      const tip = await ref(policy.base); // read now: the draft is opened only on the base the candidate was derived on
-      const tmp = scratch("ow-pr-"), body = join(tmp, "body.md");
+  private async publish(id: string) {
+    if (this.publishing.has(id)) throw new HttpError(409, "this draft is being opened now; wait for it");
+    this.publishing.add(id);
+    try {
+      let row = this.row(id);
+      if (row.state === "published") return this.view(id);
+      const why = this.unready(row);
+      if (why) throw new HttpError(409, why);
+      const policy = this.config.apps[row.app]!.fixes!, branch = `ow/fix/${row.id}`;
       try {
-        writeFileSync(body, outbound(this.body(row)));
-        const made = await this.host(row, "draft creation", ["pr", "create", "--draft", "--base", policy.base, "--head", branch, "--title", outbound(this.title(row)), "--body-file", body], tip);
-        if (made.code !== 0) throw new Unresolved(`draft creation failed on the host: ${clean(made.stderr.trim(), 200) || `exit ${made.code}`}`);
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
+        const url = await this.remote(row.app);
+        const ref = async (name: string) => {
+          const r = await this.git(row.app).run(["ls-remote", url, `refs/heads/${name}`]);
+          if (r.code !== 0) throw new Unresolved(`the remote could not be read: ${clean(r.stderr.trim(), 200)}`);
+          return r.stdout.split(/\s/)[0] || null;
+        };
+        let there = await ref(branch);
+        const host = there ? `the branch ${branch} (head ${there.slice(0, 12)}); delete it on the host if you do not want it.` : "nothing.";
+        const tip = await ref(policy.base);
+        if (tip !== row.base) return this.update(row, "stale", `${policy.base} moved from ${row.base!.slice(0, 12)} to ${String(tip).slice(0, 12)} since this candidate was derived; nothing was pushed for it. Press f to derive again. On the host: ${host}`), this.view(id);
+        if (there && there !== row.head) throw new Unresolved(`the branch ${branch} already holds another commit (${there.slice(0, 12)}); Overwatch does not overwrite it`);
+        if (!there) {
+          const repo = await this.repository(row.app);
+          const r = await this.host(row, "protection check", ["api", `repos/${repo.slug}/rules/branches/${branch}`]);
+          const rules = r.code === 0 ? parseJson(r.stdout) : null;
+          const said = Array.isArray(rules) ? rules.length > 0 : typeof (rules as { protected?: unknown })?.protected === "boolean" ? (rules as { protected: boolean }).protected : null;
+          if (said === true) throw new Unresolved(`the branch ${branch} is protected on the host; nothing was pushed`);
+          if (said === null) throw new Unresolved(`branch protection for ${branch} is unknown (${clean(r.stderr.trim(), 200) || "the host gave no rule set"}); nothing was pushed`);
+          const push = ["push", "-q", url, `${row.head}:refs/heads/${branch}`];
+          const pushed = await effect(this.intent(row, "push", "push", push), "git", ["-C", this.mirror(row.app), ...push], { timeoutMs: 120_000 });
+          if (pushed.code !== 0) throw new Unresolved(`the host refused ${branch}: ${clean(pushed.stderr.trim().split("\n").at(-1) ?? "", 200)}`);
+          there = await ref(branch);
+          if (there !== row.head) throw new Unresolved(`the host does not show the verified commit on ${branch}`);
+        }
+        this.hosted(row, `the branch ${branch} (head ${row.head!.slice(0, 12)}); delete it on the host if you do not want it.`);
+        let pr = await this.find(row, branch, policy, there);
+        if (!pr) {
+          const tmp = scratch("ow-pr-"), body = join(tmp, "body.md");
+          try {
+            writeFileSync(body, outbound(this.body(row)));
+            const made = await this.host(row, "draft creation", ["pr", "create", "--draft", "--base", policy.base, "--head", branch, "--title", outbound(this.title(row)), "--body-file", body]);
+            if (made.code !== 0) throw new Unresolved(`draft creation failed on the host: ${clean(made.stderr.trim(), 200) || `exit ${made.code}`}`);
+          } finally {
+            rmSync(tmp, { recursive: true, force: true });
+          }
+          pr = await this.find(row, branch, policy, await ref(branch));
+          if (!pr) throw new Unresolved("the host reported draft creation, but no draft for this attempt can be found");
+        }
+        this.hosted(row, `draft #${pr.number} (${pr.url}) and its branch ${branch}; close the draft on the host to withdraw it.`);
+        row = this.row(id);
+        this.update(row, "published", null, {}, { pr: { number: pr.number, url: clean(pr.url, 300), draft: pr.isDraft, state: pr.state }, publishedMs: clock.now() });
+      } catch (e) {
+        // It stays a verified candidate: the reason says what happened and where; another keypress reconciles and continues.
+        const d = JSON.parse(this.row(id).data) as Data;
+        this.store.tx((w) => {
+          w.run("UPDATE fixes SET reason = ? WHERE id = ?", outbound(`Stopped at ${d.step ?? "the start"}: ${errorText(e, 300)}. On the host: ${d.host ?? "nothing"} Press P to check the host and continue.`) as Clean, id as Clean);
+          w.event("fix", row.incident as Clean, { id, state: row.state, stopped: d.step ?? null });
+        });
       }
-      pr = await this.find(row, branch, policy, await ref(branch));
-      if (!pr) throw new Unresolved("the host reported draft creation, but no draft for this attempt can be found");
+      return this.view(id);
+    } finally {
+      this.publishing.delete(id);
     }
-    this.hosted(row, `draft #${pr.number} (${pr.url}) and its branch ${branch}; close the draft on the host to withdraw it.`);
-    this.update(row, "draft", null, {}, { pr: { number: pr.number, url: clean(pr.url, 300), draft: pr.isDraft, state: pr.state }, checkedMs: clock.now() });
   }
 
   /** The host repository, resolved once from the configured remote and named explicitly in every `gh` call. */
@@ -457,49 +473,6 @@ export class Fixes extends Crew {
       "Uncertain: whether this change alone resolves the problem; a release of a merge and three quiet intervals will tell.", "",
       `<!-- overwatch-attempt: ${row.id} -->`,
     ].join("\n");
-  }
-
-  /** A published draft: merged, closed, then released and quiet. Asks the host at most once a minute per attempt. */
-  private async follow(row: Row) {
-    const d = JSON.parse(row.data) as Data;
-    if (!this.config.apps[row.app]?.checkout || !d.pr) return;
-    if (row.state === "draft") {
-      if (d.checkedMs !== undefined && this.followed.has(row.id) && clock.now() - d.checkedMs < LIMIT.followMs) return;
-      this.followed.add(row.id);
-      const call = ["pr", "view", String(d.pr.number), "--json", "state,mergeCommit,isDraft,url,headRefName,headRefOid,headRepository", "--repo", (await this.repository(row.app)).name];
-      const r = await effect(this.store.permit("host", row.id, { step: "follow" }, call), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
-      const pr = r.code === 0 ? (JSON.parse(r.stdout) as { state: string; mergeCommit: { oid: string } | null; isDraft: boolean; headRefName?: string; headRefOid?: string; headRepository?: { name?: string } }) : null;
-      // Followed only while it is still this attempt's draft: same head branch and, when the host says them, same commit and repository.
-      if (!pr || pr.headRefName !== `ow/fix/${row.id}` || (pr.headRefOid && pr.headRefOid !== row.head) || (pr.headRepository?.name && pr.headRepository.name !== (await this.repository(row.app)).name.split("/").at(-1))) return;
-      const at = { checkedMs: clock.now(), pr: { ...d.pr, state: pr.state, draft: pr.isDraft } };
-      if (pr.state === "MERGED" && pr.mergeCommit?.oid) return void this.update(row, "awaiting_deploy", "merged; waiting for a release that contains it", {}, { ...at, merge: pr.mergeCommit.oid });
-      if (pr.state === "CLOSED") return void this.update(row, "closed_unmerged", "closed without merging; the problem stays open", {}, { ...at, host: `the closed draft #${d.pr.number} and its branch ow/fix/${row.id}` });
-      return this.store.tx((w) => w.run("UPDATE fixes SET data = json_patch(data, ?) WHERE id = ?", json(at), row.id as Clean));
-    }
-    // After the merge: the environment's current deployment must contain it, and stay deployed through three
-    // consecutive complete quiet intervals. Then the item is ready to close and the owner closes it; nothing closes
-    // by itself. A deployment without the fix, or the problem returning, sends it back to waiting, with the reason.
-    const latest = this.store.get<{ seq: number; revision: string }>("SELECT seq, revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", row.app, row.environment);
-    if (!latest || latest.seq <= row.seq) return;
-    if (d.checked !== latest.revision) {
-      await this.tip(row.app).catch(() => undefined);
-      d.contains = (await this.git(row.app).run(["merge-base", "--is-ancestor", d.merge!, latest.revision])).code === 0;
-      this.store.tx((w) => w.run("UPDATE fixes SET data = json_patch(data, ?) WHERE id = ?", json({ checked: latest.revision, contains: d.contains }), row.id as Clean));
-    }
-    const back = (why: string) => void this.update(row, "awaiting_deploy", why, {}, { releaseSeq: null });
-    if (!d.contains) return d.releaseSeq != null ? back(`the deployment containing the fix was replaced by ${latest.revision.slice(0, 12)}, which does not contain it; waiting again`) : undefined;
-    if (d.releaseSeq !== latest.seq) return void this.update(row, "awaiting_deploy", `released in ${latest.revision.slice(0, 12)}; waiting for three quiet intervals while it stays deployed`, {}, { releaseSeq: latest.seq });
-    const inc = this.store.get<{ source: string; seq: number }>("SELECT source, seq FROM incidents WHERE id = ?", row.incident);
-    if (!inc) return;
-    // Consecutive complete intervals only: a failed, partial or catch-up interval starts the count again.
-    let quiet = 0;
-    for (const e of this.store.all<{ kind: string; data: string }>("SELECT kind, data FROM events WHERE kind IN ('slice', 'source_failed') AND subject = ? AND seq > ? AND seq > ? ORDER BY seq", inc.source, latest.seq, inc.seq)) {
-      const x = JSON.parse(e.data) as { ordinary?: boolean; readings?: Record<string, { state: string }> };
-      quiet = e.kind === "slice" && x.ordinary && Object.values(x.readings ?? {}).every((r) => r.state === "ok") ? quiet + 1 : 0;
-    }
-    if (quiet >= LIMITS.quietIntervals && row.state !== "released_quiet")
-      this.update(row, "released_quiet", `ready to close: ${latest.revision.slice(0, 12)} contains the merge ${d.merge!.slice(0, 12)}, is still deployed, and the problem has been quiet for ${LIMITS.quietIntervals} complete intervals since. Close it with Done.`);
-    else if (quiet < LIMITS.quietIntervals && row.state === "released_quiet") back("the problem came back after the release; waiting for three quiet intervals again");
   }
 
   /**
