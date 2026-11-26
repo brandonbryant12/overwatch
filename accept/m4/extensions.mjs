@@ -1,11 +1,11 @@
 // Executable maintenance experiment. Mutations occur only in a disposable archive of the graded revision.
 import fs from "node:fs"
-import os from "node:os"
+import { fixtureTemp } from "../temp.mjs"
 import path from "node:path"
 import { execFileSync, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 const repo = fileURLToPath(new URL("../../", import.meta.url)),
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ow-m4-extension-"))
+  tmp = fixtureTemp("ow-m4-extension-")
 const at = (p) => path.join(tmp, p)
 const add = (p, s) => fs.appendFileSync(at(p), s)
 const replace = (p, old, s) => {

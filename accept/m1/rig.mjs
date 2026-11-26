@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import os from "node:os"
+import { fixtureTemp } from "../temp.mjs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn, execFileSync } from "node:child_process"
@@ -28,7 +28,7 @@ export function capture(exe, args, opt = {}) {
     .finally(() => clearTimeout(timer))
 }
 export async function rig(t, { both = false, baseline = true } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ow-m1-"))
+  const root = fixtureTemp("ow-m1-")
   const dir = (name) => path.join(root, name)
   for (const d of [
     "bin",
@@ -224,11 +224,12 @@ export async function rig(t, { both = false, baseline = true } = {}) {
       }
     },
   }
+  const lifetime = fileURLToPath(new URL("./parent-lifetime.cjs", import.meta.url))
   x.start = async (command = "serve", exe = BIN) => {
     const c = spawn(exe, [command, "--config", dir("config.json"), "--json"], {
-      env: { ...env, OW_TEST_FD: "3" },
+      env: { ...env, OW_TEST_FD: "3", NODE_OPTIONS: [env.NODE_OPTIONS, "--require=" + JSON.stringify(lifetime)].filter(Boolean).join(" ") },
       cwd: root,
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe", "pipe", "ipc"],
     })
     children.add(c)
     x.child = c

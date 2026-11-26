@@ -1,6 +1,6 @@
 // Chrome DevTools Protocol over inherited pipes. No browser downloads or shared profile.
 import fs from "node:fs"
-import os from "node:os"
+import { fixtureTemp } from "../temp.mjs"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
@@ -14,7 +14,7 @@ export const binary = [
 
 export async function browser(t, x) {
   // The rig tears its own directory down first. Keep Chrome in an independently owned temporary home.
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ow-m2-chrome-"))
+  const root = fixtureTemp("ow-m2-chrome-")
   const env = { HOME: root, TMPDIR: root, PATH: x.env.PATH, XDG_CONFIG_HOME: root, XDG_CACHE_HOME: root,
     XDG_STATE_HOME: root, XDG_DATA_HOME: root }
   const child = spawn(binary, ["--headless=new", "--disable-gpu", "--disable-background-networking",

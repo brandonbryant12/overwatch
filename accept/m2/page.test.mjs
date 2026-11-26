@@ -150,15 +150,14 @@ test("page ages under a hanging status request and reconnects with draft and foc
   const until = Date.now() + 5000
   while (!wire.hanging() && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 25))
   assert.ok(wire.hanging(), "page status request is outstanding")
-  // Advance the browser’s own timers even with network fetches pending.
-  await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 16000 })
-  await b.wait(state + "==='stale'", "stale after 15 seconds")
+  // Keep Chrome and the loopback transport on real clocks throughout the outage and recovery.
+  const heldAt = performance.now()
+  await b.wait(state + "==='stale'", "stale after 15 seconds", 16000)
   assert.equal(await b.evaluate("document.querySelectorAll('[data-env][data-health=quiet]').length"), 0)
   assert.match(await caption(), /stale/i)
   assert.notEqual(await ink(), liveInk)
   const staleInk = await ink()
-  await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 15000 })
-  await b.wait(state + "==='down'", "service down after 30 seconds")
+  await b.wait(state + "==='down'", "service down after 30 seconds", 31000 - (performance.now() - heldAt))
   assert.ok(wire.hanging())
   assert.match(await caption(), /not answering/i)
   assert.notEqual(await ink(), staleInk)
@@ -172,7 +171,6 @@ test("page ages under a hanging status request and reconnects with draft and foc
   await b.key("Enter")
   assert.equal((await x.status()).seq, before)
   wire.resume()
-  await b.cmd("Emulation.setVirtualTimePolicy", { policy: "advance", budget: 6000 })
   await b.wait(state + "==='live'", "fresh snapshot restores live state", 10000)
   assert.equal(await b.evaluate(prompt + ".value"), "keep this draft")
   assert.equal(await b.evaluate(focused), subject)

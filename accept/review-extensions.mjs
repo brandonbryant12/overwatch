@@ -1,12 +1,12 @@
 // Run explicitly against the assessed revision. This changes only a disposable source archive.
 import { execFileSync, spawnSync } from "node:child_process"
 import fs from "node:fs"
-import os from "node:os"
+import { fixtureTemp } from "./temp.mjs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const repo = fileURLToPath(new URL("../", import.meta.url))
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "ow-extension-review-"))
+const scratch = fixtureTemp("ow-extension-review-")
 const file = (name) => path.join(scratch, name)
 function replace(name, original, next) {
   const source = fs.readFileSync(file(name), "utf8")

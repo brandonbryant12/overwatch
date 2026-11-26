@@ -1,12 +1,12 @@
 // Timed clean-fork exercise using the literal examples from the guide and a launchctl ledger.
 import { execFileSync } from "node:child_process"
 import fs from "node:fs"
-import os from "node:os"
+import { fixtureTemp } from "../temp.mjs"
 import path from "node:path"
 import assert from "node:assert/strict"
 import { fileURLToPath } from "node:url"
 const original = fileURLToPath(new URL("../../", import.meta.url))
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "ow-colleague-"))
+const root = fixtureTemp("ow-colleague-")
 const at = (p) => path.join(root, p)
 try {
   const start = performance.now(),
@@ -21,7 +21,7 @@ try {
     }
   const run = (p, args, cwd = root) => execFileSync(p, args, { cwd, env, encoding: "utf8" }).trim()
   run("git", ["clone", "-q", "--local", "--no-checkout", original, at("fork")])
-  run("git", ["checkout", "-q", "ddc68e7"], at("fork"))
+  run("git", ["checkout", "-q", "--detach", process.argv[2] ?? "HEAD"], at("fork"))
   const guide = fs.readFileSync(at("fork/docs/setup.md"), "utf8"),
     blocks = [...guide.matchAll(/```json\n([\s\S]*?)\n```/g)].map((m) => m[1])
   for (const dir of ["home/.config/overwatch", "home/.config/opencode/skills", "home/src/shop", "bin"])
@@ -29,7 +29,14 @@ try {
   fs.writeFileSync(at("home/.config/overwatch/config.json"), blocks[0])
   fs.writeFileSync(at("home/.config/opencode/opencode.json"), blocks[1])
   fs.cpSync(at("fork/skills/overwatch"), at("home/.config/opencode/skills/overwatch"), { recursive: true })
-  fs.writeFileSync(env.OW_LAUNCHCTL, '#!/bin/sh\necho "$@" >> "$HOME/launchctl.calls"\n', { mode: 0o755 })
+  fs.writeFileSync(env.OW_LAUNCHCTL, [
+    "#!/bin/sh", 'echo "$@" >> "$HOME/launchctl.calls"',
+    'case "$1" in',
+    'bootstrap) touch "$HOME/job-loaded";;',
+    'kickstart|print) test -f "$HOME/job-loaded";;',
+    'bootout) test -f "$HOME/job-loaded" && rm "$HOME/job-loaded";;',
+    '*) exit 1;;', "esac", "",
+  ].join("\n"), { mode: 0o755 })
   for (const exe of ["security", "gh", "kubectl", "opencode", "terminal-notifier"])
     fs.writeFileSync(at("bin/" + exe), "#!/bin/sh\nexit 1\n", { mode: 0o755 })
   for (const cmd of ["check", "install", "restart", "uninstall"]) {

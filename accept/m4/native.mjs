@@ -3,7 +3,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import { createServer } from "node:http"
-import { spawn } from "node:child_process"
+import { fork } from "node:child_process"
 import { once } from "node:events"
 import { randomUUID } from "node:crypto"
 import { setTimeout as delay } from "node:timers/promises"
@@ -122,10 +122,11 @@ test("native 2.4.1 through both calibrations and published draft", { timeout: 18
           ],
         }
       fs.writeFileSync(x.dir("config/opencode/opencode.json"), JSON.stringify(cfg))
-      child = spawn(process.env.OPENCODE_BIN, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
+      child = fork(new URL("./native-process.mjs", import.meta.url), [process.env.OPENCODE_BIN, "serve", "--hostname", "127.0.0.1", "--port", String(port)], {
         cwd: x.dir("tmp"),
         env: { ...x.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
-        stdio: "ignore",
+        execArgv: [],
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
       })
       const closed = once(child, "close")
       t.after(async () => {
