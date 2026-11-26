@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 
 const repo = fileURLToPath(new URL("../", import.meta.url))
 const scratch = fixtureTemp("ow-extension-review-")
+const env = { ...process.env, TMPDIR: scratch }
 const file = (name) => path.join(scratch, name)
 function replace(name, original, next) {
   const source = fs.readFileSync(file(name), "utf8")
@@ -54,9 +55,9 @@ console.log("maintenance-labelled event",store.tx(w=>w.event("review",null,{}),t
   execFileSync(
     process.execPath,
     ["--experimental-strip-types", "--no-warnings", file("src/extension-review.ts"), scratch],
-    { stdio: "inherit" },
+    { env, stdio: "inherit" },
   )
-  const compiled = spawnSync(file("node_modules/.bin/tsc"), ["--noEmit"], { cwd: scratch, encoding: "utf8" })
+  const compiled = spawnSync(file("node_modules/.bin/tsc"), ["--noEmit"], { cwd: scratch, env, encoding: "utf8" })
   if (compiled.error) throw compiled.error
   console.log("Full typecheck exit", compiled.status)
   process.stdout.write(compiled.stdout + compiled.stderr)

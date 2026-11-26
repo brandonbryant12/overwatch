@@ -6,6 +6,7 @@ import { execFileSync, spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 const repo = fileURLToPath(new URL("../../", import.meta.url)),
   tmp = fixtureTemp("ow-m4-extension-")
+const env = { ...process.env, TMPDIR: tmp }
 const at = (p) => path.join(tmp, p)
 const add = (p, s) => fs.appendFileSync(at(p), s)
 const replace = (p, old, s) => {
@@ -56,9 +57,10 @@ console.log("unreceipted dispatches",x.p.requests.filter(r=>r.path==="/review-le
   )
   execFileSync(process.execPath, ["--experimental-strip-types", "--no-warnings", at("review.mjs"), tmp], {
     cwd: tmp,
+    env,
     stdio: "inherit",
   })
-  const compile = () => spawnSync(at("node_modules/.bin/tsc"), ["--noEmit"], { cwd: tmp, encoding: "utf8" })
+  const compile = () => spawnSync(at("node_modules/.bin/tsc"), ["--noEmit"], { cwd: tmp, env, encoding: "utf8" })
   const pre = compile()
   console.log("typecheck with new consumer/route/dispatch", pre.status, pre.stdout)
   if (pre.status !== 0) throw Error("extension fixture failed to compile")

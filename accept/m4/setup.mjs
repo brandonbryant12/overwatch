@@ -12,6 +12,7 @@ try {
   const start = performance.now(),
     env = {
       HOME: at("home"),
+      TMPDIR: root,
       PATH: at("bin") + ":" + path.dirname(process.execPath) + ":/usr/bin:/bin",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: "/dev/null",
