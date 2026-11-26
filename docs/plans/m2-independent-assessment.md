@@ -22,11 +22,11 @@ Use Node 23.11.0 or 22.13.0. Tests start the executable in temporary homes and c
 ```sh
 prior=$(mktemp -d)
 git archive 66004b1 | tar -xf - -C "$prior"
-M1_LONG=1 M1_OTHER_BIN="$prior/bin/overwatch" /Users/brandon/.local/bin/codex-heavy -- \
+M1_LONG=1 M1_OTHER_BIN="$prior/bin/overwatch" codex-heavy -- \
   node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
 ```
 
 These shell functions expand every case reference below into its focused reproduction. N20 uses `node --no-warnings --test --test-name-pattern=65536 accept/m1/storage-edges.test.mjs`. Browser cases need the installed Chrome or CHROME_BIN.

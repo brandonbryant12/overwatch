@@ -122,7 +122,7 @@ These times are from one final Chrome run and include scrolling to each required
 
 ## Extensions an ordinary author might make
 
-Run `/Users/brandon/.local/bin/codex-heavy -- node --no-warnings accept/m5-extensions.mjs` from this checkout. It changes only a disposable archive of the assessed commit.
+Run `codex-heavy -- node --no-warnings accept/m5-extensions.mjs` from this checkout. It changes only a disposable archive of the assessed commit.
 
 | Extension | Observed result | Potential owner consequence |
 |---|---|---|
@@ -211,7 +211,7 @@ Separate ordinary limits from stress quantities. The failing health probes used 
   ln -s "$repo/node_modules" "$release/node_modules"
   cd "$release/product"
   export TMPDIR="$release/tmp" M1_LONG=1 M1_OTHER_BIN="$release/prior/bin/overwatch"
-  gate=/Users/brandon/.local/bin/codex-heavy
+  gate=codex-heavy
   node --version
   failed=0
   for m in 1 2 3 4; do
@@ -228,7 +228,7 @@ Use separate clean archives and select the stated Node version on PATH. The comm
 
 ```sh
 probe() {
-  /Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 --test-name-pattern="$2" "accept/$1.test.mjs"
+  codex-heavy -- node --no-warnings --test --test-concurrency=1 --test-name-pattern="$2" "accept/$1.test.mjs"
 }
 ```
 

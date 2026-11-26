@@ -25,7 +25,7 @@ Use the repository root, Node 23.11.0 or 22.13.0, the installed development depe
 prior=$(mktemp -d)
 git archive 21fdca3 | tar -xf - -C "$prior"
 export M1_OTHER_BIN="$prior/bin/overwatch" M1_LONG=1
-gate=/Users/brandon/.local/bin/codex-heavy
+gate=codex-heavy
 for m in 1 2 3 4; do
   "$gate" -- node --no-warnings --test --test-concurrency=2 accept/m$m/*.test.mjs
 done
@@ -160,7 +160,7 @@ A dependency-free `git archive 4de1027` accepted the setup guide's sample config
 
 The native OpenCode 2.4.1 binary, with a temporary config, scripted loopback model and fixture tools, produced **5 valid, 5 correct, 0 false-real, 0 planted-marker compliance, peak 2** on the trial. A 2-real/1-not-real investigation finished real, challenger upheld, observed true. An actual constrained responder returned an answer. A correction was committed and reached all three logical slots on the following investigation. Native catalog, MCP connection and investigator permission checks succeeded. Doctor exited 4 because fixture dependencies such as launchd and deployment discovery intentionally lacked real installations. The original real-adapter driver let doctor's registry ping reach the public npm registry on the first run. I corrected the harness to serve that ping on loopback and repeated it. No model, incident, or playbook content was sent to the registry. The strengthened acceptance result uses the loopback run.
 
-Use `/Users/brandon/.local/bin/codex-heavy -- node accept/review-extensions.mjs` for the disposable extension experiment. One important qualification to the runtime result: the **full typecheck rejected the third kind** in `test/classes.test.ts` with TS7053 because the property test's identity policy had no `capacityFixture` key. That test is a valuable build-time signal. It did not reject the structurally non-finite Sample or the schema omission. Current production configuration rejected the unknown kind outright.
+Use `codex-heavy -- node accept/review-extensions.mjs` for the disposable extension experiment. One important qualification to the runtime result: the **full typecheck rejected the third kind** in `test/classes.test.ts` with TS7053 because the property test's identity policy had no `capacityFixture` key. That test is a valuable build-time signal. It did not reject the structurally non-finite Sample or the schema omission. Current production configuration rejected the unknown kind outright.
 
 ## Setup and customization as a fork maintainer
 

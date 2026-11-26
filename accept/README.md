@@ -16,7 +16,7 @@ M1_LONG=1 node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs
 M1_OTHER_BIN=/absolute/path/to/older/bin/overwatch node --test accept/m1/storage.test.mjs
 ```
 
-On the shared iMac, prefix the Node suite command with `/Users/brandon/.local/bin/codex-heavy --` and put environment assignments before that prefix. No registry access, account credentials, running service, launchd changes or model downloads are needed. The repository's legacy test glob excludes these files. The fast suite samples the first, middle and last SQL write. The release sweep derives its cuts from an actual successful poll on the same input. OS process kills exercise SQLite recovery, not a mock rollback.
+On the shared iMac, prefix the Node suite command with `codex-heavy --` and put environment assignments before that prefix. No registry access, account credentials, running service, launchd changes or model downloads are needed. The repository's legacy test glob excludes these files. The fast suite samples the first, middle and last SQL write. The release sweep derives its cuts from an actual successful poll on the same input. OS process kills exercise SQLite recovery, not a mock rollback.
 
 | File under m1 | What it pins |
 |---|---|
@@ -56,8 +56,8 @@ Use the shared heavy-command prefix on the iMac. M2 adds no packages. Server tes
 The expanded M1 and M2 suites include the neighbouring cases from the independent page assessment. Run the same release commands above. For a single case use `node --no-warnings --test --test-name-pattern='N07' accept/m1/neighbours.test.mjs`, for example. N20 is the 65,536-byte page variant in storage-edges. The separate owner timing run drives system Chrome and prints elapsed time from keyboard input through visible completion for the demo and a 200-incident, six-environment service.
 
 ```sh
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
 ```
 
 M3 is specified ahead of the implementation. The fixtures use the executable, temporary OpenCode and Datadog peers, scripted independent readings through actual MCP calls, a disposable notification executable with an exit-code ledger and system Chrome with an isolated clipboard substitute. Product cases may stop at a missing interface on M2. The fake notifier control can run today. A green control verifies the fixture alone. See the revision 4 interface contract and `docs/plans/m2-independent-assessment.md` for scope, measured results and outstanding owner checks.
@@ -69,8 +69,8 @@ The M1 assessment neighbours use A01–A21 for the original kernel defects and B
 M3 adds tests of peer delivery, durable filing and request boundaries, evidence provenance, scoped model inputs, answering and brief language, and notification recovery. The transition suite kills the real service at ten externally observable investigation stages. Its oracle checks the contents and identity of a committed filing. The cadence test advances the service clock through one day; the provider and model remain local fixtures.
 
 ```sh
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m4/*.test.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m4/*.test.mjs
 ```
 
 M4 implements the assessor side of revision 5 only. The disposable bare Git remote accepts candidate branches and logs attempted ref updates. The fake gh records draft status, head, base and body, and lets the fixture drive an external close or merge. The service sees these changes through its ordinary scheduler. Tests exercise an unearned gate, an investigation-only gate, a disallowed proposal, failed app verification, a planted change request, both draft lifecycles, a short and a noisy series, and staging compared with both complete and missing production data. On M3 the fixture control runs; prospective scenarios stop at the unsupported M4 configuration keys. See the assessment for observed pass/fail counts and focused reproduction commands.
@@ -84,8 +84,8 @@ Run the four milestone globs as above. The optional native run takes a separatel
 ```sh
 OPENCODE_BIN=/absolute/path/to/package/bin/opencode node --no-warnings --test accept/m4/native.mjs
 node accept/m4/setup.mjs
-/Users/brandon/.local/bin/codex-heavy -- node accept/m4/extensions.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+codex-heavy -- node accept/m4/extensions.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
 ```
 
 The timed fleet has 200 real fixture problems across six watched namespaces. A Chrome response fixture adds display examples of every fix, forecast and comparison state. The write routes, search, focus, queue and clipboard checks still exercise the real page and service. The native and publication tests separately exercise the states a verifier or host actually produced. The installation exercise clones the assessed revision and runs the guide examples with an isolated home and launchctl ledger.

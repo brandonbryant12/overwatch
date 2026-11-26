@@ -27,9 +27,9 @@
 ```sh
 prior=$(mktemp -d)
 git archive 66004b1 | tar -xf - -C "$prior"
-M1_OTHER_BIN="$prior/bin/overwatch" M1_LONG=1 /Users/brandon/.local/bin/codex-heavy -- \
+M1_OTHER_BIN="$prior/bin/overwatch" M1_LONG=1 codex-heavy -- \
   node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs
-/Users/brandon/.local/bin/codex-heavy -- \
+codex-heavy -- \
   node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs
 ```
 

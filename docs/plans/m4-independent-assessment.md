@@ -46,7 +46,7 @@ prior=$(mktemp -d)
 git archive 4de1027 | tar -xf - -C "$prior"
 export M1_LONG=1 M1_OTHER_BIN="$prior/bin/overwatch"
 for m in 1 2 3 4; do
-  /Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m$m/*.test.mjs
+  codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m$m/*.test.mjs
 done
 node --no-warnings --test --test-concurrency=1 accept/guide-contract.test.mjs
 ```
@@ -97,7 +97,7 @@ The 21 M3 neighbours are individually runnable in `accept/m3/m4-neighbours.test.
 
 ## Disposable extension experiment
 
-`/Users/brandon/.local/bin/codex-heavy -- node accept/m4/extensions.mjs` archives the graded commit, mutates that copy, exercises its CLI and HTTP server, runs the full typecheck, adds one more source kind and checks again.
+`codex-heavy -- node accept/m4/extensions.mjs` archives the graded commit, mutates that copy, exercises its CLI and HTTP server, runs the full typecheck, adds one more source kind and checks again.
 
 | Extension | Actual result | Where the rule lives |
 |---|---|---|
@@ -116,7 +116,7 @@ Run the following from the repository root. Each row abbreviates an exact comman
 
 ```sh
 probe() {
-  /Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test \
+  codex-heavy -- node --no-warnings --test \
     --test-concurrency=1 --test-name-pattern="$2" "accept/$1.test.mjs"
 }
 ```
@@ -153,7 +153,7 @@ testdir=$(mktemp -d)
 (cd "$testdir" && npm_config_cache="$testdir/cache" npm pack @opencode/cli-darwin-arm64@2.4.1 && tar -xf opencode-cli-darwin-arm64-2.4.1.tgz)
 OPENCODE_BIN="$testdir/package/bin/opencode" node --no-warnings --test "$repo/accept/m4/native.mjs"
 node accept/m4/setup.mjs
-/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
 ```
 
 I opened the actual demo, focused the exhausted database-pool incident, and read through the 3/3 result, upheld challenge, two distinct observations, candidate diff, verify result, draft link and next action. The focused card said that closing the draft leaves the issue open. The QA strip gave the sign-in command directly. At the same time the staging strip said “Checked and quiet” and “new problem in staging”. The reader has to infer that these refer to a health reading and a different comparison window. The repeated “Why” readings push later evidence down the detail panel. I liked D/U, finding hidden history without reopening it, and the edited brief reaching the clipboard exactly. A permanent host error, an out-of-date projection and the ability to press Propose fix on an already open draft would annoy me more than an extra hundred milliseconds.
