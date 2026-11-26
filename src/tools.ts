@@ -183,7 +183,8 @@ export class Tools {
           continue;
         }
         const handle = `e_${randomBytes(12).toString("hex")}`;
-        w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal, origin) VALUES (?, ?, ?, ?, ?, ?, ?)", handle as Clean, run.id as Clean, run.session_id as Clean, source as Clean, text, ordinal, (typeof origin === "string" ? origin : origin[n]!) as Clean);
+        w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, ?, ?, ?)", handle as Clean, run.id as Clean, run.session_id as Clean, source as Clean, text, ordinal);
+        w.run("INSERT INTO origins (handle, origin) VALUES (?, ?)", handle as Clean, (typeof origin === "string" ? origin : origin[n]!) as Clean);
         pieces.push({ handle, source, text });
       }
       w.event("evidence", run.id as Clean, { source, pieces: pieces.length, truncated });

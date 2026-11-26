@@ -15,6 +15,7 @@ import { parseConfig, type Source } from "../src/config.ts";
 import { HttpError, receipt } from "../src/inbox.ts";
 import { Store, type Clean, type Writer } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
+import { snapshot } from "../src/snapshot.ts";
 
 // A Datadog that answers whatever the property puts in `reply`.
 const reply: { monitors: unknown; logs: unknown; query: unknown } = { monitors: [], logs: { data: [] }, query: { series: [] } };
@@ -48,6 +49,7 @@ function rig(readings: string[]) {
       now += 60_000; mono += 60_000; clock.set(now, mono);
       await collector.pass();
     },
+    snap: () => snapshot(store, config, collector, true),
     reading: (r: string) => store.get<{ state: string; ok_ms: number | null }>("SELECT state, ok_ms FROM readings WHERE reading = ?", r),
     count: () => store.get<{ n: number }>("SELECT coalesce(sum(count), 0) AS n FROM incidents")!.n,
   };
@@ -85,7 +87,12 @@ test("class: freshness is the provider's observation time, never the time Overwa
       const r = rig(["metrics"]);
       reply.query = { series: [{ metric: "shop.errors", pointlist: [[r.now + 60_000 - age, 1]] }] };
       await r.step();
+      // Stored, and as every consumer sees it: the snapshot's reading age and the environment's health.
       assert.equal(r.reading("metrics")?.ok_ms, r.now - age);
+      assert.equal(r.store.get<{ at_ms: number }>("SELECT at_ms FROM readings")!.at_ms, r.now - age);
+      const env = r.snap().environments[0]!;
+      assert.equal(env.readings[0]!.okMs, r.now - age);
+      if (age > env.freshForMs) assert.equal(env.health, "stale");
       r.store.close();
     }),
     { numRuns: 25 },

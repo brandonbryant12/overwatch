@@ -6,7 +6,7 @@
  *   probes. A rate limit that asked for longer than Overwatch waits counts as an ordinary failure.
  * A permission failure on one reading (one kind of read refused) is not a source failure at all.
  */
-import { LIMITS } from "./config.ts";
+import { LIMITS, type Source } from "./config.ts";
 
 export type FailureKind = "signin" | "permission" | "rate" | "unreachable" | "config";
 
@@ -46,17 +46,24 @@ export function backoff(kind: FailureKind, previousStreak: number, everyMs: numb
   return { streak, suspended: false, delayMs: Math.min(LIMITS.probeMs, everyMs * 2 ** (streak - 1)) };
 }
 
-/** The exact thing to do about a failure. */
-export function fixFor(kind: FailureKind, source: { kind: string; context?: string; namespace?: string; apiKey?: string; appKey?: string; id: string }): string {
-  if (source.kind === "kubernetes") {
-    const check = `kubectl --context ${source.context} -n ${source.namespace} get pods`;
-    if (kind === "signin") return `Sign in to ${source.context} again (your cluster's login command), then check with: ${check}`;
-    if (kind === "permission") return `Ask for read access in ${source.context}/${source.namespace}, then check with: ${check}`;
-    if (kind === "config") return `Check the context, namespace and selector of ${source.id} in the configuration`;
-    return `Check the network or VPN; Overwatch tries again by itself. Check with: ${check}`;
+/** The exact thing to do about a failure, per source kind (exhaustive: a new kind has no repair until it is given one). */
+export function fixFor(kind: FailureKind, source: Pick<Source, "kind" | "id"> & Partial<Source>): string {
+  switch (source.kind) {
+    case "kubernetes": {
+      const check = `kubectl --context ${source.context} -n ${source.namespace} get pods`;
+      if (kind === "signin") return `Sign in to ${source.context} again (your cluster's login command), then check with: ${check}`;
+      if (kind === "permission") return `Ask for read access in ${source.context}/${source.namespace}, then check with: ${check}`;
+      if (kind === "config") return `Check the context, namespace and selector of ${source.id} in the configuration`;
+      return `Check the network or VPN; Overwatch tries again by itself. Check with: ${check}`;
+    }
+    case "datadog":
+      if (kind === "signin") return `Datadog refused the keys: set valid keys in ${source.apiKey} and ${source.appKey}`;
+      if (kind === "rate") return "Nothing to do: Overwatch waits and tries again later";
+      if (kind === "config") return `Check the query and baseUrl of ${source.id} in the configuration`;
+      return "Check the network or VPN; Overwatch tries again by itself";
+    default: {
+      const unknown: never = source.kind;
+      throw new Error(`no repair for source kind ${String(unknown)}`);
+    }
   }
-  if (kind === "signin") return `Datadog refused the keys: set valid keys in ${source.apiKey} and ${source.appKey}`;
-  if (kind === "rate") return "Nothing to do: Overwatch waits and tries again later";
-  if (kind === "config") return `Check the query and baseUrl of ${source.id} in the configuration`;
-  return "Check the network or VPN; Overwatch tries again by itself";
 }

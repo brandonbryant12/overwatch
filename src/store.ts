@@ -113,9 +113,16 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   {
     name: "evidence",
     ddl: `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL,
-      text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL,
-      origin TEXT NOT NULL DEFAULT 'telemetry' CHECK (origin IN ('telemetry','code','history','generated')), UNIQUE (run_id, source, ordinal))`,
-    columns: ["handle", "run_id", "session_id", "source", "text", "ordinal", "origin"],
+      text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`,
+    columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
+  },
+  {
+    // What a piece of evidence is, apart from what its source is called. A piece without a row here is not
+    // telemetry: an origin that was never recorded cannot make a verdict observed.
+    name: "origins",
+    ddl: `CREATE TABLE origins (handle TEXT PRIMARY KEY REFERENCES evidence(handle) ON DELETE CASCADE,
+      origin TEXT NOT NULL CHECK (origin IN ('telemetry','code','history','generated')))`,
+    columns: ["handle", "origin"],
   },
   {
     name: "hourly",
@@ -190,7 +197,7 @@ CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms);
 CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq);`;
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
-const ADDED_TABLES = new Set(["hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
+const ADDED_TABLES = new Set(["origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
 
 /** Rules kept by the database itself; created with the schema and on open of an older file. */
 const TRIGGERS = `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
@@ -239,7 +246,6 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["asks", "answer", "answer TEXT"],
   ["asks", "reason", "reason TEXT"],
   ["asks", "message", "message TEXT"],
-  ["evidence", "origin", "origin TEXT NOT NULL DEFAULT 'telemetry'"],
   ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
 ];
 

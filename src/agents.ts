@@ -132,7 +132,18 @@ export class Agents {
    * keeps its message intent (answer() asks the peer about it, never sends it twice); a notice that was sending is
    * retried in the same group; one parked for a missing helper is tried again.
    */
+  /**
+   * At service start: recover what another process left, then deliver what waits (parked notices included). The
+   * service reports ready once that first delivery finished or `waitMs` passed, whichever is first: a hung helper
+   * delays readiness by at most that.
+   */
+  start(waitMs: number): Promise<void> {
+    this.recover();
+    return Promise.race([this.deliver(), sleep(waitMs)]);
+  }
+
   private recover() {
+    if (this.recovered) return;
     this.store.tx((w) => {
       for (const work of this.store.all<WorkRow>("SELECT * FROM work WHERE state = 'running'")) {
         if (work.kind !== "answer" && work.run_id && this.filed(work.run_id)) {
@@ -322,7 +333,7 @@ export class Agents {
     // Whether a reading rests on telemetry is the cited pieces' typed origin, never a source's display name.
     const handles = f ? (JSON.parse(f.claims) as Array<{ pieces: Array<{ handle: string }> }>).flatMap((c) => c.pieces.map((p) => p.handle)) : [];
     const observed = handles.length
-      ? this.store.all<{ text: string }>(`SELECT text FROM evidence WHERE origin = 'telemetry' AND handle IN (${handles.map(() => "?").join(",")})`, ...handles).map((e) => e.text)
+      ? this.store.all<{ text: string }>(`SELECT e.text FROM evidence e JOIN origins o ON o.handle = e.handle AND o.origin = 'telemetry' WHERE e.handle IN (${handles.map(() => "?").join(",")})`, ...handles).map((e) => e.text)
       : [];
     return {
       slot: item.slot!, sessionId: run?.session_id ?? null, verdict: f?.verdict ?? null, findingId: f?.id ?? null,

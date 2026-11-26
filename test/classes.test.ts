@@ -173,6 +173,7 @@ test("class: a restored copy that breaks any declared reference is refused whole
         w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms) VALUES ('run_x', 'job_x', 1, 'ses_x', 'terminal', 1, '{}', 0)");
         w.run("INSERT INTO messages (id, run_id, purpose) VALUES ('msg_x', 'run_x', 'prompt')");
         w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES ('e_x', 'run_x', 'ses_x', 'pods', 'p', 1)");
+        w.run("INSERT INTO origins (handle, origin) VALUES ('e_x', 'telemetry')");
         w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES ('f_x', 'run_x', 'unsure', '[]', '{}', '{}')");
         w.run("INSERT INTO occurrences (key, source, stream, at_ms, incident) VALUES ('k', 's', 's', 0, 'inc_1')");
         w.run("INSERT INTO hourly (incident, hour, count) VALUES ('inc_1', 1, 1)");

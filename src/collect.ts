@@ -66,7 +66,8 @@ type Severity = "error" | "warn" | "info";
  * built from parsed, recognised parts (see observe()); freshness everywhere comes from `observedMs`, never from when
  * Overwatch asked.
  */
-type Reading = { state: "ok" | "capped" | "gap" | "failed"; missed: number | null; observedMs?: number };
+/** A reading's outcome. Anything not failed says when the provider observed it: no reading is fresh by default. */
+type Reading = { state: "failed"; missed: null } | { state: "ok" | "capped" | "gap"; missed: number | null; observedMs: number };
 const observe = (complete: boolean, observedMs: number): Reading => ({ state: complete ? "ok" : "gap", missed: null, observedMs });
 type Bucket = { title: string; severity: Severity; reading: string; inexact: boolean; seen: boolean };
 
@@ -257,6 +258,14 @@ export class Collector {
     return this.running;
   }
 
+  /** Each kind's reader, exhaustive by type; a kind without one fails closed rather than borrowing another's. */
+  private reader(source: Source): (s: Source) => Promise<unknown> {
+    const readers: { readonly [K in Source["kind"]]: (s: Source) => Promise<unknown> } = { kubernetes: (s) => this.kubernetes(s), datadog: (s) => this.datadog(s) };
+    const read = readers[source.kind];
+    if (!read) throw new Error(`no reader for source kind ${String(source.kind)}`);
+    return read;
+  }
+
   private bounded = false;
   private async passOnce() {
     // Each source's next probe gets its live bound once, from the stored time and delay, counted from when this
@@ -278,8 +287,7 @@ export class Collector {
         try {
           const earlier = this.refused.get(endpoint(source));
           if (earlier) throw earlier;
-          if (source.kind === "kubernetes") await this.kubernetes(source);
-          else await this.datadog(source);
+          await this.reader(source)(source);
         } catch (error) {
           if (error instanceof Full) throw error;
           if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) this.refused.set(endpoint(source), error);
@@ -363,10 +371,10 @@ export class Collector {
    * time cannot be placed and is a gap. Returns the pod list taken after the read.
    */
   private async logs(t: Target, source: Source, slice: Slice, before: ReadonlyArray<Pod>): Promise<Pod[]> {
-    const order: Reading["state"][] = ["ok", "gap", "capped", "failed"];
-    let state: Reading = { state: before.length > LIMITS.podsPerSource ? "capped" : "ok", missed: null };
+    const order: Reading["state"][] = ["ok", "gap", "capped", "failed"], at = clock.now();
+    let state: Reading = { state: before.length > LIMITS.podsPerSource ? "capped" : "ok", missed: null, observedMs: at };
     const worse = (s: Reading["state"]) => {
-      if (order.indexOf(s) > order.indexOf(state.state)) state = { state: s, missed: null };
+      if (order.indexOf(s) > order.indexOf(state.state)) state = s === "failed" ? { state: s, missed: null } : { state: s, missed: null, observedMs: at };
     };
     type Line = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn"; text: string };
     const reads: Array<{ uid: string; container: string; identity: string; lines: Line[] }> = [];
@@ -425,7 +433,7 @@ export class Collector {
       }
       for (const x of r.lines) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity, "logs", x.text);
     }
-    if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice };
+    if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: at };
     slice.readings.set("logs", state);
     return after;
   }
@@ -444,7 +452,7 @@ export class Collector {
           const p = problem(`WARN ${e.reason}: ${e.message}`, source.words, "warn")!;
           slice.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
-        slice.readings.set("events", { state: "ok", missed: null });
+        slice.readings.set("events", observe(true, now));
       }
     }
     if (source.readings.includes("workloads")) {
@@ -452,7 +460,7 @@ export class Collector {
       if (r.code !== 0) this.refusedReading(slice, "workloads", r.stderr);
       else {
         slice.revision = parseRevision(r.stdout);
-        slice.readings.set("workloads", { state: slice.revision ? "ok" : "gap", missed: null });
+        slice.readings.set("workloads", observe(!!slice.revision, now));
       }
       slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: now });
     }
@@ -465,7 +473,7 @@ export class Collector {
         const limited = pods.flatMap((p) => p.containers.filter((c) => c.memoryLimit).map((c) => ({ pod: p.name, container: c.name, limit: c.memoryLimit! })));
         const used = limited.map((c) => rows.find((row) => row.pod === c.pod && row.container === c.container)?.memory ?? null);
         if (limited.length && used.every((m) => m !== null)) worst = Math.max(...used.map((m, i) => (100 * m!) / limited[i]!.limit));
-        slice.readings.set("usage", { state: worst === null ? "gap" : "ok", missed: null });
+        slice.readings.set("usage", observe(worst !== null, now));
       }
       slice.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: now });
     }
@@ -598,9 +606,11 @@ export class Collector {
         w.run(
           `INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
-          source.id as Clean, reading as Clean, r.state as Clean, now, r.state === "failed" ? null : Math.min(now, r.observedMs ?? now),
+          // Both times are the provider's: when it observed (or, failed, when it last refused). Nothing records the
+          // time Overwatch asked, so no consumer can take that for freshness.
+          source.id as Clean, reading as Clean, r.state as Clean, r.state === "failed" ? now : Math.min(now, r.observedMs), r.state === "failed" ? null : Math.min(now, r.observedMs),
         );
-        if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - (r.observedMs ?? now)));
+        if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - r.observedMs));
       }
       if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
       if (slice.revision) this.deploy(w, source, slice.revision);

@@ -217,6 +217,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       res.end();
     });
   });
+  if (options.collect) await agents.start(1000); // notices left waiting go out first ("retried at start")
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.port, "127.0.0.1", resolve);
