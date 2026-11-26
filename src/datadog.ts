@@ -59,7 +59,8 @@ export interface DatadogLog {
 }
 
 /** Every log in [from, to], page by page; `each` sees them as they arrive. */
-export async function searchLogs(source: Source, from: number, to: number, each: (log: DatadogLog) => void): Promise<void> {
+/** Every log in [from, to], page by page. Returns whether every page had the shape a complete answer has. */
+export async function searchLogs(source: Source, from: number, to: number, each: (log: DatadogLog) => void): Promise<boolean> {
   let cursor: string | null = null;
   for (let page = 0; page < 10_000; page++) {
     const body = {
@@ -68,14 +69,17 @@ export async function searchLogs(source: Source, from: number, to: number, each:
       sort: "timestamp",
     };
     const reply = rec(await request(source, "/api/v2/logs/events/search", { method: "POST", body }));
+    // A complete page is built from recognised parts: a data list. Anything else is not "nothing happened".
+    if (!Array.isArray(reply.data)) return false;
     for (const row of list(reply.data)) {
       const a = rec(rec(row).attributes);
       each({ id: str(rec(row).id), at: time(a.timestamp), message: typeof a.message === "string" ? a.message : "", status: str(a.status) ?? "error" });
     }
     const after = rec(rec(reply.meta).page).after;
-    if (typeof after !== "string" || !after) return;
+    if (typeof after !== "string" || !after) return true;
     cursor = after;
   }
+  return false;
 }
 
 export interface Monitor {
@@ -84,13 +88,13 @@ export interface Monitor {
   readonly state: string | null;
 }
 
-export async function monitors(source: Source): Promise<Monitor[]> {
+/** The monitors, and whether the answer was complete: a list whose every monitor has an ID and a state. */
+export async function monitors(source: Source): Promise<{ monitors: Monitor[]; complete: boolean }> {
   const reply = await request(source, `/api/v1/monitor?monitor_tags=&name=&tags=${encodeURIComponent(source.query ?? "")}`);
-  // A monitor without a readable state is not reported as OK: it is left out, and the reading is incomplete.
-  return list(reply).map(rec).flatMap((m) => {
-    const id = num(m.id) ?? str(m.id);
-    return id === null ? [] : [{ id: String(id), name: str(m.name) ?? `monitor ${id}`, state: str(m.overall_state) }];
-  });
+  if (!Array.isArray(reply)) return { monitors: [], complete: false };
+  const all = list(reply).map(rec).map((m) => ({ id: num(m.id) ?? str(m.id), name: str(m.name), state: str(m.overall_state) }));
+  const known = all.filter((m) => m.id !== null && m.state !== null).map((m) => ({ id: String(m.id), name: m.name ?? `monitor ${m.id}`, state: m.state }));
+  return { monitors: known, complete: known.length === all.length };
 }
 
 /** The latest point of the configured metric over the window. */

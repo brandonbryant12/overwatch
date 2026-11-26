@@ -12,10 +12,18 @@ import { endpoint, IDENTITY, quietStep } from "../src/collect.ts";
 import { LIMITS, parseConfig, type Source } from "../src/config.ts";
 import { act, ask, deadlines } from "../src/inbox.ts";
 import { num, sample } from "../src/parse.ts";
-import { Full, REFERENCES, Store, json, type Clean } from "../src/store.ts";
+import { Full, references, Store, json, type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "ow-class-test-"));
+const REFS = (() => {
+  const store = Store.own(dir());
+  try {
+    return references((sql) => store.all(sql));
+  } finally {
+    store.close();
+  }
+})();
 const config = (dataDir: string) =>
   parseConfig(
     { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop" } } } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },
@@ -155,7 +163,8 @@ test("class: retention never removes a finding or evidence a finding cites, at a
 test("class: a restored copy that breaks any declared reference is refused whole", () => {
   const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
   fc.assert(
-    fc.property(fc.constantFrom(...REFERENCES.filter(([t]) => t !== "citations")), (ref) => {
+    // Every reference the schema implies, read from the schema itself: a new table's references are covered without a list.
+    fc.property(fc.constantFrom(...REFS.filter(([t, c]) => t !== "citations" && t !== "notifications" && !(t === "work" && c === "run_id"))), (ref) => {
       const { d, store, config } = withIncident();
       ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }, "rk_" + "b".repeat(24));
       store.tx((w) => {
@@ -182,7 +191,7 @@ test("class: a restored copy that breaks any declared reference is refused whole
       assert.deepEqual(store.all("SELECT * FROM incidents"), before);
       store.close();
     }),
-    { numRuns: REFERENCES.length * 2 },
+    { numRuns: REFS.length * 2 },
   );
 });
 

@@ -23,8 +23,9 @@ export interface Code {
 }
 
 /** What a run may read: its telemetry lines (by source name) and the repository its pinned commit is in. */
+export type Origin = "telemetry" | "code" | "history" | "generated";
 export interface RunContext {
-  readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string }>>>;
+  readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>;
   readonly repo: string | null;
   /** The run's end on the service's monotonic clock: the same value the driver waits on. */
   readonly deadline: number;
@@ -161,11 +162,12 @@ export class Tools {
   }
 
   /** Stores pieces for a run (reusing a handle for the same text) and returns them, within the session's limits. */
-  private deliver(run: RunRow, source: string, texts: ReadonlyArray<string>): { pieces: Piece[]; truncated: boolean } {
+  /** Stores pieces with their typed origin: what the evidence is (observed telemetry, code, history, generated text), whatever its source is called. */
+  private deliver(run: RunRow, source: string, texts: ReadonlyArray<string>, origin: Origin | ReadonlyArray<Origin>): { pieces: Piece[]; truncated: boolean } {
     let truncated = false;
     const pieces: Piece[] = [];
     this.store.tx((w) => {
-      for (const raw of texts) {
+      for (const [n, raw] of texts.entries()) {
         const bounded = clean(raw, LIMITS.pieceBytes * 4);
         const text = truncate(bounded, LIMITS.pieceBytes) as Clean;
         if (text !== bounded) truncated = true;
@@ -181,7 +183,7 @@ export class Tools {
           continue;
         }
         const handle = `e_${randomBytes(12).toString("hex")}`;
-        w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, ?, ?, ?)", handle as Clean, run.id as Clean, run.session_id as Clean, source as Clean, text, ordinal);
+        w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal, origin) VALUES (?, ?, ?, ?, ?, ?, ?)", handle as Clean, run.id as Clean, run.session_id as Clean, source as Clean, text, ordinal, (typeof origin === "string" ? origin : origin[n]!) as Clean);
         pieces.push({ handle, source, text });
       }
       w.event("evidence", run.id as Clean, { source, pieces: pieces.length, truncated });
@@ -207,7 +209,8 @@ export class Tools {
       offset = Number(m[1]);
     }
     const ordered = lines.map((l, i) => ({ ...l, i })).sort((a, b) => a.at - b.at || a.i - b.i);
-    const page = this.deliver(run, source, ordered.slice(offset, offset + PAGE).map((l) => `${new Date(l.at).toISOString()} ${l.text}`));
+    const slice = ordered.slice(offset, offset + PAGE);
+    const page = this.deliver(run, source, slice.map((l) => `${new Date(l.at).toISOString()} ${l.text}`), slice.map((l) => l.origin ?? "telemetry"));
     const nextCursor = offset + PAGE < ordered.length ? `c${offset + PAGE}_${bind}` : null;
     return { pieces: page.pieces, truncated: page.truncated, nextCursor };
   }
@@ -228,7 +231,7 @@ export class Tools {
       const r = await git("show", `${code.read}:${file}`);
       if (r.code !== 0) throw new Refusal(`${file} is not in commit ${code.read.slice(0, 12)}`);
       const lines = r.stdout.split("\n").slice(from - 1, to);
-      return this.deliver(run, "code", [`${file}:${from}-${to}\n${lines.join("\n")}`]);
+      return this.deliver(run, "code", [`${file}:${from}-${to}\n${lines.join("\n")}`], "code");
     }
     if (name === "ow_code_search") {
       only(input, ["pattern", "path"]);
@@ -236,13 +239,13 @@ export class Tools {
       const file = path(input.path, false);
       const r = await git("grep", "-n", "-F", "-e", input.pattern, code.read, ...(file ? ["--", file] : []));
       const matches = r.stdout.split("\n").filter(Boolean).slice(0, 50).map((l) => l.slice(code.read!.length + 1));
-      return this.deliver(run, "code", matches);
+      return this.deliver(run, "code", matches, "code");
     }
     only(input, ["path", "ref"]);
     if (input.ref !== undefined && input.ref !== code.read) throw new Refusal(`ref must be the pinned commit ${code.read}`);
     const file = path(input.path, false);
     const r = await git("log", "-n", "20", "--format=%H %ad %s", "--date=iso-strict", code.read, ...(file ? ["--", file] : []));
-    return this.deliver(run, "history", r.stdout.split("\n").filter(Boolean));
+    return this.deliver(run, "history", r.stdout.split("\n").filter(Boolean), "history");
   }
 
   private finding(run: RunRow, code: Code, input: Record<string, unknown>) {

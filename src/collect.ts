@@ -22,8 +22,8 @@ import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
 import { Full, type Clean, type Store, type Writer } from "./store.ts";
 import { sample, UNMEASURED, type Sample } from "./parse.ts";
-import { afterChange, afterDeploy, groupNow, hourly } from "./inbox.ts";
-import { announce, queueInvestigation } from "./agents.ts";
+import { afterChange, afterDeploy, announce, groupNow, hourly } from "./inbox.ts";
+import { queueInvestigation } from "./agents.ts";
 import { approvalKey } from "./trial.ts";
 
 const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -61,7 +61,13 @@ export function problem(text: string, words: Words = DEFAULT_WORDS, given?: "err
 }
 
 type Severity = "error" | "warn" | "info";
-type Reading = { state: "ok" | "capped" | "gap" | "failed"; missed: number | null };
+/**
+ * One reading of one kind: its state, and when the provider says what it returned was observed. "ok" is only ever
+ * built from parsed, recognised parts (see observe()); freshness everywhere comes from `observedMs`, never from when
+ * Overwatch asked.
+ */
+type Reading = { state: "ok" | "capped" | "gap" | "failed"; missed: number | null; observedMs?: number };
+const observe = (complete: boolean, observedMs: number): Reading => ({ state: complete ? "ok" : "gap", missed: null, observedMs });
 type Bucket = { title: string; severity: Severity; reading: string; inexact: boolean; seen: boolean };
 
 /** A container's identity: its current and previous instance. */
@@ -96,6 +102,8 @@ export class Slice {
   readonly admitted: Array<{ key: string; stream: string; at: number; bucket: string; text: string }> = [];
   readonly buckets = new Map<string, Bucket>();
   readonly baselines: Array<{ key: string; count: number; bucket: string }> = [];
+  /** State kept beside the counts (whether a monitor is alerting), never counted itself. */
+  readonly marks: Array<{ key: string; count: number }> = [];
   readonly readings = new Map<string, Reading>();
   /** Gauge samples; null is a sample that could not be measured. */
   readonly metrics: Array<{ name: string; reading: string; sample: Sample; at: number }> = [];
@@ -249,7 +257,16 @@ export class Collector {
     return this.running;
   }
 
+  private bounded = false;
   private async passOnce() {
+    // Each source's next probe gets its live bound once, from the stored time and delay, counted from when this
+    // process started: a wall clock moved backwards cannot postpone it, and time already elapsed counts.
+    if (!this.bounded) {
+      this.bounded = true;
+      const { now, mono } = clock.start;
+      for (const r of this.store.all<{ id: string; next_ms: number; delay_ms: number | null }>("SELECT id, next_ms, delay_ms FROM sources WHERE next_ms IS NOT NULL"))
+        this.nextMono.set(r.id, mono + Math.min(Math.max(0, r.next_ms - now), r.delay_ms ?? this.config.sources.find((x) => x.id === r.id)?.everyMs ?? 60_000));
+    }
     const roomy = this.room(true);
     this.store.reclaim(); // what was freed goes back to the disk a bounded step per pass
     if (!roomy) return;
@@ -464,29 +481,35 @@ export class Collector {
       try {
         if (source.readings.includes("logs")) {
           let unplaced = false;
-          await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
+          const recognised = await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
             if (log.at === null || log.id === null) return void (unplaced = true); // cannot be placed or counted once
             const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
             if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message);
           });
-          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice } : { state: unplaced ? "gap" : "ok", missed: null });
+          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: end } : observe(recognised && !unplaced, end));
         }
         if (end === w.now && source.readings.includes("monitors")) {
-          let unknown = false;
-          for (const m of await datadog.monitors(source)) {
-            if (m.state === null) unknown = true;
-            if (!m.state || !/^(alert|warn)/i.test(m.state)) continue;
-            const severity = /^alert/i.test(m.state) ? "error" : "warn";
-            // One incident per monitor across Warn and Alert; each change of state counts once.
-            slice.counter(sha("dd-monitor", source.id, m.id, m.state), 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
+          const answer = await datadog.monitors(source);
+          for (const m of answer.monitors) {
+            // One incident per monitor across Warn and Alert. Its count is the number of transitions into alerting:
+            // an OK that alerts again is counted again; staying in alert, or moving between Warn and Alert, is not.
+            const alerting = /^(alert|warn)/i.test(m.state!);
+            const stateKey = sha("dd-monitor-alerting", source.id, m.id), countKey = sha("dd-monitor-transitions", source.id, m.id);
+            const was = (this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", stateKey)?.count ?? 0) === 1;
+            const transitions = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", countKey)?.count ?? 0;
+            slice.marks.push({ key: stateKey, count: alerting ? 1 : 0 });
+            if (!alerting) continue;
+            const severity = /^alert/i.test(m.state!) ? "error" : "warn";
+            slice.counter(countKey, was ? transitions : transitions + 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
           }
-          slice.readings.set("monitors", { state: unknown ? "gap" : "ok", missed: null });
+          slice.readings.set("monitors", observe(answer.complete, end));
         }
         if (end === w.now && source.readings.includes("metrics")) {
           const point = await datadog.metric(source, end - source.everyMs, end);
           slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? end });
-          slice.readings.set("metrics", { state: point ? "ok" : "gap", missed: null });
+          // Fresh as of the point's own time: an old point returned again is not a new measurement.
+          slice.readings.set("metrics", observe(point !== null, point?.at ?? 0));
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
@@ -529,6 +552,8 @@ export class Collector {
         hourly(w, incidentId(source, record.bucket), record.at);
         recent.set(record.bucket, [...(recent.get(record.bucket) ?? []).slice(-(LIMITS.linesPerProblem - 1)), record]);
       }
+      for (const m of slice.marks)
+        w.run("INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = excluded.count, seen_ms = excluded.seen_ms", m.key as Clean, source.id as Clean, m.count, now);
       for (const b of slice.baselines) {
         const before = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", b.key)?.count ?? 0;
         if (b.count > before) {
@@ -573,9 +598,9 @@ export class Collector {
         w.run(
           `INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
-          source.id as Clean, reading as Clean, r.state as Clean, now, r.state === "failed" ? null : now,
+          source.id as Clean, reading as Clean, r.state as Clean, now, r.state === "failed" ? null : Math.min(now, r.observedMs ?? now),
         );
-        if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono());
+        if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - (r.observedMs ?? now)));
       }
       if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
       if (slice.revision) this.deploy(w, source, slice.revision);
@@ -703,10 +728,16 @@ export class SourceFailure extends Error {
 }
 
 /** What a refusal is shared by: a cluster context, or a Datadog site and key. */
-export const endpoint = (s: Source) => JSON.stringify(s.kind === "kubernetes" ? ["kubernetes", s.context] : ["datadog", s.baseUrl, s.apiKey, s.appKey]);
-
-/** The fields that identify a connection: two sources share a refusal only if every one of them is equal. */
-export const IDENTITY = { kubernetes: ["context"], datadog: ["baseUrl", "apiKey", "appKey"] } as const;
+/**
+ * The fields that identify a connection, one entry per source kind: two sources share a refusal only if every one is
+ * equal. Typed by kind, so a new kind does not compile until it has one, and an unknown kind fails at run time.
+ */
+export const IDENTITY: { readonly [K in Source["kind"]]: ReadonlyArray<keyof Source> } = { kubernetes: ["context"], datadog: ["baseUrl", "apiKey", "appKey"] };
+export const endpoint = (s: Source) => {
+  const fields = IDENTITY[s.kind];
+  if (!fields) throw new Error(`no connection identity for source kind ${String(s.kind)}`);
+  return JSON.stringify([s.kind, ...fields.map((f) => s[f] ?? null)]);
+};
 
 /**
  * One step of an active problem's count toward Quiet: an interval that found it again restarts the count; one that

@@ -103,7 +103,7 @@ test("after compaction the file shrinks, a bounded number of bytes at a time", (
   for (let i = 0; i < 40; i++) store.tx((w) => { for (let j = 0; j < 50; j++) w.event("slice", "s" as Clean, { words, i, j }); });
   assert.equal(store.reclaim(), 0);
   store.retain(Date.now(), () => true, 10);
-  store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  store.checkpoint();
   const full = size();
   assert.ok(full > 10 * 1024 ** 2, `wrote ${full} bytes`);
   const sizes = [full];

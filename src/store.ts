@@ -113,8 +113,9 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   {
     name: "evidence",
     ddl: `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL,
-      text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`,
-    columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
+      text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL,
+      origin TEXT NOT NULL DEFAULT 'telemetry' CHECK (origin IN ('telemetry','code','history','generated')), UNIQUE (run_id, source, ordinal))`,
+    columns: ["handle", "run_id", "session_id", "source", "text", "ordinal", "origin"],
   },
   {
     name: "hourly",
@@ -125,15 +126,15 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     name: "asks",
     ddl: `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')),
       text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL,
-      state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT)`,
-    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason"],
+      state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT, message TEXT)`,
+    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason", "message"],
   },
   {
     // Agent work, one item per reading, challenge or answer: the queue the two slots take from, owner questions first.
     name: "work",
     ddl: `CREATE TABLE work (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), kind TEXT NOT NULL CHECK (kind IN ('reading','challenge','answer')),
       slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0,
-      ask_key TEXT, run_id TEXT, reason TEXT, seq INTEGER NOT NULL)`,
+      ask_key TEXT, run_id TEXT REFERENCES runs(id), reason TEXT, seq INTEGER NOT NULL)`,
     columns: ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"],
   },
   {
@@ -150,7 +151,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   },
   {
     name: "notifications",
-    ddl: `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL, cause_seq INTEGER NOT NULL,
+    ddl: `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES incidents(id), cause_seq INTEGER NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER,
       reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`,
     columns: ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"],
@@ -237,27 +238,28 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["asks", "session_id", "session_id TEXT"],
   ["asks", "answer", "answer TEXT"],
   ["asks", "reason", "reason TEXT"],
+  ["asks", "message", "message TEXT"],
+  ["evidence", "origin", "origin TEXT NOT NULL DEFAULT 'telemetry'"],
   ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
 ];
 
 /**
- * Every reference between tables, declared once: restore refuses a copy that breaks any of them. A new table is
- * covered by adding its line here (the database also enforces the ones declared with REFERENCES in the DDL).
+ * References are read from the schema, never from a list someone keeps: a column whose name is a key of another
+ * table (`run_id`, `job_id`, `incident`, `finding`, `handle`) refers to that table, in every table that has it, now or
+ * later. Columns declared with SQL REFERENCES are also checked by the database (foreign_key_check).
  */
-export const REFERENCES: ReadonlyArray<[table: string, column: string, parent: string, key: string]> = [
-  ["runs", "job_id", "jobs", "id"],
-  ["messages", "run_id", "runs", "id"],
-  ["evidence", "run_id", "runs", "id"],
-  ["findings", "run_id", "runs", "id"],
-  ["citations", "finding", "findings", "id"],
-  ["citations", "handle", "evidence", "handle"],
-  ["occurrences", "incident", "incidents", "id"],
-  ["hourly", "incident", "incidents", "id"],
-  ["asks", "job_id", "jobs", "id"],
-  ["work", "job_id", "jobs", "id"],
-  ["corrections", "job_id", "jobs", "id"],
-  ["lines", "incident", "incidents", "id"],
-];
+const VOCABULARY: Readonly<Record<string, [parent: string, key: string]>> = {
+  run_id: ["runs", "id"], job_id: ["jobs", "id"], incident: ["incidents", "id"], finding: ["findings", "id"], handle: ["evidence", "handle"],
+};
+export function references(read: (sql: string) => Array<{ name: string }>): Array<[table: string, column: string, parent: string, key: string]> {
+  const tables = read("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").map((t) => t.name);
+  return tables.flatMap((table) =>
+    read(`SELECT name FROM pragma_table_info('${table}')`).flatMap(({ name }) => {
+      const ref = VOCABULARY[name];
+      return ref && ref[0] !== table ? [[table, name, ref[0], ref[1]] as [string, string, string, string]] : [];
+    }),
+  );
+}
 
 /**
  * What every consistent database satisfies beyond its column constraints: each query counts violations. Restore
@@ -267,8 +269,6 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
   ["a row refers to a sequence number that was never issued", `SELECT (SELECT count(*) FROM incidents WHERE seq > h.s) + (SELECT count(*) FROM coverage WHERE seq > h.s)
     + (SELECT count(*) FROM deploys WHERE seq > h.s) + (SELECT count(*) FROM jobs WHERE created_seq > h.s) + (SELECT count(*) FROM events WHERE seq > h.s)
     FROM (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0) AS s) h`],
-  ["a row refers to a row that does not exist", REFERENCES.map(([table, column, parent, key]) =>
-    `(SELECT count(*) FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent}))`).join(" + ").replace(/^/, "SELECT ")],
   ["a disposition or return names a sequence number that was never issued", `SELECT count(*) FROM incidents, (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0) AS s) h
     WHERE coalesce(json_extract(way, '$.seq'), 0) > h.s OR coalesce(json_extract(returned, '$.seq'), 0) > h.s OR seen_seq > h.s OR first_seq > h.s`],
   ["a finding cites evidence that is not stored for its own run", `SELECT count(*) FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
@@ -321,19 +321,28 @@ function normal(value: unknown): number | bigint | null | string {
   throw new Error(`the writer cannot store ${typeof value}`);
 }
 
+/** Writes inside one transaction. Each transaction gets its own, and it is dead once that transaction ends: a writer
+ * kept past its callback cannot write without admission. */
 export class Writer {
-  private readonly db: DatabaseSync;
+  #db: DatabaseSync | null;
   constructor(db: DatabaseSync) {
-    this.db = db;
+    this.#db = db;
+  }
+  end() {
+    this.#db = null;
+  }
+  get #open(): DatabaseSync {
+    if (!this.#db) throw new Error("this writer's transaction has ended");
+    return this.#db;
   }
   run(sql: string, ...params: ReadonlyArray<Param>): { changes: number; lastInsertRowid: number } {
-    const result = this.db.prepare(sql).run(...params.map(normal));
+    const result = this.#open.prepare(sql).run(...params.map(normal));
     tick();
     return { changes: Number(result.changes), lastInsertRowid: Number(result.lastInsertRowid) };
   }
   /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
   next(): number {
-    return ((this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0) + 1;
+    return ((this.#open.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0) + 1;
   }
   /** Appends to the log and returns its seq. */
   event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): number {
@@ -342,14 +351,12 @@ export class Writer {
 }
 
 export class Store {
-  readonly writer: Writer;
   private listeners = new Set<() => void>();
-  readonly db: DatabaseSync;
+  readonly #db: DatabaseSync;
   readonly file: string;
   constructor(db: DatabaseSync, file: string) {
-    this.db = db;
+    this.#db = db;
     this.file = file;
-    this.writer = new Writer(db);
     // One case-folding for every literal match: Unicode, not SQLite's ASCII-only lower().
     db.function("fold", { deterministic: true }, (v) => (typeof v === "string" ? fold(v) : v));
   }
@@ -429,23 +436,47 @@ export class Store {
    */
   guard: (() => void) | null = null;
 
-  tx<A>(work: (w: Writer) => A, maintenance = false): A {
-    if (!maintenance) this.guard?.();
-    this.db.exec("BEGIN IMMEDIATE");
+  tx<A>(work: (w: Writer) => A): A {
+    this.guard?.();
+    return this.#transact(work);
+  }
+
+  /**
+   * Making room (age, pressure) is the only write that passes without admission; it is private to the store, so no
+   * caller can carry a business write through it. Its events are only `compacted`.
+   */
+  #maintain(work: (w: Writer) => number, step: string, throughSeq: number) {
+    return this.#transact((w) => {
+      const removed = work(w);
+      w.event("compacted", null, { step, removed, throughSeq });
+      return removed;
+    });
+  }
+
+  /** Lets the write-ahead log go back to the file system (tests measure the file). */
+  checkpoint() {
+    this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
+  #transact<A>(work: (w: Writer) => A): A {
+    this.#db.exec("BEGIN IMMEDIATE");
     // References are checked when the change commits, as one whole: a violation rolls the transaction back.
-    this.db.exec("PRAGMA defer_foreign_keys = ON");
+    this.#db.exec("PRAGMA defer_foreign_keys = ON");
     let result: A;
+    const writer = new Writer(this.#db);
     try {
-      result = work(this.writer);
-      this.db.exec("COMMIT");
+      result = work(writer);
+      this.#db.exec("COMMIT");
     } catch (error) {
       // A failed change is undone whole. (A statement that raises leaves the transaction open, so this always runs.)
       try {
-        this.db.exec("ROLLBACK");
+        this.#db.exec("ROLLBACK");
       } catch {
         // SQLite already rolled back.
       }
       throw error;
+    } finally {
+      writer.end();
     }
     tick();
     for (const listener of this.listeners) listener();
@@ -453,10 +484,10 @@ export class Store {
   }
 
   all<T = Record<string, unknown>>(sql: string, ...params: ReadonlyArray<number | string | null>): T[] {
-    return this.db.prepare(sql).all(...params) as T[];
+    return this.#db.prepare(sql).all(...params) as T[];
   }
   get<T = Record<string, unknown>>(sql: string, ...params: ReadonlyArray<number | string | null>): T | undefined {
-    return this.db.prepare(sql).get(...params) as T | undefined;
+    return this.#db.prepare(sql).get(...params) as T | undefined;
   }
   seq(): number {
     return (this.get<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")?.seq ?? 0) as number;
@@ -470,7 +501,7 @@ export class Store {
   }
   close() {
     try {
-      this.db.close();
+      this.#db.close();
     } catch {
       // Already closed.
     }
@@ -480,7 +511,7 @@ export class Store {
   backup(target: string): { file: string; seq: number } {
     if (existsSync(target)) throw new Error(`${target} exists; choose a new file`);
     const seq = this.seq();
-    this.db.prepare("VACUUM INTO ?").run(target);
+    this.#db.prepare("VACUUM INTO ?").run(target);
     return { file: target, seq };
   }
 
@@ -534,6 +565,10 @@ export class Store {
           w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
           const broken = this.all<{ table: string; parent: string }>("PRAGMA foreign_key_check");
           if (broken.length) throw new Error(`a ${broken[0]!.table} row refers to a ${broken[0]!.parent} row that does not exist (${broken.length})`);
+          for (const [table, column, parent, key] of references((sql) => this.all(sql))) {
+            const n = this.get<{ n: number }>(`SELECT count(*) AS n FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent})`)!.n;
+            if (n) throw new Error(`a ${table}.${column} refers to a ${parent} row that does not exist (${n})`);
+          }
           for (const [what, sql] of INVARIANTS) {
             const violations = Object.values(this.get<Record<string, number>>(sql) ?? {})[0] ?? 0;
             if (violations > 0) throw new Error(`${what} (${violations})`);
@@ -576,8 +611,8 @@ export class Store {
     // n data pages and at most ceil(n / perMap) + 1 pointer-map pages must fit in the budget.
     const pages = Math.max(0, Math.floor(((budget - 2) * perMap) / (perMap + 1)));
     if (pages === 0) return pragma("freelist_count");
-    this.db.prepare(`PRAGMA incremental_vacuum(${pages})`).all();
-    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    this.#db.prepare(`PRAGMA incremental_vacuum(${pages})`).all();
+    this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     return pragma("freelist_count");
   }
 
@@ -602,12 +637,7 @@ export class Store {
     ];
     const any = due.some((sql) => this.get(sql.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1") !== undefined);
     if (!any) return 0;
-    return this.tx((w) => {
-      let removed = 0;
-      for (const sql of due) removed += w.run(sql).changes;
-      w.event("compacted", null, { step: "age", removed, throughSeq: 0 });
-      return removed;
-    }, true);
+    return this.#maintain((w) => due.reduce((n, sql) => n + w.run(sql).changes, 0), "age", 0);
   }
 
   /**
@@ -616,13 +646,13 @@ export class Store {
    */
   retain(now: number, over: () => boolean, keepEvents = 10_000): void {
     if (over()) {
-      this.tx((w) => {
-        const throughSeq = Math.max(0, this.seq() - keepEvents);
+      const throughSeq = Math.max(0, this.seq() - keepEvents);
+      this.#maintain((w) => {
         w.run("UPDATE maintenance SET active = 1");
         const removed = w.run("DELETE FROM events WHERE seq <= ?", throughSeq).changes;
         w.run("UPDATE maintenance SET active = 0");
-        w.event("compacted", null, { step: "events", removed, throughSeq });
-      }, true);
+        return removed;
+      }, "events", throughSeq);
     }
     if (over()) this.expire(now);
   }
