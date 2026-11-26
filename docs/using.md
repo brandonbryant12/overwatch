@@ -329,11 +329,20 @@ the revert no longer applies, or the base moves before publication, the candidat
 again. A verified change is pushed to `ow/fix/<attempt>` and opened as a draft. The item shows the diff, why it was
 eligible, what verify ran and its result, and the draft's number and state.
 
+**Publishing, step by step.** Overwatch asks the host whether the branch is protected, pushes the verified commit,
+then looks for its draft and creates it if there is none, and reads each step back: the branch must hold exactly the
+verified commit, and the draft must name this attempt, its base and be a draft. Before each step it checks again that
+you have not declined or put the problem away, that both trials still stand, that the deployment and the base are the
+ones the change was made for, and (before the push) that protection is known to allow it. A step whose answer is
+missing or not exact is shown as such, with the reason and a few retries; after them the attempt is *unresolved* and
+`f` tries again. Every state on the item says what it waits for next.
+
 **Following it.** Overwatch reads the draft's state at most once a minute. Closed without merging: the problem stays
 open and this finding is not proposed again. Merged: it waits for a deployment in the same environment that contains
-the merge, then for three fresh, quiet, fully measured intervals; then the problem is Done by rule, with that
-history on the item. If you decided first (Done, Later, Never), your decision stands. Before publication you can
-decline an attempt; after it, close the pull request.
+the merge, then for three consecutive fresh, quiet, fully measured intervals (a failed or catch-up interval starts the
+count again); then the problem is Done by rule, with that history on the item. If you decided first (Done, Later,
+Never), your decision stands. You can decline an attempt at any time; if something already exists on the host (the
+branch, or the draft), the item says exactly what and how to remove it there.
 
 **The description** stands on its own for a reviewer: the problem, the finding with its votes and the challenger's
 outcome, the evidence quoted with its origin, what was verified and how, and that a model selected the change and
