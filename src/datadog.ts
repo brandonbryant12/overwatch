@@ -89,8 +89,8 @@ export interface Monitor {
   readonly state: string | null;
 }
 
-/** The states a monitor is documented to have; anything else is not understood, so the answer is incomplete. */
-const STATES = ["OK", "Alert", "Warn", "No Data", "Ignored", "Skipped", "Unknown"];
+/** The states that are a measurement: anything else, including Unknown and No Data, makes the answer incomplete. */
+const STATES = ["OK", "Alert", "Warn", "Ignored", "Skipped"];
 
 /** The monitors, and whether the answer was complete: a list whose every monitor has an ID and a state. */
 export async function monitors(source: Source): Promise<{ monitors: Monitor[]; complete: boolean }> {
@@ -113,7 +113,7 @@ export async function metric(source: Source, from: number, to: number): Promise<
     const u = rec(list(rec(series).unit)[0]);
     for (const point of list(rec(series).pointlist).reverse()) {
       const at = num(list(point)[0]), value = num(list(point)[1]);
-      if (at !== null && value !== null && at >= from - 1000 && at <= to + 1000)
+      if (at !== null && value !== null && at >= from && at <= to)
         return { name: `${str(rec(series).metric) ?? source.metric} (${source.metric})`, value, at, unit: str(u.name) ?? str(u.family) };
     }
   }

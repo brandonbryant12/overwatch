@@ -278,21 +278,6 @@ export function act(store: Store, config: Config, id: string, body: Record<strin
   return { seq };
 }
 
-/**
- * Done by rule, in the caller's transaction (a fix released and quiet): the same disposition the owner's Done makes,
- * recorded as Overwatch's, with its reason. Only an item without a way out: a decision the owner made wins.
- */
-export function doneByRule(w: Writer, store: Store, config: Config, id: string, reason: string): number | null {
-  const row = get(store, id);
-  if (!row || row.way) return null;
-  const now = clock.now(), grace = config.watchers.find((x) => x.app === row.app && x.environment === row.environment)?.everyMs ?? 600_000;
-  const next: Way = { kind: "done", seq: w.next(), untilMs: null, when: null, reason: clean(reason, 500), atMs: now, delayMs: grace, count: row.count, baseline: trailing(store, id), exact: row.exact === 1, severity: row.severity, previous: null };
-  if (w.event("action", id as Clean, { action: "done", previous: null, way: publicWay(next) }) !== next.seq) throw new Error("the event log moved during a rule's Done");
-  w.run("UPDATE incidents SET way = ?, decided_seq = ? WHERE id = ?", json(next), next.seq, id as Clean);
-  live.set(`${id}:${next.seq}`, clock.mono() + grace);
-  return next.seq;
-}
-
 /** GET /v2/items/:id */
 export function detail(store: Store, config: Config, id: string) {
   const row = rows(store).find((r) => r.id === id);

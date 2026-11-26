@@ -393,16 +393,21 @@ let issue: (p: Permit) => void = () => undefined;
 export class Permit {
   readonly kind: string;
   readonly seq: number;
+  /** The exact arguments this permit authorizes (operation, repository, branch, head, base): all must be in the call. */
+  readonly bind: ReadonlyArray<string>;
   #live = false;
   static {
     issue = (p) => void (p.#live = true);
   }
-  constructor(kind: string, seq: number) {
+  constructor(kind: string, seq: number, bind: ReadonlyArray<string> = []) {
     this.kind = kind;
     this.seq = seq;
+    this.bind = bind;
   }
-  spend(kind: string) {
+  spend(kind: string, args: ReadonlyArray<string> = []) {
     if (!this.#live || this.kind !== kind) throw new Error(`an outbound ${kind} needs a committed intent`);
+    const missing = this.bind.find((b) => !args.includes(b));
+    if (missing !== undefined) throw new Error(`this permit was not minted for that ${kind} (it binds ${missing})`);
     this.#live = false;
   }
 }
@@ -432,8 +437,8 @@ export class Writer {
   }
   readonly permits: Permit[] = [];
   /** Records an outbound effect's intent; the permit for it is live once this transaction commits. */
-  permit(kind: string, subject: string | null, data: unknown = {}): Permit {
-    const p = new Permit(kind, this.event("intent", subject, { kind, ...(data as object) }));
+  permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Permit {
+    const p = new Permit(kind, this.event("intent", subject, { kind, bind, ...(data as object) }), bind);
     this.permits.push(p);
     return p;
   }
@@ -547,8 +552,8 @@ export class Store {
   }
 
   /** One outbound effect's intent, in its own transaction; the returned permit is live. */
-  permit(kind: string, subject: string | null, data: unknown = {}): Permit {
-    return this.tx((w) => w.permit(kind, subject, data));
+  permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Permit {
+    return this.tx((w) => w.permit(kind, subject, data, bind));
   }
 
   /** Lets the write-ahead log go back to the file system (tests measure the file). */

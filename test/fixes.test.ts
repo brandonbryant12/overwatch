@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /**
  * Milestone 4, one property per class: the model's output is a selection, never bytes; the candidate is derived by
  * code and checked as a whole tree; verification is isolated; a forecast exists only when its conditions hold.
@@ -19,7 +20,7 @@ import { clock } from "../src/clock.ts";
 
 /** A bare repository with one file at `previous`, then `base`, and the two commits' IDs. */
 function repo(files: Record<string, string>, changed: Record<string, string | null>, executable: string[] = []) {
-  const bare = mkdtempSync(join(tmpdir(), "ow-fix-prop-")), work = mkdtempSync(join(tmpdir(), "ow-fix-work-"));
+  const bare = scratch("ow-fix-prop-"), work = scratch("ow-fix-work-");
   const git = (...a: string[]) => execFileSync("git", ["-C", work, "-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false", ...a], { encoding: "utf8" }).trim();
   execFileSync("git", ["init", "-q", "--bare", bare]);
   git("init", "-q");
@@ -84,7 +85,7 @@ test("class: a candidate that touches anything outside the policy, adds, deletes
 });
 
 test("class: the fixer's filing is a member of the options code computed, or it is refused and ends the run", async () => {
-  const store = Store.own(mkdtempSync(join(tmpdir(), "ow-proposal-")));
+  const store = Store.own(scratch("ow-proposal-"));
   clock.set(Date.UTC(2026, 10, 1), 1e6);
   const options: Options = { commits: [{ sha: "a".repeat(40), subject: "x" }, { sha: "b".repeat(40), subject: "y" }], keys: [{ path: "settings.json", key: "timeout" }] };
   const tools = new Tools(store);

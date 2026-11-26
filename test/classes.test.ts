@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /**
  * One property per class of defect: the rule lives in one place, and these generate the inputs or call sequences
  * that the next caller might bring, and check the invariant holds for all of them.
@@ -15,7 +16,7 @@ import { num, sample } from "../src/parse.ts";
 import { Full, references, Store, TABLES, json, type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
 
-const dir = () => mkdtempSync(join(tmpdir(), "ow-class-test-"));
+const dir = () => scratch("ow-class-test-");
 const REFS = references();
 const config = (dataDir: string) =>
   parseConfig(

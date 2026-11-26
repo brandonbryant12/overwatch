@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /**
  * The Kubernetes reader against a fake kubectl: identity around each log read, observed loss, catch-up in slices,
  * and problems from gauges with hysteresis.
@@ -16,7 +17,7 @@ import { snapshot } from "../src/snapshot.ts";
 import { clock } from "../src/clock.ts";
 
 const HOUR = 3_600_000;
-const bin = mkdtempSync(join(tmpdir(), "ow-fake-kubectl-"));
+const bin = scratch("ow-fake-kubectl-");
 const world = join(bin, "world.json");
 const calls = join(bin, "calls.jsonl");
 // A kubectl that answers from world.json: `listings` are the pod lists returned in turn (the last one repeats),
@@ -73,7 +74,7 @@ const set = (w: World) => {
 const at = (ms: number) => new Date(ms).toISOString().replace("Z", "000000Z");
 
 function rig(readings: string[] = ["logs"], namespaces = ["shop"]) {
-  const dataDir = mkdtempSync(join(tmpdir(), "ow-kube-test-"));
+  const dataDir = scratch("ow-kube-test-");
   const sources = Object.fromEntries(namespaces.map((namespace, i) => [i ? `pods${i}` : "pods", { type: "kubernetes", context: "lab", namespace, selector: "app=shop", readings }]));
   const config = parseConfig(
     { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },

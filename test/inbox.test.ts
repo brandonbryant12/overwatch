@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /** The kernel's ways out: deadlines on the stored-delay shape, return decisions, prompts by request key. */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -10,7 +11,7 @@ import { clock } from "../src/clock.ts";
 import { act, afterChange, ask, deadlines, detail, inbox, keyed, search } from "../src/inbox.ts";
 
 function rig() {
-  const dataDir = mkdtempSync(join(tmpdir(), "ow-inbox-test-"));
+  const dataDir = scratch("ow-inbox-test-");
   const config = parseConfig(
     { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop" } } } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },
     join(dataDir, "c.json"),

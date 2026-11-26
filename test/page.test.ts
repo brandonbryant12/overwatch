@@ -1,3 +1,4 @@
+import "./scratch.ts";
 /** The page's pure modules: freshness, frozen rows, staging, focus, the keyboard map and Later's words. */
 import test from "node:test";
 import assert from "node:assert/strict";

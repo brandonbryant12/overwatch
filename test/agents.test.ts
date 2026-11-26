@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /**
  * Milestone 3 classes: adjudication is a pure function of stored filings; the queue serves the owner first; a
  * playbook is the database's, rebuilt whole; owner tools never serve a session Overwatch runs; a team brief never
@@ -39,7 +40,7 @@ test("class: adjudication follows the decision table for every vote and challeng
 });
 
 function rig() {
-  const dataDir = mkdtempSync(join(tmpdir(), "ow-agents-test-"));
+  const dataDir = scratch("ow-agents-test-");
   const config = parseConfig(
     { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop" } } } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },
     join(dataDir, "c.json"),

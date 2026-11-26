@@ -5,6 +5,9 @@
  * checks that no other module imports child_process.
  */
 import { spawn } from "node:child_process";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Permit } from "./store.ts";
 
 export interface Result {
@@ -32,7 +35,7 @@ export function run(command: string, args: ReadonlyArray<string>, options: Optio
 
 /** An outbound effect: its permit is spent first, so it runs at most once per recorded intent. */
 export function effect(permit: Permit, command: string, args: ReadonlyArray<string>, options: Options = {}): Promise<Result> {
-  permit.spend(outbound(command, args) ?? "read");
+  permit.spend(outbound(command, args) ?? "read", args);
   return start(command, args, options);
 }
 
@@ -129,4 +132,19 @@ export async function secret(ref: string): Promise<string | null> {
   if (!m) return null;
   const r = await run("security", ["find-generic-password", "-s", m[1]!, "-a", m[2]!, "-w"], { timeoutMs: 10_000 });
   return r.code === 0 ? r.stdout.trim() || null : null;
+}
+
+/** A private scratch folder named for this process, so a later start can tell an orphan from a live one. */
+export const scratch = (prefix: string) => mkdtempSync(join(tmpdir(), `${prefix}${process.pid}-`));
+/** At start: remove the scratch of processes that no longer run (a killed verify, demo, trial or calibration). */
+export function sweep() {
+  for (const n of readdirSync(tmpdir())) {
+    const pid = Number(/^(?:overwatch-(?:demo|trial)|ow-(?:verify|fix|pr|calibration|calibration-work))-(\d+)-/.exec(n)?.[1] ?? 0);
+    if (!pid || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ESRCH") rmSync(join(tmpdir(), n), { recursive: true, force: true });
+    }
+  }
 }

@@ -4,17 +4,17 @@
  * noise, QA's cluster is signed out, and an older incident has been resolved.
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseConfig, type Config } from "./config.ts";
+import { scratch } from "./exec.ts";
 import { clock } from "./clock.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
 import { act, afterFinding, ask, hourly, keyed } from "./inbox.ts";
 import { adjudicate } from "./agents.ts";
 
 export function demoConfig(port: number): Config {
-  const dataDir = mkdtempSync(join(tmpdir(), "overwatch-demo-"));
+  const dataDir = scratch("overwatch-demo-");
   mkdirSync(join(dataDir, "checkout"));
   const pods = (context: string) => ({ type: "kubernetes", context, namespace: "shop", selector: "app=shop" });
   return parseConfig(

@@ -55,7 +55,7 @@ export function envSecrets(configFile: string): string[] {
 
 const run = async (args: string[]) => {
   const r = await exec(launchctl(), args, { timeoutMs: 15_000 });
-  return { ok: r.code === 0, text: (r.stderr || r.stdout).trim().slice(0, 300) };
+  return { ok: r.code === 0, code: r.code, text: (r.stderr || r.stdout).trim().slice(0, 300) };
 };
 
 export async function install(configFile: string, dataDir: string) {
@@ -69,11 +69,16 @@ export async function install(configFile: string, dataDir: string) {
   return { label: LABEL, plist: file, config, log: join(dataDir, "service.log") };
 }
 
-/** Unloads and removes the agent, then asks launchd what is still loaded: the report is what is, not what was tried. */
+/**
+ * Unloads and removes the agent, then asks launchd what is still loaded. Three outcomes: unloaded (the plist is
+ * removed), still loaded, or could not tell because launchctl did not run; the last two keep the plist and fail.
+ */
 export async function uninstall() {
   const file = plistPath();
   const r = await run(["bootout", `${domain()}/${LABEL}`]);
-  if ((await run(["print", `${domain()}/${LABEL}`])).ok) throw new Error(`launchctl bootout failed (${r.text || "no reason given"}); ${LABEL} is still loaded and ${file} was kept. Stop it with: launchctl bootout ${domain()}/${LABEL}`);
+  const p = await run(["print", `${domain()}/${LABEL}`]);
+  if (p.code === 127) throw new Error(`could not tell whether ${LABEL} is still loaded: ${p.text}; ${file} was kept. Check with: launchctl print ${domain()}/${LABEL}`);
+  if (p.ok) throw new Error(`launchctl bootout failed (${r.text || "no reason given"}); ${LABEL} is still loaded and ${file} was kept. Stop it with: launchctl bootout ${domain()}/${LABEL}`);
   rmSync(file, { force: true });
   return { label: LABEL, plist: file, wasLoaded: r.ok };
 }

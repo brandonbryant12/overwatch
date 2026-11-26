@@ -6,13 +6,14 @@
  * stderr. While a service runs, status, backup, doctor and trial ask it over loopback; otherwise they take ownership
  * of the database themselves (status, backup) or refuse (trial).
  */
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { ConfigError, defaultConfigFile, loadConfig, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { demoConfig, freshen, seedDemo } from "./demo.ts";
 import { doctor } from "./doctor.ts";
 import { envSecrets, install, restart, uninstall } from "./launchd.ts";
+import { sweep } from "./exec.ts";
 import { clean, errorText } from "./redact.ts";
 import { serve } from "./server.ts";
 import { snapshot } from "./snapshot.ts";
@@ -94,6 +95,7 @@ function humanStatus(s: ReturnType<typeof snapshot>): string {
 }
 
 async function serveCommand(c: Config, demo: boolean) {
+  sweep(); // scratch left by a process that no longer runs: a killed verify, demo or trial
   const store = await own(c);
   if (demo) seedDemo(store, c);
   const service = await serve(store, c, { scheduler: true, collect: !demo, log, ...(demo ? { tick: () => freshen(store) } : {}) });
@@ -101,6 +103,7 @@ async function serveCommand(c: Config, demo: boolean) {
   const stop = async () => {
     await service.close();
     store.close();
+    if (demo) rmSync(c.dataDir, { recursive: true, force: true }); // a demo's data is its own scratch
     finish(0);
   };
   process.on("SIGTERM", stop);

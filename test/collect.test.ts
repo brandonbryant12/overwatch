@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
@@ -84,7 +85,7 @@ test("health is quiet only when every expected reading is fresh, measured and no
         error: fc.boolean(),
       }),
       ({ states, failure, error }) => {
-        const store = Store.own(mkdtempSync(join(tmpdir(), "ow-health-")));
+        const store = Store.own(scratch("ow-health-"));
         clock.set(10_000_000, 0);
         store.tx((w) => {
           readings.forEach((r, i) => {

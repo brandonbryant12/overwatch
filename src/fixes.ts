@@ -14,13 +14,12 @@
  * retry, and never assumed.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { FORBIDDEN, LIMITS, type Config, type Fixes as Policy } from "./config.ts";
 import { clock } from "./clock.ts";
-import { effect, run as exec } from "./exec.ts";
-import { HttpError, doneByRule, type Plan } from "./inbox.ts";
+import { effect, run as exec, scratch } from "./exec.ts";
+import { HttpError, type Plan } from "./inbox.ts";
 import { Unavailable } from "./opencode.ts";
 import { clean, errorText, outbound } from "./redact.ts";
 import { json, type Clean, type Permit, type Store, type Writer } from "./store.ts";
@@ -38,7 +37,7 @@ interface Row {
 }
 interface Data {
   proposal?: Proposal; options?: Options; verification?: Verification[]; pr?: { number: number; url: string; draft: boolean; state: string }; merge?: string;
-  releaseSeq?: number; checkedMs?: number; title?: string; paths?: string[]; summary?: string; protection?: "allowed"; retries?: number; retryAt?: number;
+  releaseSeq?: number | null; checked?: string; contains?: boolean; checkedMs?: number; title?: string; paths?: string[]; summary?: string; retries?: number; retryAt?: number;
   /** What exists on the host because of this attempt, whatever its state: said to the owner after a stop. */
   host?: string; next?: string;
 }
@@ -151,7 +150,7 @@ export class Fixes {
     this.row(id);
     return { op: "decline", subject: id, body: {}, change: (w) => {
       const row = this.row(id), d = JSON.parse(row.data) as Data;
-      if (!["released_quiet", "closed_unmerged", "declined"].includes(row.state))
+      if (!["closed_unmerged", "declined"].includes(row.state))
         this.set(w, row, "declined", `declined by you; nothing more is published or followed.${d.host ? ` On the host: ${d.host}` : ""}`);
       return { id, state: this.row(id).state };
     } };
@@ -197,7 +196,7 @@ export class Fixes {
    * deployment is still the one this fix answers, the base tip (when given) is the one the candidate was derived on,
    * and, for a push, protection is positively known to allow it.
    */
-  private gate(row: Row, kind: "host" | "push", step: string, tip?: string | null): Permit {
+  private gate(row: Row, kind: "host" | "push", step: string, bind: string[], tip?: string | null, allowed?: boolean): Permit {
     return this.store.tx((w) => {
       const now = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", row.id)!;
       if (now.version !== row.version) throw new Superseded();
@@ -208,8 +207,8 @@ export class Fixes {
       const latest = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", row.app, row.environment);
       if (latest?.revision !== row.deployed) throw new Stop("stale", `a newer deployment (${latest?.revision.slice(0, 12)}) replaced the one this fix answers`);
       if (tip !== undefined && tip !== row.base) throw new Stop("stale", `the base branch moved before publication; the candidate is void.${(JSON.parse(now.data) as Data).host ? ` On the host: ${(JSON.parse(now.data) as Data).host}` : ""}`);
-      if (kind === "push" && (JSON.parse(now.data) as Data).protection !== "allowed") throw new Unresolved("branch protection is not known to allow the push");
-      return w.permit(kind, row.id, { step, version: row.version });
+      if (kind === "push" && !allowed) throw new Unresolved("branch protection is not known to allow the push");
+      return w.permit(kind, row.id, { step, version: row.version }, bind);
     });
   }
 
@@ -231,7 +230,7 @@ export class Fixes {
     const next = this.store.all<Row>(`SELECT * FROM fixes WHERE state IN (${ACTIVE.map((s) => `'${s}'`).join(",")}) ORDER BY seq`)
       .find((r) => ((JSON.parse(r.data) as Data).retryAt ?? 0) <= clock.now());
     if (next) await this.drive(next);
-    for (const row of this.store.all<Row>("SELECT * FROM fixes WHERE state IN ('draft', 'awaiting_deploy')")) await this.follow(row).catch((e) => this.log(`fix follow: ${errorText(e)}`));
+    for (const row of this.store.all<Row>("SELECT * FROM fixes WHERE state IN ('draft', 'awaiting_deploy', 'released_quiet')")) await this.follow(row).catch((e) => this.log(`fix follow: ${errorText(e)}`));
   }
 
   // ---- Git, in a private bare mirror of the remote: the owner's checkout is never written.
@@ -344,24 +343,29 @@ export class Fixes {
   }
 
   /** A `gh` call as a gated effect; a timeout or a refusal is an unresolved host step, never "nothing there". */
+  /** A `gh` call against the one resolved repository, bound to exactly these arguments. */
   private async host(row: Row, step: string, args: string[], tip?: string | null) {
-    const r = await effect(this.gate(row, "host", step, tip), "gh", args, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
+    const repo = await this.repository(row.app), call = [...args, ...(args[0] === "api" ? (repo.host ? ["--hostname", repo.host] : []) : ["--repo", repo.name])];
+    const r = await effect(this.gate(row, "host", step, call, tip), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
     if (r.timedOut) throw new Unresolved(`the host did not answer the ${step} within 30 s`);
     return r;
   }
 
   /** The draft for this attempt on the host, confirmed exactly (head branch, base, marker, draft, open), or null. */
-  private async find(row: Row, branch: string, policy: Policy) {
-    const r = await this.host(row, "draft lookup", ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,isDraft,baseRefName,headRefName,body"]);
+  private async find(row: Row, branch: string, policy: Policy, head: string | null) {
+    const r = await this.host(row, "draft lookup", ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,headRepository,body"]);
     if (r.code !== 0) throw new Unresolved(`the host could not list drafts for ${branch}: ${clean(r.stderr.trim(), 200) || `exit ${r.code}`}`);
-    let rows: Array<{ number: number; url: string; state: string; isDraft: boolean; baseRefName: string; headRefName: string; body?: string }>;
+    let rows: Array<{ number: number; url: string; state: string; isDraft: boolean; baseRefName: string; headRefName: string; headRefOid?: string; headRepository?: { name?: string }; body?: string }>;
     try {
       rows = JSON.parse(r.stdout || "[]");
     } catch {
       throw new Unresolved("the host's draft list could not be read");
     }
-    const exact = rows.find((p) => p.headRefName === branch && p.baseRefName === policy.base && p.isDraft && p.state === "OPEN" && (p.body ?? "").includes(`overwatch-attempt: ${row.id}`));
-    if (!exact && rows.length) throw new Unresolved(`a pull request for ${branch} exists (#${rows[0]!.number}) that is not this attempt's draft (base, marker or draft state differ); Overwatch does not adopt it`);
+    // The draft is this attempt's only if all agree: head branch and commit (the host's own, or else the branch head read
+    // back from the remote in this step), head repository, base, marker, draft and open.
+    const name = (await this.repository(row.app)).name.split("/").at(-1);
+    const exact = rows.find((p) => p.headRefName === branch && (p.headRefOid ?? head) === row.head && (!p.headRepository?.name || p.headRepository.name === name) && p.baseRefName === policy.base && p.isDraft && p.state === "OPEN" && (p.body ?? "").includes(`overwatch-attempt: ${row.id}`));
+    if (!exact && rows.length) throw new Unresolved(`a pull request for ${branch} exists (#${rows[0]!.number}) that is not this attempt's draft (head, base, marker or draft state differ); Overwatch does not adopt it`);
     return exact ?? null;
   }
 
@@ -371,13 +375,6 @@ export class Fixes {
    */
   private async publish(row: Row, policy: Policy) {
     const url = await this.remote(row.app), branch = `ow/fix/${row.id}`;
-    if ((JSON.parse(row.data) as Data).protection !== "allowed") {
-      const r = await this.host(row, "protection check", ["api", `repos/{owner}/{repo}/branches/${branch}`]);
-      const said = r.code === 0 ? /"protected"\s*:\s*(true|false)/.exec(r.stdout)?.[1] : /not found|HTTP 404/i.test(r.stderr) ? "false" : undefined;
-      if (said === "true") throw new Stop("refused", `the branch ${branch} is protected on the host`);
-      if (said !== "false") throw new Unresolved(`branch protection for ${branch} is unknown: ${clean(r.stderr.trim(), 200) || "the host gave no answer"}`);
-      row = this.update(row, "publishing", null, {}, { protection: "allowed" });
-    }
     const ref = async (name: string) => {
       const r = await this.git(row.app).run(["ls-remote", url, `refs/heads/${name}`]);
       if (r.code !== 0) throw new Unresolved(`the remote could not be read: ${clean(r.stderr.trim(), 200)}`);
@@ -386,16 +383,28 @@ export class Fixes {
     const there = await ref(branch);
     if (there && there !== row.head) throw new Stop("refused", `the branch ${branch} already holds another commit on the host`);
     if (!there) {
-      const pushed = await effect(this.gate(row, "push", "push", await ref(policy.base)), "git", ["-C", this.mirror(row.app), "push", "-q", url, `${row.head}:refs/heads/${branch}`], { timeoutMs: 120_000 });
+      // Protection is read positively, now, before every push: rules for this branch name, never a past verdict.
+      const repo = await this.repository(row.app);
+      const r = await this.host(row, "protection check", ["api", `repos/${repo.slug}/rules/branches/${branch}`]);
+      let rules: unknown = null;
+      try {
+        rules = r.code === 0 ? JSON.parse(r.stdout) : null;
+      } catch {}
+      const said = Array.isArray(rules) ? rules.length > 0 : typeof (rules as { protected?: unknown })?.protected === "boolean" ? (rules as { protected: boolean }).protected : null;
+      if (said === true) throw new Stop("refused", `the branch ${branch} is protected on the host`);
+      if (said === null) throw new Unresolved(`branch protection for ${branch} is unknown: ${clean(r.stderr.trim(), 200) || "the host gave no rule set"}`);
+      const push = ["push", "-q", url, `${row.head}:refs/heads/${branch}`];
+      const pushed = await effect(this.gate(row, "push", "push", push, await ref(policy.base), true), "git", ["-C", this.mirror(row.app), ...push], { timeoutMs: 120_000 });
       if (pushed.code !== 0) throw new Unresolved(`the host refused ${branch}: ${clean(pushed.stderr.trim().split("\n").at(-1) ?? "", 200)}`);
     }
-    if ((await ref(branch)) !== row.head) throw new Unresolved(`the host does not show the verified head on ${branch}`);
+    const head = await ref(branch);
+    if (head !== row.head) throw new Unresolved(`the host does not show the verified head on ${branch}`);
     this.hosted(row, `the branch ${branch} (head ${row.head!.slice(0, 12)}); delete it on the host if you do not want it.`);
     if ((await ref(policy.base)) !== row.base) throw new Stop("stale", `the base branch moved before the draft was opened; the candidate is void. The branch ${branch} exists on the host; delete it if you do not want it.`);
-    let pr = await this.find(row, branch, policy);
+    let pr = await this.find(row, branch, policy, head);
     if (!pr) {
       const tip = await ref(policy.base); // read now: the draft is opened only on the base the candidate was derived on
-      const tmp = mkdtempSync(join(tmpdir(), "ow-pr-")), body = join(tmp, "body.md");
+      const tmp = scratch("ow-pr-"), body = join(tmp, "body.md");
       try {
         writeFileSync(body, outbound(this.body(row)));
         const made = await this.host(row, "draft creation", ["pr", "create", "--draft", "--base", policy.base, "--head", branch, "--title", outbound(this.title(row)), "--body-file", body], tip);
@@ -403,11 +412,23 @@ export class Fixes {
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
-      pr = await this.find(row, branch, policy);
+      pr = await this.find(row, branch, policy, await ref(branch));
       if (!pr) throw new Unresolved("the host reported draft creation, but no draft for this attempt can be found");
     }
     this.hosted(row, `draft #${pr.number} (${pr.url}) and its branch ${branch}; close the draft on the host to withdraw it.`);
     this.update(row, "draft", null, {}, { pr: { number: pr.number, url: clean(pr.url, 300), draft: pr.isDraft, state: pr.state }, checkedMs: clock.now() });
+  }
+
+  /** The host repository, resolved once from the configured remote and named explicitly in every `gh` call. */
+  private repos = new Map<string, { name: string; slug: string; host: string | null }>();
+  private async repository(app: string) {
+    const known = this.repos.get(app);
+    if (known) return known;
+    const url = await this.remote(app);
+    const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/.exec(url);
+    const repo = m && !url.startsWith("/") ? { host: m[1] === "github.com" ? null : m[1]!, slug: `${m[2]}/${m[3]}`, name: m[1] === "github.com" ? `${m[2]}/${m[3]}` : `${m[1]}/${m[2]}/${m[3]}` } : { host: null, slug: `local/${url.split("/").filter(Boolean).at(-1)!.replace(/\.git$/, "")}`, name: `local/${url.split("/").filter(Boolean).at(-1)!.replace(/\.git$/, "")}` };
+    this.repos.set(app, repo);
+    return repo;
   }
 
   private title(row: Row) {
@@ -448,36 +469,40 @@ export class Fixes {
     if (row.state === "draft") {
       if (d.checkedMs !== undefined && this.followed.has(row.id) && clock.now() - d.checkedMs < LIMIT.followMs) return;
       this.followed.add(row.id);
-      const r = await effect(this.store.permit("host", row.id, { step: "follow" }), "gh", ["pr", "view", String(d.pr.number), "--json", "state,mergeCommit,isDraft,url,headRefName"], { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
-      const pr = r.code === 0 ? (JSON.parse(r.stdout) as { state: string; mergeCommit: { oid: string } | null; isDraft: boolean; headRefName?: string }) : null;
-      if (!pr || (pr.headRefName && pr.headRefName !== `ow/fix/${row.id}`)) return;
+      const call = ["pr", "view", String(d.pr.number), "--json", "state,mergeCommit,isDraft,url,headRefName,headRefOid", "--repo", (await this.repository(row.app)).name];
+      const r = await effect(this.store.permit("host", row.id, { step: "follow" }, call), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
+      const pr = r.code === 0 ? (JSON.parse(r.stdout) as { state: string; mergeCommit: { oid: string } | null; isDraft: boolean; headRefName?: string; headRefOid?: string }) : null;
+      // Followed only while it is still this attempt's draft: same head branch and, when the host says it, same commit.
+      if (!pr || pr.headRefName !== `ow/fix/${row.id}` || (pr.headRefOid && pr.headRefOid !== row.head)) return;
       const at = { checkedMs: clock.now(), pr: { ...d.pr, state: pr.state, draft: pr.isDraft } };
       if (pr.state === "MERGED" && pr.mergeCommit?.oid) return void this.update(row, "awaiting_deploy", "merged; waiting for a release that contains it", {}, { ...at, merge: pr.mergeCommit.oid });
       if (pr.state === "CLOSED") return void this.update(row, "closed_unmerged", "closed without merging; the problem stays open", {}, { ...at, host: `the closed draft #${d.pr.number} and its branch ow/fix/${row.id}` });
       return this.store.tx((w) => w.run("UPDATE fixes SET data = json_patch(data, ?) WHERE id = ?", json(at), row.id as Clean));
     }
-    // Awaiting a release: a later deployment in the same environment that contains the merge, then three quiet intervals.
-    if (d.releaseSeq === undefined) {
-      for (const dep of this.store.all<{ seq: number; revision: string }>("SELECT seq, revision FROM deploys WHERE app = ? AND environment = ? AND seq > ? ORDER BY seq", row.app, row.environment, row.seq)) {
-        await this.tip(row.app).catch(() => undefined);
-        if ((await this.git(row.app).run(["merge-base", "--is-ancestor", d.merge!, dep.revision])).code === 0)
-          return void this.update(row, "awaiting_deploy", `released in ${dep.revision.slice(0, 12)}; waiting for three quiet intervals`, {}, { releaseSeq: dep.seq });
-      }
-      return;
+    // After the merge: the environment's current deployment must contain it, and stay deployed through three
+    // consecutive complete quiet intervals. Then the item is ready to close and the owner closes it; nothing closes
+    // by itself. A deployment without the fix, or the problem returning, sends it back to waiting, with the reason.
+    const latest = this.store.get<{ seq: number; revision: string }>("SELECT seq, revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", row.app, row.environment);
+    if (!latest || latest.seq <= row.seq) return;
+    if (d.checked !== latest.revision) {
+      await this.tip(row.app).catch(() => undefined);
+      d.contains = (await this.git(row.app).run(["merge-base", "--is-ancestor", d.merge!, latest.revision])).code === 0;
+      this.store.tx((w) => w.run("UPDATE fixes SET data = json_patch(data, ?) WHERE id = ?", json({ checked: latest.revision, contains: d.contains }), row.id as Clean));
     }
+    const back = (why: string) => void this.update(row, "awaiting_deploy", why, {}, { releaseSeq: null });
+    if (!d.contains) return d.releaseSeq != null ? back(`the deployment containing the fix was replaced by ${latest.revision.slice(0, 12)}, which does not contain it; waiting again`) : undefined;
+    if (d.releaseSeq !== latest.seq) return void this.update(row, "awaiting_deploy", `released in ${latest.revision.slice(0, 12)}; waiting for three quiet intervals while it stays deployed`, {}, { releaseSeq: latest.seq });
     const inc = this.store.get<{ source: string; seq: number }>("SELECT source, seq FROM incidents WHERE id = ?", row.incident);
     if (!inc) return;
     // Consecutive complete intervals only: a failed, partial or catch-up interval starts the count again.
     let quiet = 0;
-    for (const e of this.store.all<{ kind: string; data: string }>("SELECT kind, data FROM events WHERE kind IN ('slice', 'source_failed') AND subject = ? AND seq > ? AND seq > ? ORDER BY seq", inc.source, d.releaseSeq, inc.seq)) {
+    for (const e of this.store.all<{ kind: string; data: string }>("SELECT kind, data FROM events WHERE kind IN ('slice', 'source_failed') AND subject = ? AND seq > ? AND seq > ? ORDER BY seq", inc.source, latest.seq, inc.seq)) {
       const x = JSON.parse(e.data) as { ordinary?: boolean; readings?: Record<string, { state: string }> };
       quiet = e.kind === "slice" && x.ordinary && Object.values(x.readings ?? {}).every((r) => r.state === "ok") ? quiet + 1 : 0;
     }
-    if (quiet < LIMITS.quietIntervals) return;
-    this.store.tx((w) => {
-      this.set(w, row, "released_quiet", `released in a deployment containing ${d.merge!.slice(0, 12)} and quiet for ${LIMITS.quietIntervals} intervals`);
-      doneByRule(w, this.store, this.config, row.incident, `Fixed by ${d.pr!.url}: released and quiet for ${LIMITS.quietIntervals} intervals`);
-    });
+    if (quiet >= LIMITS.quietIntervals && row.state !== "released_quiet")
+      this.update(row, "released_quiet", `ready to close: ${latest.revision.slice(0, 12)} contains the merge ${d.merge!.slice(0, 12)}, is still deployed, and the problem has been quiet for ${LIMITS.quietIntervals} complete intervals since. Close it with Done.`);
+    else if (quiet < LIMITS.quietIntervals && row.state === "released_quiet") back("the problem came back after the release; waiting for three quiet intervals again");
   }
 
   /**
@@ -490,7 +515,7 @@ export class Fixes {
     let verified = 0, forbidden = false;
     const results: Array<{ kind: string; ok: boolean }> = [];
     for (const kind of ["revert", "setting", "abstain"] as const) {
-      const repo = mkdtempSync(join(tmpdir(), "ow-calibration-"));
+      const repo = scratch("ow-calibration-");
       try {
         const job = this.store.tx((w) => {
           const id = `job_${randomBytes(12).toString("hex")}`;
@@ -588,7 +613,7 @@ export async function derive(git: Git, row: Pick<Row, "id" | "previous" | "base"
     if (!was || !now || !(p.key in was) || !(p.key in now) || !scalar(was[p.key]) || !scalar(now[p.key])) throw new Stop("stale", `${p.path} no longer has the scalar ${p.key}`);
     const restored = rewrite(text, now, p.key, was[p.key]);
     if (restored === null) throw new Stop("refused", `${p.path} cannot be restored without reformatting it`);
-    const tmp = mkdtempSync(join(tmpdir(), "ow-fix-")), file = join(tmp, "blob");
+    const tmp = scratch("ow-fix-"), file = join(tmp, "blob");
     try {
       writeFileSync(file, restored);
       const blob = (await git.out(["hash-object", "-w", file], "blob")).trim();
@@ -665,7 +690,7 @@ async function check(git: Git, base: string, tree: string, policy: Policy): Prom
 export async function verify(mirror: string, commit: string, policy: Policy): Promise<Verification[]> {
   const fail = (summary: string): Verification[] => [{ argv: policy.verify[0] ? [...policy.verify[0]] : [], exitCode: null, elapsedMs: 0, summary }];
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) return fail("no isolation: sandbox-exec (macOS) is required; verification fails closed");
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "ow-verify-"))), work = join(root, "checkout"), temp = join(root, "tmp"), home = join(root, "home");
+  const root = realpathSync(scratch("ow-verify-")), work = join(root, "checkout"), temp = join(root, "tmp"), home = join(root, "home");
   for (const d of [work, temp, home]) mkdirSync(d);
   try {
     const tar = join(root, "c.tar");
@@ -725,7 +750,7 @@ const FIXER_NUDGE = "You have not filed a proposal yet. File exactly one ow_prop
 
 /** A disposable calibration repository: settings.json with timeout 30, then a commit lowering it to 3. */
 async function seed(repo: string) {
-  const work = mkdtempSync(join(tmpdir(), "ow-calibration-work-"));
+  const work = scratch("ow-calibration-work-");
   try {
     const git = (...a: string[]) => exec("git", ["-C", work, "-c", "user.name=Overwatch", "-c", "user.email=overwatch@localhost", "-c", "commit.gpgsign=false", ...a]);
     await git("init", "-q");

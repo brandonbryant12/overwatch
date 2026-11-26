@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 /**
  * The two boundaries, one property per class. Observation: a reading is complete only when the adapter recognised the
  * reply; its freshness is the provider's observation time; a count is transitions, not a high-water mark. Receipts:
@@ -31,7 +32,7 @@ process.env.OW_TEST_DD_B = "b";
 test.after(() => server.close());
 
 function rig(readings: string[]) {
-  const dataDir = mkdtempSync(join(tmpdir(), "ow-boundary-"));
+  const dataDir = scratch("ow-boundary-");
   const config = parseConfig({
     version: 2, dataDir,
     apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { dd: { type: "datadog", baseUrl: base, apiKey: "env:OW_TEST_DD_A", appKey: "env:OW_TEST_DD_B", query: "service:shop", metric: "avg:shop.errors{*}", readings } } } } } },
@@ -83,12 +84,12 @@ test("class: a reading is complete only when the adapter recognised the reply; a
 
 test("class: freshness is the provider's observation time, never the time Overwatch asked", async () => {
   await fc.assert(
-    fc.asyncProperty(fc.oneof(fc.integer({ min: 0, max: 61_000 }), fc.integer({ min: 61_001, max: 50 * 60_000 })), async (age) => {
+    fc.asyncProperty(fc.oneof(fc.integer({ min: 0, max: 60_000 }), fc.integer({ min: 60_001, max: 50 * 60_000 })), async (age) => {
       const r = rig(["metrics"]);
       reply.query = { series: [{ metric: "shop.errors", pointlist: [[r.now + 60_000 - age, 1]] }] };
       await r.step();
       // A point dated outside the queried window (one interval) proves nothing about it: a gap, never fresh.
-      if (age > 61_000) {
+      if (age > 60_000) {
         assert.equal(r.reading("metrics")?.state, "gap");
         assert.notEqual(r.snap().environments[0]!.health, "quiet");
         return r.store.close();
@@ -113,6 +114,8 @@ test("class: a monitor's count is its transitions into alerting, not the time it
       for (const state of states) {
         reply.monitors = [{ id: 7, name: "Checkout", overall_state: state }];
         await r.step();
+        // No Data is not a measurement: it neither ends an alert nor starts one.
+        if (state === "No Data") continue;
         const alerting = /^(alert|warn)/i.test(state);
         if (alerting && !was) expected++;
         was = alerting;
@@ -136,7 +139,7 @@ test("class: a receipt commits with its change or not at all, and a key binds on
   const keys = ["rk_" + "a".repeat(24), "rk_" + "b".repeat(24), "rk_" + "c".repeat(24)];
   fc.assert(
     fc.property(fc.array(fc.record({ key: fc.nat(2), subject: fc.nat(1), body: fc.nat(1), fails: fc.boolean() }), { maxLength: 12 }), (calls) => {
-      const store = Store.own(mkdtempSync(join(tmpdir(), "ow-receipt-")));
+      const store = Store.own(scratch("ow-receipt-"));
       clock.set(Date.UTC(2026, 10, 1), 1e6);
       const first = new Map<number, { subject: number; body: number; result: unknown }>();
       for (const c of calls) {
@@ -160,7 +163,7 @@ test("class: a receipt commits with its change or not at all, and a key binds on
 });
 
 test("class: a writer kept past its transaction cannot write, so nothing writes without admission", () => {
-  const store = Store.own(mkdtempSync(join(tmpdir(), "ow-writer-")));
+  const store = Store.own(scratch("ow-writer-"));
   let kept: Writer | null = null;
   store.tx((w) => {
     kept = w;

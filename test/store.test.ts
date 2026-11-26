@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, statSync, writeFileSync } from "node:fs";
@@ -7,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { Busy, Incompatible, Store, type Clean } from "../src/store.ts";
 
-const dir = () => mkdtempSync(join(tmpdir(), "ow-store-test-"));
+const dir = () => scratch("ow-store-test-");
 const rows = (store: Store) => ["events", "incidents"].map((t) => store.all(`SELECT * FROM ${t} ORDER BY 1`));
 
 test("a second process cannot own the database while the first does", () => {

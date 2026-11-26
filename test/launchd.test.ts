@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -8,7 +9,7 @@ import { spawnSync } from "node:child_process";
 // Never the real launchd: a temporary home and a fake launchctl that records its arguments.
 const BIN = new URL("../bin/overwatch", import.meta.url).pathname;
 function rig(secret = "keychain:ow/token", failing = "") {
-  const home = mkdtempSync(join(tmpdir(), "ow-launchd-")), calls = join(home, "calls");
+  const home = scratch("ow-launchd-"), calls = join(home, "calls");
   const fake = join(home, "launchctl");
   const loaded = join(home, "loaded");
   writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in ${failing || "none"}) echo "refused $1" >&2; exit 5;; esac\ncase "$1" in bootstrap) touch "${loaded}";; bootout) rm -f "${loaded}";; print) test -f "${loaded}" || exit 113;; esac\nexit 0\n`, { mode: 0o755 });

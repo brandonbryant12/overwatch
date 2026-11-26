@@ -52,6 +52,8 @@ export function forecast(source: Source, rows: ReadonlyArray<{ series: string; a
     run.push({ at: r.at_ms, value: r.value });
   }
   const latestRaw = rows.at(-1);
+  // The samples' unit must be the configured limit's: none for a count of units, "byte" for bytes. No ETA otherwise.
+  if (latestRaw && unit !== (cap.unit === "bytes" ? "byte" : "")) return { ...base, state: "unknown", reason: `the provider reports ${unit || "no unit"}, not the limit's ${cap.unit}; no time can be computed`, asOfMs: null, samples: 0, etaMinutes: null, ratePerMinute: null };
   const points = run.slice(-6);
   const none = (reason: string, state: Forecast["state"] = "unknown"): Forecast => ({ ...base, state, reason, asOfMs: points.at(-1)?.at ?? null, samples: points.length, etaMinutes: null, ratePerMinute: null });
   if (latestRaw && latestRaw.value === null) return none("the latest reading was not measured");
@@ -81,7 +83,7 @@ export function forecasts(store: Store, config: Config): Forecast[] {
     forecast(s, store.all<{ series: string; at_ms: number; value: number | null }>("SELECT series, at_ms, value FROM samples WHERE source = ? ORDER BY id", s.id), clock.now()));
 }
 
-interface Data { baseline: string[]; marks: Record<string, number>; counts: Array<Record<string, Record<string, number>>> }
+interface Data { prodSeq?: number; baseline: string[]; marks: Record<string, number>; counts: Array<Record<string, Record<string, number>>> }
 type Row = { id: string; app: string; staging_revision: string; production_revision: string | null; start_seq: number; state: string; data: string };
 
 /** Counts by problem title in one environment: titles are the normalized fingerprints both sides share. */
@@ -105,7 +107,7 @@ export function compare(store: Store, config: Config) {
     const latest = (s: Source) => store.get<{ seq: number; kind: string; data: string }>("SELECT seq, kind, data FROM events WHERE subject = ? AND kind IN ('slice','source_failed') ORDER BY seq DESC LIMIT 1", s.id);
     if (!current || current.staging_revision !== st.revision) {
       const same = pr?.revision === st.revision;
-      const data: Data = { baseline: [...new Set([...Object.keys(tally(store, app, staging)), ...Object.keys(tally(store, app, production))])], marks: Object.fromEntries(sources.map((s) => [s.id, latest(s)?.seq ?? 0])), counts: [{ staging: tally(store, app, staging), production: tally(store, app, production) }] };
+      const data: Data = { prodSeq: pr?.seq ?? 0, baseline: [...new Set([...Object.keys(tally(store, app, staging)), ...Object.keys(tally(store, app, production))])], marks: Object.fromEntries(sources.map((s) => [s.id, latest(s)?.seq ?? 0])), counts: [{ staging: tally(store, app, staging), production: tally(store, app, production) }] };
       store.tx((w) => {
         const id = `cmp_${sha(app, st.revision, st.seq).slice(0, 24)}`;
         w.run("INSERT OR IGNORE INTO comparisons (id, app, staging_revision, production_revision, start_seq, state, reason, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", id as Clean, app as Clean, st.revision as Clean, (pr?.revision ?? null) as Clean | null, st.seq, (same ? "same_release" : "pending") as Clean, (same ? "staging runs the production revision" : "waiting for two aligned intervals") as Clean, json(data));
@@ -114,10 +116,12 @@ export function compare(store: Store, config: Config) {
       continue;
     }
     // A newer production rollout invalidates any comparison made against the old one, finished or not.
-    if (pr && current.production_revision !== null && pr.revision !== current.production_revision && current.state !== "same_release") {
+    // Any newer production observation re-decides it, a finished match as well as a regression.
+    const seen = (JSON.parse(current.data) as Data).prodSeq ?? pr?.seq ?? 0;
+    if (pr && pr.seq > seen && (pr.revision !== current.production_revision || current.state === "same_release")) {
       const same = pr.revision === current.staging_revision;
       store.tx((w) => {
-        w.run("UPDATE comparisons SET state = ?, reason = ? WHERE id = ?", (same ? "same_release" : "unknown") as Clean, (same ? "production now runs the staging revision" : `production rolled out ${pr.revision.slice(0, 12)} since; this comparison no longer describes it`) as Clean, current.id as Clean);
+        w.run("UPDATE comparisons SET state = ?, reason = ?, data = json_set(data, '$.prodSeq', ?) WHERE id = ?", (same ? "same_release" : "unknown") as Clean, (same ? "production now runs the staging revision" : `production rolled out ${pr.revision.slice(0, 12)} since; this comparison no longer describes it`) as Clean, pr.seq, current.id as Clean);
         w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state: same ? "same_release" : "unknown", productionRevision: pr.revision });
       });
       continue;

@@ -1,3 +1,4 @@
+import "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";

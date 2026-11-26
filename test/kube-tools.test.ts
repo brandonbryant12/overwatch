@@ -1,3 +1,4 @@
+import { scratch } from "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
@@ -48,7 +49,7 @@ test("an event series counts by its cumulative series count; an event without a 
 });
 
 test("a filing cites only handles delivered to its own attempt, and one valid filing closes the attempt", async () => {
-  const store = Store.own(mkdtempSync(join(tmpdir(), "ow-tools-")));
+  const store = Store.own(scratch("ow-tools-"));
   const tools = new Tools(store);
   const code = { expected: null, read: null, deployed: false };
   for (const [run, session] of [["run_aaaaaaaa", "ses_aaaaaaaa"], ["run_bbbbbbbb", "ses_bbbbbbbb"]] as const) {
