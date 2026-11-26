@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { testService, offline } from "../fixtures/service.ts";
+import { testService, offline } from "./service.ts";
 import { IncidentId, RunId, threadIdOf } from "../../src/domain/ids.ts";
 import { Incident, RecordFinding } from "../../src/domain/incident.ts";
 import * as Effect from "effect/Effect";

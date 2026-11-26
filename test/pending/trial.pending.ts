@@ -11,7 +11,7 @@ import { scriptedProvider } from "./scripted-provider.ts";
 import { startService } from "../../src/service/service.ts";
 import { parseConfig } from "../../src/service/config.ts";
 import { fakeCluster } from "../fixtures/cluster.ts";
-import { until } from "./support.ts";
+import { until } from "../fixtures/scenario.ts";
 
 test("trial scores actual attempts from the configured OpenCode model against blinded seed answers", { timeout: 150_000 }, async () => {
   const f = laptop();

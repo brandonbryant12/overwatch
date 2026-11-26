@@ -1,7 +1,7 @@
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { fileFinding } from "../../src/service/mcp.ts";
-import { testService, seed, threadIdOf, offline, until, plainFinding, databaseText } from "./support.ts";
+import { test, expect } from "./harness.ts";
+import { fileFinding } from "../src/service/mcp.ts";
+import { testService, seed, threadIdOf, offline, until, plainFinding, databaseText } from "./fixtures/scenario.ts";
 
 const shapes = (n: number) => {
   const simple = "TrainingOnly" + n,

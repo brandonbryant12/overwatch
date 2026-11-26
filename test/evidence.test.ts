@@ -1,12 +1,12 @@
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { verifyCitations } from "../../src/collect/citations.ts";
-import { plainFinding, databaseText, seed, testService, offline, recordFinding, watcher, until, threadIdOf } from "./support.ts";
-import { queryTelemetry } from "../../src/service/mcp.ts";
-import { shownFor } from "../../src/service/tables.ts";
+import { test, expect } from "./harness.ts";
+import { verifyCitations } from "../src/collect/citations.ts";
+import { plainFinding, databaseText, seed, testService, offline, recordFinding, watcher, until, threadIdOf } from "./fixtures/scenario.ts";
+import { queryTelemetry } from "../src/service/mcp.ts";
+import { shownFor } from "../src/service/tables.ts";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
-import { tempDir } from "../fixtures/support.ts";
+import { tempDir } from "./fixtures/support.ts";
 
 const word = fc.stringOf(fc.constantFrom(..."abcdefhijkmnpqrstuvwxyz"), { minLength: 9, maxLength: 15 });
 for (const scenario of ["literal fragments", "source and file sharing a name"] as const)

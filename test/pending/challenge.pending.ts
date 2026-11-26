@@ -1,7 +1,7 @@
 import { test, expect } from "../harness.ts";
 import { fileFinding } from "../../src/service/mcp.ts";
-import { testService, seed, until, plainFinding, offline, threadIdOf } from "./support.ts";
-import { withPage } from "./page.ts";
+import { testService, seed, until, plainFinding, offline, threadIdOf } from "../fixtures/scenario.ts";
+import { withPage } from "../fixtures/page.ts";
 
 test("a real finding stays provisional until a distinct session challenges it; a disproof remains visible", async () => {
   const sent: Array<{ sessionID: string; text: string }> = [];

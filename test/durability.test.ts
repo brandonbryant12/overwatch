@@ -1,9 +1,9 @@
 import { once } from "node:events";
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { tempDir } from "../fixtures/support.ts";
-import { backup, restore } from "../../src/service/backup.ts";
-import { join, watcher, testService, offline, seed, until, threadIdOf } from "./support.ts";
+import { test, expect } from "./harness.ts";
+import { tempDir } from "./fixtures/support.ts";
+import { backup, restore } from "../src/service/backup.ts";
+import { join, watcher, testService, offline, seed, until, threadIdOf } from "./fixtures/scenario.ts";
 
 const cuts = ["BEFORE INSERT ON checkpoints", "BEFORE INSERT ON pending_reports", "BEFORE DELETE ON pending_reports"] as const;
 for (const cut of cuts) {
@@ -122,7 +122,7 @@ test(
   async () => {
     const { spawn } = await import("node:child_process");
     const { fileURLToPath } = await import("node:url");
-    const child = fileURLToPath(new URL("./outbox-child.ts", import.meta.url));
+    const child = fileURLToPath(new URL("./fixtures/outbox-child.ts", import.meta.url));
     for (const point of ["checkpoint", "intent", "event", "acknowledgement"]) {
       await fc.assert(
         fc.asyncProperty(fc.integer({ min: 1, max: 4 }), fc.integer({ min: 1, max: 4 }), async (n, extra) => {

@@ -2,12 +2,12 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { tempDir } from "../fixtures/support.ts";
-import { backup, restore } from "../../src/service/backup.ts";
-import { codeForNewSession } from "../../src/service/worktree.ts";
-import { exec } from "../../src/collect/exec.ts";
-import { testService, seed, join, until, databaseText } from "./support.ts";
+import { test, expect } from "./harness.ts";
+import { tempDir } from "./fixtures/support.ts";
+import { backup, restore } from "../src/service/backup.ts";
+import { codeForNewSession } from "../src/service/worktree.ts";
+import { exec } from "../src/collect/exec.ts";
+import { testService, seed, join, until, databaseText } from "./fixtures/scenario.ts";
 
 test("failure to create a worktree cannot turn an empty directory into deployed evidence on retry", async () => {
   const repo = tempDir("pending-app");
@@ -131,7 +131,7 @@ test("diagnostic errors from desktop delivery receive the same secret scrubbing 
 });
 
 test("a real nonzero desktop command is reported to the retry queue", async () => {
-  const { macNotifier } = await import("../../src/service/notify.ts");
+  const { macNotifier } = await import("../src/service/notify.ts");
   if (process.platform !== "darwin") return;
   const notify = macNotifier(async () => ({ code: 1, stdout: "", stderr: "desktop temporarily unavailable", killed: false }));
   await expect(notify("fixture", "an incident opened")).rejects.toThrow();

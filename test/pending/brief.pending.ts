@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "../harness.ts";
-import { testService, seed, recordFinding, delay } from "./support.ts";
+import { testService, seed, recordFinding, delay } from "../fixtures/scenario.ts";
 import { laptop } from "./cli.ts";
 
 test("a glossary brief is journal-derived, period-bound, repeatable and owner-editable offline; copy and export preserve the edit", async () => {

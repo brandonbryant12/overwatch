@@ -1,5 +1,11 @@
 # Pending guarantees
 
+**Promoted (fourth pass).** Every test under "Existing behavior" passes and now runs from `test/` with `pnpm run check`:
+`lock.test.ts`, `evidence.test.ts`, `fields.test.ts`, `durability.test.ts`, `daily-sequences.test.ts` (was
+`daily.pending.ts`), `ordering.test.ts`, `health.test.ts`, `recovery.test.ts`, unchanged apart from import paths. The
+shared fixtures moved: `support.ts` is `test/fixtures/scenario.ts`, `page.ts` and `outbox-child.ts` are in
+`test/fixtures/`. What remains here is "Ready for the real thing", with `cli.ts` and `scripted-provider.ts`.
+
 These tests describe observable behavior on the command-center branch. The builder's job is to make each test pass without weakening it, then move it into `test/` as a `.test.ts` file. Adjust relative imports and promote shared fixtures into `test/fixtures/` as needed. Keep the same assertions, inputs, fault points and external checks. The normal `pnpm test` glob deliberately excludes this directory. Type checking includes it.
 
 Run from the repository root with the project's Node and dependencies. The rendered tests require a built page (`pnpm run build:web`) and Chrome or Chromium, with `CHROME_BIN` available to specify its path. The trial requires an OpenCode 2.4.1 executable on PATH or at `OPENCODE_BIN`. Git must be available. Tests use temporary data, fake telemetry, loopback connections and isolated browser profiles. The desktop command exit-status check exercises the macOS adapter on Darwin. No login or live model key is needed.

@@ -1,6 +1,6 @@
-import { test, expect } from "../harness.ts";
-import { seed, testService, watcher, until } from "./support.ts";
-import { withPage } from "./page.ts";
+import { test, expect } from "./harness.ts";
+import { seed, testService, watcher, until } from "./fixtures/scenario.ts";
+import { withPage } from "./fixtures/page.ts";
 
 test("a delayed deploy reaction can only wake a Later that was already in force when the deploy occurred", async () => {
   let unblock!: () => void,

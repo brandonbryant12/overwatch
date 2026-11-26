@@ -1,10 +1,10 @@
 import fc from "fast-check";
 import * as Effect from "effect/Effect";
-import { test, expect } from "../harness.ts";
-import { Incident, ReportSignal } from "../../src/domain/incident.ts";
-import { WatcherId } from "../../src/domain/ids.ts";
-import { groupInbox, init, bounceOffer } from "../../web/src/app.ts";
-import { testService, watcher, seed, until, recordFinding } from "./support.ts";
+import { test, expect } from "./harness.ts";
+import { Incident, ReportSignal } from "../src/domain/incident.ts";
+import { WatcherId } from "../src/domain/ids.ts";
+import { groupInbox, init, bounceOffer } from "../web/src/app.ts";
+import { testService, watcher, seed, until, recordFinding } from "./fixtures/scenario.ts";
 
 const actions = ["done", "later", "never", "undo", "finding", "deploy", "recur", "rise", "surge", "restart"] as const;
 test(
@@ -128,7 +128,7 @@ test("a muted or deferred lower severity stays hidden on another equal reading a
       fc.asyncProperty(fc.constantFrom("info" as const, "warn" as const), fc.integer({ min: 1, max: 3 }), async (start, repeat) => {
         const f = await testService();
         try {
-          const { IncidentId } = await import("../../src/domain/ids.ts");
+          const { IncidentId } = await import("../src/domain/ids.ts");
           const id = IncidentId.make("inc_notifications");
           const epoch = Date.now() - 1000;
           const send = (severity: "info" | "warn" | "error", at: number, count: number) =>

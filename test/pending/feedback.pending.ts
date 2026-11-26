@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "../harness.ts";
-import { seed, testService, threadIdOf, offline, plainFinding, until } from "./support.ts";
+import { seed, testService, threadIdOf, offline, plainFinding, until } from "../fixtures/scenario.ts";
 import { fileFinding } from "../../src/service/mcp.ts";
-import { withPage } from "./page.ts";
+import { withPage } from "../fixtures/page.ts";
 
 test("one corrected finding appends one dated lesson, appears in the next investigation and is acknowledged on its page", async () => {
   const sent: Array<{ sessionID: string; text: string }> = [];

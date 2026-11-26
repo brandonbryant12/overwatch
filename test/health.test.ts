@@ -1,10 +1,10 @@
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { fakeCluster } from "../fixtures/cluster.ts";
-import { allQuiet, environmentChips } from "../../web/src/app.ts";
-import type { ServiceStatus, EnvironmentStatus } from "../../src/domain/status.ts";
-import { testService, watcher } from "./support.ts";
-import type { Exec } from "../../src/collect/exec.ts";
+import { test, expect } from "./harness.ts";
+import { fakeCluster } from "./fixtures/cluster.ts";
+import { allQuiet, environmentChips } from "../web/src/app.ts";
+import type { ServiceStatus, EnvironmentStatus } from "../src/domain/status.ts";
+import { testService, watcher } from "./fixtures/scenario.ts";
+import type { Exec } from "../src/collect/exec.ts";
 
 test("one unhealthy environment prevents an all-clear, including stale individual samples under a fresh checkpoint", async () => {
   const f = await testService();
@@ -107,10 +107,10 @@ for (const kind of ["signin", "unreachable"] as const) {
 }
 
 test("a healthy Kubernetes source cannot mask missing telemetry from another watched source in the same environment", async () => {
-  const { startService } = await import("../../src/service/service.ts");
-  const { parseConfig } = await import("../../src/service/config.ts");
-  const { tempDir } = await import("../fixtures/support.ts");
-  const { offline } = await import("./support.ts");
+  const { startService } = await import("../src/service/service.ts");
+  const { parseConfig } = await import("../src/service/config.ts");
+  const { tempDir } = await import("./fixtures/support.ts");
+  const { offline } = await import("./fixtures/scenario.ts");
   const a = fakeCluster(),
     b = fakeCluster();
   b.state.top = false;
@@ -143,10 +143,10 @@ test("a healthy Kubernetes source cannot mask missing telemetry from another wat
 });
 
 test("an unmeasured command source backing off keeps its last failure visible during a skipped poll", async () => {
-  const { startService } = await import("../../src/service/service.ts");
-  const { parseConfig } = await import("../../src/service/config.ts");
-  const { tempDir } = await import("../fixtures/support.ts");
-  const { offline } = await import("./support.ts");
+  const { startService } = await import("../src/service/service.ts");
+  const { parseConfig } = await import("../src/service/config.ts");
+  const { tempDir } = await import("./fixtures/support.ts");
+  const { offline } = await import("./fixtures/scenario.ts");
   const dataDir = tempDir("pending-backoff");
   const config = parseConfig({
     apps: {
@@ -185,8 +185,8 @@ test("an unmeasured command source backing off keeps its last failure visible du
 });
 
 test("the rendered all-clear expires when a sleeping tab wakes and status refresh fails", async () => {
-  const { withPage } = await import("./page.ts");
-  const { until } = await import("./support.ts");
+  const { withPage } = await import("./fixtures/page.ts");
+  const { until } = await import("./fixtures/scenario.ts");
   const f = await testService();
   try {
     await f.service.collect(watcher);

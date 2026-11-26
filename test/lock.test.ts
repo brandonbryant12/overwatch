@@ -4,9 +4,9 @@ import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import fc from "fast-check";
-import { test, expect } from "../harness.ts";
-import { tempDir } from "../fixtures/support.ts";
-import { acquireWriterLock } from "../../src/host/lock.ts";
+import { test, expect } from "./harness.ts";
+import { tempDir } from "./fixtures/support.ts";
+import { acquireWriterLock } from "../src/host/lock.ts";
 
 // Each client holds its handle until the parent either releases it or kills its process.
 if (process.argv[2] === "--lock-client") {

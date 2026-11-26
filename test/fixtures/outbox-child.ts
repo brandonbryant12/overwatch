@@ -1,4 +1,4 @@
-import { testService, watcher } from "./support.ts";
+import { testService, watcher } from "./scenario.ts";
 
 const [directory, point, epoch, count] = process.argv.slice(2);
 const boundaries = {

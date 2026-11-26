@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { tempDir } from "../fixtures/support.ts";
-import { until } from "./support.ts";
+import { tempDir } from "./support.ts";
+import { until } from "./scenario.ts";
 
 // Use the same browser protocol as browser.test.ts, keeping one tab alive across the decision.
 type Evaluate = (js: string) => Promise<string>;
