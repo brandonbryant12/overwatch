@@ -99,7 +99,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
       )
       .map((i) => ({ id: i.id, title: i.title, count: i.count, exact: i.exact === 1, severity: i.severity, app: i.app, environment: i.environment })),
     coverage,
-    metrics: store.all<{ source: string; name: string; value: number; at_ms: number }>("SELECT * FROM metrics ORDER BY source, name").map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms })),
+    metrics: store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name").map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),
     causes,
     jobs: store

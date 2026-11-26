@@ -57,8 +57,8 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   },
   {
     name: "occurrences",
-    ddl: `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, at_ms INTEGER NOT NULL)`,
-    columns: ["key", "source", "at_ms"],
+    ddl: `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL, at_ms INTEGER NOT NULL)`,
+    columns: ["key", "source", "stream", "at_ms"],
   },
   {
     name: "baselines",
@@ -72,8 +72,9 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   },
   {
     name: "metrics",
-    ddl: `CREATE TABLE metrics (source TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, at_ms INTEGER NOT NULL, PRIMARY KEY (source, name))`,
-    columns: ["source", "name", "value", "at_ms"],
+    ddl: `CREATE TABLE metrics (source TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, at_ms INTEGER NOT NULL,
+      over INTEGER NOT NULL CHECK (over >= 0), under INTEGER NOT NULL CHECK (under >= 0), breach INTEGER NOT NULL CHECK (breach IN (0,1)), PRIMARY KEY (source, name))`,
+    columns: ["source", "name", "value", "at_ms", "over", "under", "breach"],
   },
   {
     name: "deploys",
@@ -120,6 +121,7 @@ CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events BEGIN SELECT RA
 CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events WHEN (SELECT active FROM maintenance) = 0
   BEGIN SELECT RAISE(ABORT, 'events are append-only outside maintenance'); END;
 CREATE INDEX occurrences_age ON occurrences (source, at_ms);
+CREATE INDEX occurrences_stream ON occurrences (stream, at_ms);
 CREATE INDEX coverage_recent ON coverage (source, reading, id);
 CREATE INDEX incidents_place ON incidents (app, environment);`;
 
@@ -208,7 +210,8 @@ export class Store {
       throw new Busy(`cannot open ${file}: ${(error as Error).message}`);
     }
     try {
-      db.exec("PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE;");
+      // Incremental auto-vacuum must be chosen before the first page is written (WAL writes it); see reclaim().
+      db.exec("PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE; PRAGMA auto_vacuum = INCREMENTAL;");
       db.exec("PRAGMA journal_mode = WAL;");
       db.exec("BEGIN IMMEDIATE; COMMIT;");
     } catch (error) {
@@ -232,6 +235,8 @@ export class Store {
       throw new Incompatible(
         app !== APPLICATION_ID ? `${file} is not an Overwatch database` : `${file} has schema version ${version}; this program reads version ${USER_VERSION}`,
       );
+    } else if ((db.prepare("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum !== 2) {
+      db.exec("VACUUM"); // once, at start, for a file made without incremental auto-vacuum
     }
     return new Store(db, file);
   }
@@ -341,6 +346,21 @@ export class Store {
     } finally {
       backup.close();
     }
+  }
+
+  /**
+   * Gives free pages back to the file system, at most `pages` per call: incremental vacuum moves pages from the end
+   * of the file into free slots and truncates it, then the write-ahead log is checkpointed and truncated. A full
+   * VACUUM is not used after start: it rewrites the whole file into a copy (up to twice the space, on a disk that may
+   * be short of it) and holds the only connection for as long as that takes, so no poll could commit meanwhile.
+   * Bounded steps between polls cost each poll a few milliseconds instead. Returns the free pages left.
+   */
+  reclaim(pages = 4096): number {
+    const free = () => (this.db.prepare("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count;
+    if (free() === 0) return 0;
+    this.db.prepare(`PRAGMA incremental_vacuum(${Math.max(1, Math.floor(pages))})`).all();
+    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    return free();
   }
 
   /** Drops old history in one audited transaction; counts and the sequence are kept. */

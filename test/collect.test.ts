@@ -34,7 +34,7 @@ test("a slice admits at most the occurrence limit and folds problems past 500 in
     fc.property(fc.integer({ min: 0, max: 520 }), fc.integer({ min: 1, max: 3 }), (distinct, each) => {
       const slice = new Slice(source.sources[0]!, 0, 1, []);
       let n = 0;
-      for (let d = 0; d < distinct; d++) for (let e = 0; e < each; e++) slice.add(`k${n++}`, 1, `fp${d}`, `ERROR w${d}`, "error");
+      for (let d = 0; d < distinct; d++) for (let e = 0; e < each; e++) slice.add(`k${n++}`, "s", 1, `fp${d}`, `ERROR w${d}`, "error");
       assert.equal(slice.admitted.length, Math.min(n, LIMITS.occurrencesPerSlice));
       assert.equal([...slice.buckets.keys()].filter((k) => k !== "overflow").length, Math.min(distinct, LIMITS.problemsPerSlice));
       assert.equal(slice.buckets.has("overflow"), distinct > LIMITS.problemsPerSlice);
@@ -46,12 +46,12 @@ test("a slice admits at most the occurrence limit and folds problems past 500 in
 
 test("past the storm limit the count is a lower bound, and a saturated interval admits nothing on replay", () => {
   const slice = new Slice(source.sources[0]!, 0, 10, []);
-  for (let i = 0; i < LIMITS.occurrencesPerSlice + 7; i++) slice.add(`k${i}`, 5, "storm", "ERROR storm", "error");
+  for (let i = 0; i < LIMITS.occurrencesPerSlice + 7; i++) slice.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(slice.admitted.length, LIMITS.occurrencesPerSlice);
   assert.equal(slice.buckets.get("storm")!.inexact, true);
   assert.ok(slice.capped);
   const replay = new Slice(source.sources[0]!, 0, 20, [{ from: 0, to: 10 }]);
-  for (let i = 0; i < 100; i++) replay.add(`k${i}`, 5, "storm", "ERROR storm", "error");
+  for (let i = 0; i < 100; i++) replay.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(replay.admitted.length, 0);
 });
 
@@ -105,4 +105,21 @@ test("health is quiet only when every expected reading is fresh, measured and no
     ),
     { numRuns: 150 },
   );
+});
+
+test("the demo stays as seeded for as long as it runs", async () => {
+  const { demoConfig, seedDemo, freshen } = await import("../src/demo.ts");
+  clock.set(Date.UTC(2026, 10, 1), 5_000_000);
+  const config = demoConfig(0);
+  const store = Store.own(config.dataDir);
+  seedDemo(store, config);
+  const health = () => Object.fromEntries(snapshot(store, config, null, true).environments.map((e) => [e.environment, e.health]));
+  const seeded = health();
+  assert.deepEqual(seeded, { production: "attention", staging: "quiet", qa: "signed_out" });
+  for (let i = 1; i <= 120; i++) {
+    clock.set(Date.UTC(2026, 10, 1) + i * 60_000, 5_000_000 + i * 60_000);
+    freshen(store);
+  }
+  assert.deepEqual(health(), seeded);
+  store.close();
 });

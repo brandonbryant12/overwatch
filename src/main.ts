@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { ConfigError, defaultConfigFile, loadConfig, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
-import { demoConfig, seedDemo } from "./demo.ts";
+import { demoConfig, freshen, seedDemo } from "./demo.ts";
 import { doctor } from "./doctor.ts";
 import { clean, errorText } from "./redact.ts";
 import { serve } from "./server.ts";
@@ -92,7 +92,7 @@ function humanStatus(s: ReturnType<typeof snapshot>): string {
 async function serveCommand(c: Config, demo: boolean) {
   const store = await own(c);
   if (demo) seedDemo(store, c);
-  const service = await serve(store, c, { scheduler: true, collect: !demo, log });
+  const service = await serve(store, c, { scheduler: true, collect: !demo, log, ...(demo ? { tick: () => freshen(store) } : {}) });
   out({ version: 2, url: service.url, pid: process.pid, ...(demo ? { demo: true } : {}) }, `Overwatch ${demo ? "demo " : ""}serving at ${service.url} (pid ${process.pid})`);
   const stop = async () => {
     await service.close();

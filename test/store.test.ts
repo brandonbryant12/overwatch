@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -71,6 +71,31 @@ test("compaction drops old history but keeps counts and the next sequence", () =
   assert.equal(through, before - 10);
   assert.equal(store.seq(), before + 1);
   assert.equal(store.get<{ n: number }>("SELECT min(seq) AS n FROM events")!.n, through + 1);
+  store.close();
+});
+
+test("after compaction the file shrinks, a bounded step at a time", () => {
+  const d = dir();
+  const store = Store.own(d);
+  const size = () => ["", "-wal"].reduce((n, x) => n + (statSync(join(d, "overwatch.db") + x, { throwIfNoEntry: false })?.size ?? 0), 0);
+  assert.equal(store.get<{ auto_vacuum: number }>("PRAGMA auto_vacuum")!.auto_vacuum, 2);
+  const words = "lorem ipsum dolor sit amet ".repeat(300);
+  for (let i = 0; i < 40; i++) store.tx((w) => { for (let j = 0; j < 50; j++) w.event("slice", "s" as Clean, { words, i, j }); });
+  assert.equal(store.reclaim(), 0);
+  store.compact(10);
+  const full = size();
+  assert.ok(full > 10 * 1024 ** 2, `wrote ${full} bytes`);
+  const sizes = [full];
+  let left = Infinity, steps = 0;
+  while (left > 0 && steps++ < 1000) {
+    left = store.reclaim(256);
+    sizes.push(size());
+  }
+  assert.equal(left, 0);
+  assert.ok(steps > 3, "the work was split into bounded steps");
+  for (let i = 1; i < sizes.length; i++) assert.ok(sizes[i]! <= sizes[i - 1]!, "every step leaves the file no larger");
+  assert.ok(sizes.at(-1)! < 1024 ** 2, `shrank to ${sizes.at(-1)} bytes`);
+  assert.equal(store.get<{ n: number }>("SELECT count(*) AS n FROM events")!.n, 11);
   store.close();
 });
 

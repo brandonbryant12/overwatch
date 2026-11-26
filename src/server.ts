@@ -29,7 +29,7 @@ export interface Service {
 
 const HEARTBEAT_MS = 5_000;
 
-export async function serve(store: Store, config: Config, options: { scheduler: boolean; collect: boolean; log: (line: string) => void }): Promise<Service> {
+export async function serve(store: Store, config: Config, options: { scheduler: boolean; collect: boolean; log: (line: string) => void; tick?: () => void }): Promise<Service> {
   const collector = new Collector(store, config, config.dataDir);
   const tools = new Tools(store);
   const empty = emptyFolder(config.dataDir);
@@ -41,6 +41,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const pass = async () => {
     await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
     if (options.collect) await collector.pass();
+    options.tick?.();
   };
 
   // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.

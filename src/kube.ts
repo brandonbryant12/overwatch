@@ -66,11 +66,15 @@ export interface LogRead {
   readonly capped: boolean;
   /** The last line had no newline (a killed or capped command): it was dropped. */
   readonly cutTail: boolean;
+  /** The caller stopped the read (a line past the slice's end). */
+  readonly stopped: boolean;
 }
 
 /**
  * Streams `kubectl logs --timestamps` for one container instance, calling `line` for each complete line. Raw bytes
  * (timestamps and newlines included) count toward `maxBytes`; past it the process is killed and the rest is capped.
+ * `line` returns false to stop the read: kubectl lists a container's lines in time order, so a catch-up slice stops
+ * at the first line after its end.
  */
 export function streamLogs(
   t: Target,
@@ -79,17 +83,17 @@ export function streamLogs(
   since: string,
   previous: boolean,
   maxBytes: number,
-  line: (stamp: string, text: string) => void,
+  line: (stamp: string, text: string) => boolean | void,
 ): Promise<LogRead> {
   const args = [pod, "-c", container, "--timestamps", `--since-time=${since}`, ...(previous ? ["--previous"] : [])];
   checkKubectl("logs", args);
   return new Promise((resolve) => {
     const child = spawn("kubectl", [...base(t), "logs", ...args], { stdio: ["ignore", "pipe", "pipe"] });
-    let bytes = 0, capped = false, pending = "", stderr = "";
+    let bytes = 0, capped = false, stopped = false, pending = "", stderr = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), 120_000);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      if (capped) return;
+      if (capped || stopped) return;
       const size = Buffer.byteLength(chunk);
       let text = chunk;
       if (bytes + size > maxBytes) {
@@ -104,7 +108,12 @@ export function streamLogs(
         const raw = pending.slice(0, cut);
         pending = pending.slice(cut + 1);
         const space = raw.indexOf(" ");
-        if (space > 0) line(raw.slice(0, space), raw.slice(space + 1));
+        if (space > 0 && line(raw.slice(0, space), raw.slice(space + 1)) === false) {
+          stopped = true;
+          capped = false;
+          child.kill("SIGKILL");
+          return;
+        }
       }
     });
     child.stderr.on("data", (chunk) => {
@@ -112,7 +121,7 @@ export function streamLogs(
     });
     const done = (code: number) => {
       clearTimeout(timer);
-      resolve({ code: capped ? 0 : code, stderr, capped, cutTail: !capped && pending.length > 0 });
+      resolve({ code: capped || stopped ? 0 : code, stderr, capped, cutTail: !capped && !stopped && pending.length > 0, stopped });
     };
     child.on("error", () => done(127));
     child.on("close", (code) => done(code ?? 1));
@@ -126,7 +135,8 @@ export interface Instance {
 export interface Pod {
   readonly name: string;
   readonly uid: string;
-  readonly containers: ReadonlyArray<{ readonly name: string; readonly instances: ReadonlyArray<Instance>; readonly memoryLimit: number | null }>;
+  readonly containers: ReadonlyArray<{ readonly name: string; readonly instances: ReadonlyArray<Instance>; readonly memoryLimit: number | null; readonly restarts: number }>;
+  readonly ready: boolean;
 }
 
 const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
@@ -160,9 +170,11 @@ export function parsePods(stdout: string): Pod[] {
         name: cname,
         instances: [...(previous ? [{ id: previous, previous: true }] : []), ...(current ? [{ id: current, previous: false }] : [])],
         memoryLimit: limit ? bytes(limit) : null,
+        restarts: typeof s.restartCount === "number" ? s.restartCount : 0,
       }];
     });
-    pods.push({ name, uid, containers });
+    const ready = list(status.conditions).map(rec).some((c) => c.type === "Ready" && c.status === "True");
+    pods.push({ name, uid, containers, ready });
   }
   return pods.sort((a, b) => (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0));
 }

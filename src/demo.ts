@@ -66,3 +66,11 @@ export function seedDemo(store: Store, config: Config) {
     );
   });
 }
+
+/** The demo's picture stays as seeded for as long as it runs: its readings are renewed each minute (QA stays signed out). */
+export function freshen(store: Store) {
+  const now = clock.now();
+  const oldest = store.get<{ ok: number | null }>("SELECT min(ok_ms) AS ok FROM readings WHERE source NOT LIKE 'shop/qa/%'")?.ok;
+  if (oldest == null || now - oldest < 60_000) return;
+  store.tx((w) => w.run("UPDATE readings SET at_ms = ?, ok_ms = ? WHERE source NOT LIKE 'shop/qa/%'", now, now));
+}
