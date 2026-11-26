@@ -20,6 +20,17 @@ test("demo groups, strip, historical search and independent renewal", async t =>
   assert.ok(!ids(g).includes(id))
   const needs = await Promise.all(g.groups.needsYou.map(id => item(x, id)))
   assert.ok(needs.some(d => /checkout.*timeout/i.test(d.incident.title)))
+  const arrivals = await Promise.all(g.groups.new.map(id => item(x, id)))
+  const warmup = arrivals.find(d => /cache warm-up/i.test(d.incident.title))
+  assert.ok(warmup, "staging demo return")
+  assert.equal(warmup.incident.returned.code, "finding")
+  const returned = warmup.history.find(e => e.seq === warmup.incident.returned.seq && e.kind === "returned")
+  const action = warmup.history.find(e => e.seq === returned.data.actionSeq && e.kind === "action")
+  const finding = warmup.history.find(e => e.seq === returned.data.causeSeq && e.kind === "finding")
+  assert.ok(action && finding && action.seq < finding.seq && finding.seq < returned.seq)
+  assert.equal(action.data.action, "later")
+  assert.ok(warmup.findings.length)
+  assert.ok(warmup.incident.returned.reason.length)
   await x.control("clock", { nowMs: Date.now() + 86_400_000, monoMs: 86_400_000 })
   await x.poll()
   const s = await x.status()
@@ -192,6 +203,10 @@ test("trial namespaces are disjoint and excluded from real work", async t => {
   assert.deepEqual(cli.jobs, [])
   assert.deepEqual(cli.trial.jobs, s.trial.jobs)
   assert.equal((await api(x, "search?q=Overwatch%20trial")).items.length, 0)
+  const id = (await inbox(x)).groups.needsYou[0]
+  await act(x, id, { action: "later" })
+  await x.json("trial")
+  assert.equal((await item(x, id)).incident.way.kind, "later", "unrelated trial filings cannot return real work")
 })
 
 test("telemetry pages resume deterministically without duplicate handles and leave a call for filing", async t => {
