@@ -30,6 +30,9 @@ export function registration(): { url: string; password: string | null } | null 
   }
 }
 
+/** OpenCode did not answer (down, unreachable, or a server error): work waits; nothing is failed for it. */
+export class Unavailable extends Error {}
+
 export class OpenCode {
   readonly url: string;
   private readonly password: string | null;
@@ -51,7 +54,13 @@ export class OpenCode {
       headers,
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
       signal: AbortSignal.timeout(30_000),
+    }).catch((e) => {
+      throw new Unavailable(`OpenCode is not answering at ${this.url} (${(e as Error).message})`);
     });
+    if (response.status >= 500) {
+      await response.body?.cancel();
+      throw new Unavailable(`OpenCode answered ${response.status}`);
+    }
     if (!response.ok) {
       await response.body?.cancel();
       throw new Error(`OpenCode answered ${response.status} for ${path.replace(/\/session\/[^/]+/, "/session/…")}`);

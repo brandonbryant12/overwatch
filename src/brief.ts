@@ -17,17 +17,29 @@ export function brief(store: Store, config: Config, audience: string, after = 0,
   const inside = (sql: string) => `${sql} > ${after} AND ${sql} <= ${through}`;
   const places = config.watchers.map((w) => ({ app: w.app, environment: w.environment }));
   const name = (p: { app: string; environment: string }) => `${p.app} ${p.environment}`;
-  const fresh = store.all<{ app: string; environment: string; title: string; severity: string; count: number; exact: number }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
+  const fresh = store.all<{ app: string; environment: string; title: string; severity: string }>(`SELECT * FROM incidents WHERE ${inside("first_seq")} ORDER BY first_seq, id`);
   const returned = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'returned' AND ${inside("seq")} ORDER BY seq`);
   const decided = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'adjudicated' AND ${inside("seq")} ORDER BY seq`);
   const deploys = store.all<{ app: string; environment: string; revision: string }>(`SELECT * FROM deploys WHERE ${inside("seq")} ORDER BY seq`);
   const failed = store.all<{ subject: string; data: string }>(`SELECT subject, data FROM events WHERE kind = 'source_failed' AND ${inside("seq")} ORDER BY seq`);
   const gaps = store.all<{ source: string; reading: string; state: string }>(`SELECT DISTINCT source, reading, state FROM coverage WHERE state <> 'ok' AND ${inside("seq")}`);
-  const open = store.all<{ app: string; environment: string; title: string; severity: string; count: number; exact: number }>(
-    `SELECT * FROM incidents WHERE active = 1 AND way IS NULL AND first_seq <= ${through} ORDER BY severity, first_seq`);
+  // Open as of the fence: the disposition and quiet state are replayed from events up to `through`, so a later
+  // Done, return or quiet cannot rewrite a past brief.
+  const open = store.all<{ id: string; app: string; environment: string; title: string; severity: string; active: number }>(
+    `SELECT id, app, environment, title, severity, active FROM incidents WHERE first_seq <= ${through} ORDER BY severity, first_seq`)
+    .filter((i) => {
+      const last = (kinds: string, cmp: string) => store.get<{ kind: string; data: string }>(`SELECT kind, data FROM events WHERE subject = ? AND kind IN (${kinds}) AND seq ${cmp} ${through} ORDER BY seq DESC LIMIT 1`, i.id);
+      const way = last("'action','returned'", "<=");
+      if (way?.kind === "action" && (JSON.parse(way.data) as { way: unknown }).way) return false;
+      const quiet = last("'quieted','returned'", "<=");
+      return quiet ? quiet.kind === "returned" : i.active === 1 || !!last("'quieted'", ">");
+    });
   const earliest = store.get<{ s: number | null }>("SELECT min(seq) AS s FROM events")?.s ?? null;
   const title = (id: string) => store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", id);
-  const count = (i: { count: number; exact: number }) => `${i.count}${i.exact ? "" : "+"}`;
+  // The evidence a decision rests on: the handles cited by the readings that agree with the verdict.
+  const cited = (findings: string[]) => findings.length
+    ? store.all<{ handle: string }>(`SELECT DISTINCT handle FROM citations WHERE finding IN (${findings.map(() => "?").join(",")}) ORDER BY handle`, ...findings).map((c) => c.handle)
+    : [];
 
   const changed: string[] = [];
   for (const p of places) {
@@ -35,7 +47,7 @@ export function brief(store: Store, config: Config, audience: string, after = 0,
     if (here.length) {
       changed.push(team
         ? `${name(p)}: ${plural(here.filter((i) => i.severity === "error").length, "new error")} and ${plural(here.filter((i) => i.severity !== "error").length, "new warning")} appeared.`
-        : `${name(p)}: new ${here.map((i) => `${i.severity} «${i.title}» (${count(i)})`).join("; ")}.`);
+        : `${name(p)}: new ${here.map((i) => `${i.severity} «${i.title}»`).join("; ")}.`);
     }
   }
   for (const d of deploys) changed.push(team ? `${d.app} ${d.environment} received a new release.` : `${d.app} ${d.environment}: deployed ${d.revision.slice(0, 12)}.`);
@@ -44,24 +56,26 @@ export function brief(store: Store, config: Config, audience: string, after = 0,
     if (t) changed.push(team ? `A known ${t.app} ${t.environment} problem came back.` : `${t.app} ${t.environment}: «${t.title}» came back: ${data.reason}`);
   }
   for (const d of decided) {
-    const t = title(d.subject), r = (JSON.parse(d.data) as { result: { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null } }).result;
+    const t = title(d.subject), r = (JSON.parse(d.data) as { result: { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null; readings?: Array<{ verdict: string | null; findingId: string | null }> } }).result;
     if (!t) continue;
     const votes = `${r.counts.real ?? 0} of ${r.planned} said real`;
+    const overturned = (r.counts.real ?? 0) > r.planned / 2 && r.challenge?.outcome === "disproved";
+    const handles = cited((r.readings ?? []).filter((x) => x.verdict === r.verdict && x.findingId).map((x) => x.findingId!));
     changed.push(team
-      ? `An investigation of a ${t.app} ${t.environment} problem concluded: ${r.verdict === "real" ? "it is real" : r.verdict === "not_real" ? "it is not a real problem" : "it could not decide"}${r.counts.real && r.counts.real < r.planned ? " (the investigators disagreed)" : ""}.`
-      : `${t.app} ${t.environment}: «${t.title}» investigated: ${r.verdict.replace("_", " ")} (${votes}${r.challenge ? `, challenger ${r.challenge.outcome ?? "did not file"}` : ""}).`);
+      ? `An investigation of a ${t.app} ${t.environment} problem concluded: ${r.verdict === "real" ? "it is real" : r.verdict === "not_real" ? "it is not a real problem" : "it could not decide"}${overturned ? " (most investigators said real, but a challenger disproved that, so the majority was overturned)" : r.counts.real && r.counts.real < r.planned ? " (the investigators disagreed)" : ""}.`
+      : `${t.app} ${t.environment}: «${t.title}» investigated: ${r.verdict.replace("_", " ")} (${votes}${r.challenge ? `, challenger ${r.challenge.outcome ?? "did not file"}` : ""}${overturned ? "; majority overturned" : ""})${handles.length ? `; evidence ${handles.join(", ")}` : ""}.`);
   }
 
   const impact = places.flatMap((p) => {
     const errors = open.filter((i) => i.app === p.app && i.environment === p.environment && i.severity === "error");
     if (!errors.length) return [];
-    return [team ? `${name(p)}: ${plural(errors.length, "error problem")} active; the effect on people is not recorded.` : `${name(p)}: ${errors.map((i) => `«${i.title}» ${count(i)}`).join("; ")}; impact not recorded.`];
+    return [team ? `${name(p)}: ${plural(errors.length, "error problem")} active; the effect on people is not recorded.` : `${name(p)}: ${errors.map((i) => `«${i.title}»`).join("; ")}; impact not recorded.`];
   });
 
   const still = places.flatMap((p) => {
     const here = open.filter((i) => i.app === p.app && i.environment === p.environment);
     if (!here.length) return [];
-    return [team ? `${name(p)}: ${plural(here.length, "problem")} still open.` : `${name(p)}: ${here.map((i) => `${i.severity} «${i.title}» (${count(i)})`).join("; ")}.`];
+    return [team ? `${name(p)}: ${plural(here.length, "problem")} still open.` : `${name(p)}: ${here.map((i) => `${i.severity} «${i.title}»`).join("; ")}.`];
   });
 
   const next: string[] = [];

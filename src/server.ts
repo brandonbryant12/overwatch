@@ -135,6 +135,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       if (jobRoute && req.method === "GET") return reply(200, agents.job(decodeURIComponent(jobRoute[1]!)));
       if (req.method === "POST" && path === "/v2/open") return reply(200, await agents.open(String(body.subject ?? ""), key(req)));
       if (req.method === "GET" && path === "/v2/notifications") return reply(200, agents.notifications());
+      const retry = /^\/v2\/notifications\/([^/]+)\/retry$/.exec(path);
+      if (retry && req.method === "POST") return reply(200, agents.retry(decodeURIComponent(retry[1]!), key(req)));
       if (req.method === "GET" && path === "/v2/brief") {
         const q = address.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
         return reply(200, brief(store, config, q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")));

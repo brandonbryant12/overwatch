@@ -14,8 +14,8 @@ import { delimiter, join } from "node:path";
 import { LIMITS, type Config } from "./config.ts";
 import { clock, sleep } from "./clock.ts";
 import { run as exec } from "./exec.ts";
-import { afterFinding, groupNow, HttpError, label, passed } from "./inbox.ts";
-import { connect, OpenCode } from "./opencode.ts";
+import { afterFinding, announce, groupNow, HttpError, label, passed, receipt } from "./inbox.ts";
+import { connect, OpenCode, Unavailable } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
 import type { Code, Tools } from "./tools.ts";
@@ -24,7 +24,7 @@ import type { Code, Tools } from "./tools.ts";
 export const slots = { active: 0, max: 2 };
 
 type Vote = "real" | "not_real" | "unsure";
-export interface Reading { slot: number; sessionId: string | null; verdict: Vote | null; findingId: string | null; reason: string | null; telemetry: boolean }
+export interface Reading { slot: number; sessionId: string | null; verdict: Vote | null; findingId: string | null; reason: string | null; telemetry: boolean; observed?: string[] }
 export interface Challenge { outcome: "upheld" | "disproved" | "unsure" | null; reason: string | null; pieces: ReadonlyArray<{ handle: string; source: string; text: string }> }
 
 /**
@@ -55,15 +55,32 @@ const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 
 interface WorkRow { id: string; job_id: string; kind: "reading" | "challenge" | "answer"; slot: number | null; priority: number; state: string; tries: number; ask_key: string | null; run_id: string | null; reason: string | null; seq: number }
 interface JobRow { id: string; kind: string; subject: string; state: string; inputs: string | null; result: string | null; created_seq: number }
-interface Inputs { inputSeq: number; planned: number; title: string; app: string; environment: string; telemetry: Record<string, Array<{ at: number; text: string }>>; revision: string | null; playbook: Array<{ seq: number; date: string; text: string }> }
+interface Inputs { inputSeq: number; planned: number; title: string; app: string; environment: string; telemetry: Record<string, Array<{ at: number; text: string; origin: "telemetry" | "generated" }>>; revision: string | null; playbook: Array<{ seq: number; date: string; text: string }> }
+
+/**
+ * What a subject's agents may read as telemetry: a problem's own lines; an environment's or a source's, the lines of
+ * its problems. Only lines observed from a source are telemetry; the title Overwatch generated when there are no lines
+ * is marked `generated`, so it can never make a verdict observed.
+ */
+function telemetryOf(store: Store, subject: string) {
+  const env = subject.startsWith("env:") ? subject.slice(4).split("/") : null;
+  const src = subject.startsWith("src:") ? subject.slice(4) : null;
+  const where = env ? "i.app = ? AND i.environment = ?" : src ? "i.source = ?" : "i.id = ?";
+  const params = env ? [env[0]!, env[1] ?? ""] : [src ?? subject];
+  const telemetry: Inputs["telemetry"] = {};
+  for (const l of store.all<{ source: string; at_ms: number; text: string }>(`SELECT l.source, l.at_ms, l.text FROM lines l JOIN incidents i ON i.id = l.incident WHERE ${where} ORDER BY l.at_ms, l.rowid LIMIT ${LIMITS.linesPerProblem}`, ...params))
+    (telemetry[l.source] ??= []).push({ at: l.at_ms, text: l.text, origin: "telemetry" });
+  const inc = store.get<{ title: string; app: string; environment: string }>(`SELECT title, app, environment FROM incidents i WHERE ${where} ORDER BY seq DESC LIMIT 1`, ...params);
+  if (!Object.keys(telemetry).length && inc && !env && !src) telemetry.problem = [{ at: 0, text: inc.title, origin: "generated" }];
+  const app = env?.[0] ?? inc?.app ?? "", environment = env?.[1] ?? inc?.environment ?? "";
+  const revision = store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", app, environment)?.revision ?? null;
+  return { telemetry, revision, app };
+}
 
 /** The frozen inputs of an investigation: what every reader of it, and its challenger, reads. */
 function inputs(store: Store, config: Config, subject: string): Inputs {
   const inc = store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", subject)!;
-  const telemetry: Inputs["telemetry"] = {};
-  for (const l of store.all<{ source: string; at_ms: number; text: string }>("SELECT source, at_ms, text FROM lines WHERE incident = ? ORDER BY at_ms, rowid", subject)) (telemetry[l.source] ??= []).push({ at: l.at_ms, text: l.text });
-  if (!Object.keys(telemetry).length) telemetry.problem = [{ at: 0, text: inc.title }];
-  const revision = store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", inc.app, inc.environment)?.revision ?? null;
+  const { telemetry, revision } = telemetryOf(store, subject);
   const playbook = store.all<{ seq: number; date: string; text: string }>("SELECT seq, date, text FROM corrections WHERE app = ? ORDER BY seq DESC LIMIT 20", inc.app).reverse();
   return { inputSeq: store.seq(), planned: config.readings, title: inc.title, app: inc.app, environment: inc.environment, telemetry, revision, playbook };
 }
@@ -90,20 +107,6 @@ export function nextWork(store: Store): WorkRow | undefined {
   );
 }
 
-/** A local notification intent, once per subject and cause, in the transaction that moved the subject into Needs you. */
-export function notify(w: Writer, subject: string, causeSeq: number, title: string, body: string) {
-  const nid = `ntf_${sha([subject, causeSeq]).slice(0, 24)}`;
-  if (w.run("INSERT OR IGNORE INTO notifications (id, subject, cause_seq, state, title, body) VALUES (?, ?, ?, 'queued', ?, ?)", nid as Clean, subject as Clean, causeSeq, clean(title, 200), clean(body, 400)).changes)
-    w.event("notification_queued", subject as Clean, { id: nid, causeSeq });
-}
-
-/** After a change to a problem: if it has just moved into Needs you, the owner is told once for this cause. */
-export function announce(w: Writer, store: Store, subject: string, before: string | null, causeSeq: number) {
-  if (before === "needsYou" || groupNow(store, subject) !== "needsYou") return;
-  const inc = store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", subject)!;
-  notify(w, subject, causeSeq, `Overwatch: ${inc.app}/${inc.environment} needs you`, inc.title);
-}
-
 export class Agents {
   private readonly store: Store;
   private readonly tools: Tools;
@@ -117,20 +120,38 @@ export class Agents {
     this.config = config;
     this.emptyDir = emptyDir;
     this.log = log;
-    // Another process's sessions are gone with it: their work starts again, a fresh attempt.
-    store.tx((w) => {
-      w.run("UPDATE runs SET state = 'terminal' WHERE state = 'active' AND role <> 'responder' AND id IN (SELECT run_id FROM work WHERE state = 'running')");
-      w.run("UPDATE work SET state = 'queued' WHERE state = 'running'");
-      w.run("UPDATE asks SET state = 'queued' WHERE state = 'running'");
-      w.run("UPDATE notifications SET state = 'queued', next_ms = NULL WHERE state = 'sending'");
-    }, true);
     this.playbooks();
     for (const n of store.all<{ id: string; attempts: number; next_ms: number | null; delay_ms: number | null }>("SELECT * FROM notifications WHERE state = 'queued' AND next_ms IS NOT NULL"))
       passed(`${n.id}:${n.attempts}`, n.next_ms!, n.delay_ms ?? 0, false);
   }
 
+  private recovered = false;
+  /**
+   * Once, before any new work: what another process left running is decided from its intents. A committed filing is
+   * final and finishes its work item here; a reading or challenge without one starts a fresh attempt; a question
+   * keeps its message intent (answer() asks the peer about it, never sends it twice); a notice that was sending is
+   * retried in the same group; one parked for a missing helper is tried again.
+   */
+  private recover() {
+    this.store.tx((w) => {
+      for (const work of this.store.all<WorkRow>("SELECT * FROM work WHERE state = 'running'")) {
+        if (work.kind !== "answer" && work.run_id && this.filed(work.run_id)) {
+          w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", work.run_id as Clean);
+          this.complete(w, work, work.run_id, null);
+          continue;
+        }
+        if (work.kind !== "answer" && work.run_id) w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", work.run_id as Clean);
+        w.run("UPDATE work SET state = 'queued' WHERE id = ?", work.id as Clean);
+        if (work.ask_key) w.run("UPDATE asks SET state = 'queued' WHERE key = ?", work.ask_key as Clean);
+      }
+      w.run("UPDATE notifications SET state = 'queued', next_ms = NULL WHERE state = 'sending' OR (state = 'parked' AND reason LIKE 'terminal-notifier is not%')");
+    });
+    this.recovered = true;
+  }
+
   /** Each scheduler pass: fill free slots from the queue, owner questions first; deliver due notifications. */
   tick() {
+    if (!this.recovered) this.recover();
     void this.deliver();
     while (slots.active < slots.max) {
       const next = nextWork(this.store);
@@ -139,7 +160,7 @@ export class Agents {
       this.running.add(next.id);
       this.store.tx((w) => {
         w.run("UPDATE work SET state = 'running', tries = tries + 1 WHERE id = ?", next.id as Clean);
-        w.run("UPDATE jobs SET state = 'running' WHERE id = ? AND state = 'queued'", next.job_id as Clean);
+        w.run("UPDATE jobs SET state = 'running', reason = NULL WHERE id = ? AND state IN ('queued', 'running')", next.job_id as Clean);
         if (next.ask_key) w.run("UPDATE asks SET state = 'running' WHERE key = ?", next.ask_key as Clean);
       });
       void (next.kind === "answer" ? this.answer(next) : this.read(next))
@@ -215,6 +236,11 @@ export class Agents {
           if (this.filed(s.runId)) break;
         }
       } catch (e) {
+        if (e instanceof Unavailable && !(s && this.filed(s.runId))) {
+          if (s) this.store.tx((w) => w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", s!.runId as Clean));
+          if (s) this.tools.contexts.delete(s.runId);
+          return this.defer(work, e);
+        }
         if (s && e instanceof Expired) void this.oc().interrupt(s.sessionId);
         reason = e instanceof Expired ? "its five minutes ran out; the session was interrupted" : `OpenCode failed: ${errorText(e, 300)}`;
       } finally {
@@ -241,12 +267,23 @@ export class Agents {
 
   /** A work item ends; the job moves on in the same transaction. */
   private finish(work: WorkRow, runId: string | null, reason: string | null) {
+    this.store.tx((w) => this.complete(w, work, runId, reason));
+  }
+
+  private complete(w: Writer, work: WorkRow, runId: string | null, reason: string | null) {
+    w.run("UPDATE work SET state = ?, run_id = coalesce(?, run_id), reason = ? WHERE id = ?", (runId ? "done" : "missing") as Clean, runId as Clean | null, reason as Clean | null, work.id as Clean);
+    const finding = runId ? this.filed(runId) : undefined;
+    if (work.kind === "reading") w.event("reading_finished", work.job_id as Clean, { slot: work.slot, findingId: finding?.id ?? null, reason });
+    else w.event("challenge_finished", work.job_id as Clean, { findingId: finding?.id ?? null, reason });
+    this.advance(w, work.job_id);
+  }
+
+  /** OpenCode is away: the work waits, visibly, and is taken again on a later pass; nothing is failed. */
+  private defer(work: WorkRow, e: unknown) {
     this.store.tx((w) => {
-      w.run("UPDATE work SET state = ?, run_id = coalesce(?, run_id), reason = ? WHERE id = ?", (runId ? "done" : "missing") as Clean, runId as Clean | null, reason as Clean | null, work.id as Clean);
-      const finding = runId ? this.filed(runId) : undefined;
-      if (work.kind === "reading") w.event("reading_finished", work.job_id as Clean, { slot: work.slot, findingId: finding?.id ?? null, reason });
-      else w.event("challenge_finished", work.job_id as Clean, { findingId: finding?.id ?? null, reason });
-      this.advance(w, work.job_id);
+      w.run("UPDATE work SET state = 'queued' WHERE id = ?", work.id as Clean);
+      w.run("UPDATE jobs SET reason = ? WHERE id = ?", `waiting for OpenCode: ${errorText(e, 200)}` as Clean, work.job_id as Clean);
+      if (work.ask_key) w.run("UPDATE asks SET state = 'queued' WHERE key = ?", work.ask_key as Clean);
     });
   }
 
@@ -269,7 +306,9 @@ export class Agents {
     const seq = w.next();
     const result = {
       verdict: decided.verdict, observed: decided.observed, planned: decided.planned, counts: decided.counts,
-      readings: readings.map(({ telemetry: _, ...r }) => r), challenge, seq,
+      // How many distinct observed lines the readings that carry the verdict cited: agreement on one line is one observation.
+      observations: new Set(readings.filter((r) => r.verdict === decided.verdict).flatMap((r) => r.observed ?? [])).size,
+      readings: readings.map(({ telemetry: _, observed: __, ...r }) => r), challenge, seq,
     };
     if (w.event("adjudicated", job.subject as Clean, { job: jobId, result }) !== seq) throw new Error("the event log moved during adjudication");
     w.run("UPDATE jobs SET state = 'completed', result = ? WHERE id = ?", json(result), jobId as Clean);
@@ -280,10 +319,14 @@ export class Agents {
   private reading(item: WorkRow): Reading {
     const run = item.run_id ? this.store.get<{ session_id: string }>("SELECT session_id FROM runs WHERE id = ?", item.run_id) : undefined;
     const f = item.state === "done" && item.run_id ? this.store.get<{ id: string; verdict: Vote; claims: string }>("SELECT id, verdict, claims FROM findings WHERE run_id = ?", item.run_id) : undefined;
-    const pieces = f ? (JSON.parse(f.claims) as Array<{ pieces: Array<{ source: string }> }>).flatMap((c) => c.pieces) : [];
+    // Whether a reading rests on telemetry is the cited pieces' typed origin, never a source's display name.
+    const handles = f ? (JSON.parse(f.claims) as Array<{ pieces: Array<{ handle: string }> }>).flatMap((c) => c.pieces.map((p) => p.handle)) : [];
+    const observed = handles.length
+      ? this.store.all<{ text: string }>(`SELECT text FROM evidence WHERE origin = 'telemetry' AND handle IN (${handles.map(() => "?").join(",")})`, ...handles).map((e) => e.text)
+      : [];
     return {
       slot: item.slot!, sessionId: run?.session_id ?? null, verdict: f?.verdict ?? null, findingId: f?.id ?? null,
-      reason: f ? null : item.reason ?? "no valid filing", telemetry: pieces.some((p) => p.source !== "code" && p.source !== "history"),
+      reason: f ? null : item.reason ?? "no valid filing", telemetry: observed.length > 0, observed,
     };
   }
 
@@ -294,31 +337,44 @@ export class Agents {
     return { outcome: body.challenge, reason: clean(body.reason, 2000), pieces: (JSON.parse(f.claims) as Array<{ pieces: Challenge["pieces"] }>).flatMap((c) => c.pieces) };
   }
 
-  /** An answer: one turn in the conversation's own responder session (continued, or started), stored redacted. */
+  /**
+   * An answer: one turn in the conversation's responder session, the message named before it is sent. After a
+   * restart the same message is looked for at the peer and waited on, never sent again; a session the peer no longer
+   * has gets a fresh one.
+   */
   private async answer(work: WorkRow) {
     const job = this.store.get<JobRow>("SELECT * FROM jobs WHERE id = ?", work.job_id)!;
-    const ask = this.store.get<{ key: string; seq: number; text: string; subject: string }>("SELECT * FROM asks WHERE key = ?", work.ask_key)!;
-    const existing = this.store.get<{ session_id: string }>("SELECT session_id FROM runs WHERE job_id = ? AND role = 'responder' ORDER BY attempt DESC LIMIT 1", job.id)?.session_id;
-    const isProblem = !ask.subject.startsWith("env:") && !ask.subject.startsWith("src:");
-    const frozen = isProblem ? inputs(this.store, this.config, ask.subject) : null;
-    const { code, repo } = await this.code(frozen?.revision ?? null, frozen?.app ?? "");
+    const ask = this.store.get<{ key: string; seq: number; text: string; subject: string; session_id: string | null; message: string | null }>("SELECT * FROM asks WHERE key = ?", work.ask_key)!;
+    const scope = telemetryOf(this.store, ask.subject);
+    const { code, repo } = await this.code(scope.revision, scope.app);
     const what = label(this.store, this.config, ask.subject) ?? ask.subject;
     let s: { runId: string; sessionId: string; deadline: number } | undefined;
     try {
-      s = await this.session(work, job, "responder", `Overwatch question: ${clean(what, 120)}`, frozen?.telemetry ?? {}, code, repo, existing);
-      const after = await this.say(s.runId, s.sessionId, responderPrompt(ask.subject, what, ask.text, !existing), s.deadline);
+      const oc = this.oc();
+      let existing = ask.session_id ?? this.store.get<{ session_id: string }>("SELECT session_id FROM runs WHERE job_id = ? AND role = 'responder' ORDER BY attempt DESC LIMIT 1", job.id)?.session_id;
+      if (existing && !(await oc.exists(existing))) existing = undefined;
+      s = await this.session(work, job, "responder", `Overwatch question: ${clean(what, 120)}`, scope.telemetry, code, repo, existing);
+      const message = ask.message && ask.session_id === s.sessionId ? ask.message : id("msg");
+      this.store.tx((w) => {
+        w.run("UPDATE asks SET session_id = ?, message = ? WHERE key = ?", s!.sessionId as Clean, message as Clean, ask.key as Clean);
+        w.run("INSERT OR IGNORE INTO messages (id, run_id, purpose) VALUES (?, ?, 'prompt')", message as Clean, s!.runId as Clean);
+      });
+      const sent = (await bounded(oc.messages(s.sessionId), s.deadline)).some((m) => m.id === message);
+      if (!sent) await bounded(oc.prompt(s.sessionId, { id: message, text: responderPrompt(ask.subject, what, ask.text, !existing) }), s.deadline);
+      const after = await this.idle(s.sessionId, message, s.deadline);
       if (after.outcome === "failed" || !after.said.trim()) throw new Error("the model gave no answer");
       this.store.tx((w) => {
         const answer = clean(after.said, 8000);
-        w.run("UPDATE asks SET state = 'answered', session_id = ?, answer = ? WHERE key = ?", s!.sessionId as Clean, answer as Clean, ask.key as Clean);
+        w.run("UPDATE asks SET state = 'answered', answer = ? WHERE key = ?", answer as Clean, ask.key as Clean);
         w.run("UPDATE work SET state = 'done' WHERE id = ?", work.id as Clean);
-        w.run("UPDATE jobs SET state = CASE WHEN EXISTS (SELECT 1 FROM work WHERE job_id = ? AND state IN ('queued', 'running') AND id <> ?) THEN state ELSE 'completed' END WHERE id = ?", job.id as Clean, work.id as Clean, job.id as Clean);
+        w.run("UPDATE jobs SET state = CASE WHEN EXISTS (SELECT 1 FROM work WHERE job_id = ? AND state IN ('queued', 'running') AND id <> ?) THEN state ELSE 'completed' END, reason = NULL WHERE id = ?", job.id as Clean, work.id as Clean, job.id as Clean);
         w.event("answered", ask.subject as Clean, { askSeq: ask.seq, sessionId: s!.sessionId, answer });
       });
     } catch (e) {
+      if (e instanceof Unavailable) return this.defer(work, e);
       const reason = e instanceof Expired ? "five minutes passed without an answer" : `no answer: ${errorText(e, 300)}`;
       this.store.tx((w) => {
-        w.run("UPDATE asks SET state = 'failed', session_id = ?, reason = ? WHERE key = ?", (s?.sessionId ?? null) as Clean | null, reason as Clean, ask.key as Clean);
+        w.run("UPDATE asks SET state = 'failed', reason = ? WHERE key = ?", reason as Clean, ask.key as Clean);
         w.run("UPDATE work SET state = 'missing', reason = ? WHERE id = ?", reason as Clean, work.id as Clean);
         w.run("UPDATE jobs SET state = 'parked', reason = ? WHERE id = ?", reason as Clean, job.id as Clean);
         w.event("answered", ask.subject as Clean, { askSeq: ask.seq, sessionId: s?.sessionId ?? null, failed: reason });
@@ -328,12 +384,21 @@ export class Agents {
     }
   }
 
+  private async idle(sessionId: string, message: string, deadline: number) {
+    while (clock.mono() < deadline) {
+      const after = OpenCode.after(await bounded(this.oc().messages(sessionId), deadline), message);
+      if (after.idle) return after;
+      await sleep(25);
+    }
+    throw new Expired();
+  }
+
   /** POST /v2/items/:id/investigate: explicit, so it works with automatic investigation off; an open one coalesces. */
   investigate(subject: string, key: string | undefined) {
     if (!this.store.get("SELECT 1 FROM incidents WHERE id = ?", subject)) throw new HttpError(404, `no item ${subject}`);
-    return once(this.store, key, "investigate", { subject }, () => {
+    return receipt(this.store, key, "investigate", subject, {}, (w) => {
       const open = this.store.get<{ id: string }>("SELECT id FROM jobs WHERE kind = 'investigation' AND subject = ? AND state IN ('queued', 'running') ORDER BY created_seq DESC LIMIT 1", subject);
-      return { jobId: open?.id ?? this.store.tx((w) => queueInvestigation(w, this.store, this.config, subject, "manual")), subject };
+      return { jobId: open?.id ?? queueInvestigation(w, this.store, this.config, subject, "manual"), subject };
     });
   }
 
@@ -346,27 +411,32 @@ export class Agents {
     return { id: j.id, subject: j.subject, kind: j.kind, state: j.state, reason: j.reason, result: j.result ? JSON.parse(j.result) : null, turns };
   }
 
-  /** POST /v2/open: an ordinary interactive owner session with this focus, confirmed by the peer; a key reopens it. */
+  /**
+   * POST /v2/open: an ordinary interactive owner session with this focus, confirmed by the peer. The receipt names
+   * the session and its seed message before anything is sent; a retry or a concurrent duplicate carries out the
+   * same intent (create if the peer lacks it, seed if it lacks the message) and returns the same result.
+   */
   async open(subject: string, key: string | undefined) {
     const what = label(this.store, this.config, subject);
     if (what === null) throw new HttpError(404, "no such subject");
-    const used = key ? this.store.get<{ digest: string; result: string }>("SELECT digest, result FROM requests WHERE key = ? AND op = 'open'", key) : undefined;
-    if (used) return JSON.parse(used.result);
+    const intent = receipt(this.store, key, "open", subject, {}, () => ({ subject, sessionId: id("ses"), url: null as string | null, message: id("msg") }));
+    if (intent.url) return { subject, sessionId: intent.sessionId, url: intent.url };
     const oc = connect(this.config.opencode);
     if (!oc) throw new HttpError(503, "OpenCode is not configured and has not registered itself; start it, then try again");
-    const sessionId = id("ses");
     try {
-      const made = (await oc.createSession({ id: sessionId, title: `Overwatch: ${clean(what, 120)}`, agent: null, model: this.config.opencode.model, directory: this.emptyDir })) as { data?: { url?: string } };
-      await oc.prompt(sessionId, { id: id("msg"), text: `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.` });
-      if (!(await oc.exists(sessionId))) throw new Error("the session is not there");
-      const url = made?.data?.url ?? `${oc.url}/session/${sessionId}`;
-      return once(this.store, key, "open", { subject }, () => {
-        this.store.tx((w) => w.event("opened", subject as Clean, { sessionId }));
-        return { subject, sessionId, url };
+      let made: { data?: { url?: string } } | undefined;
+      if (!(await oc.exists(intent.sessionId))) made = (await oc.createSession({ id: intent.sessionId, title: `Overwatch: ${clean(what, 120)}`, agent: null, model: this.config.opencode.model, directory: this.emptyDir })) as typeof made;
+      if (!(await oc.messages(intent.sessionId)).some((m) => m.id === intent.message))
+        await oc.prompt(intent.sessionId, { id: intent.message, text: `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.` });
+      if (!(await oc.exists(intent.sessionId))) throw new Error("the session is not there");
+      const url = made?.data?.url ?? `${oc.url}/session/${intent.sessionId}`;
+      const result = { subject, sessionId: intent.sessionId, url };
+      this.store.tx((w) => {
+        if (w.run("UPDATE requests SET result = ? WHERE key = ? AND json_extract(result, '$.url') IS NULL", json({ ...intent, url }), key as Clean).changes) w.event("opened", subject as Clean, { sessionId: intent.sessionId });
       });
+      return result;
     } catch (e) {
-      if (e instanceof HttpError) throw e;
-      throw new HttpError(503, `OpenCode did not open a session (${errorText(e, 200)}); check that it is running`);
+      throw new HttpError(503, `OpenCode did not open the session (${errorText(e, 200)}); check that it is running, then try again`);
     }
   }
 
@@ -377,14 +447,12 @@ export class Agents {
     if (!this.store.get("SELECT 1 FROM incidents WHERE id = ?", subject)) throw new HttpError(404, `no item ${subject}`);
     if (!job) throw new HttpError(400, "jobId must name a completed investigation of this problem");
     if (typeof text !== "string" || !text.trim() || text.length > 1000) throw new HttpError(400, "text is required (at most 1,000 characters)");
-    const result = once(this.store, key, "correct", { subject, jobId, text }, () => {
+    const result = receipt(this.store, key, "correct", subject, { jobId, text }, (w) => {
       const app = this.store.get<{ app: string }>("SELECT app FROM incidents WHERE id = ?", subject)!.app;
-      return this.store.tx((w) => {
-        const seq = w.next(), date = new Date(clock.now()).toISOString().slice(0, 10), line = clean(text.trim(), 1000);
-        if (w.event("corrected", subject as Clean, { date, seq, app, subject, jobId, text: line }) !== seq) throw new Error("the event log moved during a correction");
-        w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (?, ?, ?, ?, ?, ?)", seq, app as Clean, subject as Clean, jobId as Clean, line as Clean, date as Clean);
-        return { app, seq, jobId, text: line };
-      });
+      const seq = w.next(), date = new Date(clock.now()).toISOString().slice(0, 10), line = clean(text.trim(), 1000);
+      if (w.event("corrected", subject as Clean, { date, seq, app, subject, jobId, text: line }) !== seq) throw new Error("the event log moved during a correction");
+      w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (?, ?, ?, ?, ?, ?)", seq, app as Clean, subject as Clean, jobId as Clean, line as Clean, date as Clean);
+      return { app, seq, jobId, text: line };
     });
     this.playbooks();
     return result;
@@ -408,6 +476,18 @@ export class Agents {
   }
 
   /** GET /v2/notifications */
+  /** POST /v2/notifications/:id/retry: the owner sends a parked notice again, in the same group. */
+  retry(id: string, key: string | undefined) {
+    if (!this.store.get("SELECT 1 FROM notifications WHERE id = ?", id)) throw new HttpError(404, `no notification ${id}`);
+    const r = receipt(this.store, key, "retry", id, {}, (w) => {
+      const changed = w.run("UPDATE notifications SET state = 'queued', attempts = 0, next_ms = NULL, delay_ms = NULL, reason = NULL WHERE id = ? AND state = 'parked'", id as Clean).changes;
+      if (changed) w.event("notification_queued", null, { intent: id, retry: true }, "owner");
+      return { id, requeued: changed > 0 };
+    });
+    void this.deliver();
+    return r;
+  }
+
   notifications() {
     return {
       items: this.store.all<{ id: string; subject: string; cause_seq: number; state: string; attempts: number; next_ms: number | null; reason: string | null }>("SELECT * FROM notifications ORDER BY cause_seq, id")
@@ -422,9 +502,10 @@ export class Agents {
     this.delivering = true;
     try {
       await sleep(0); // background work: it starts after the pass that found it, never inside that pass's writes
+      if (this.store.get("SELECT 1 FROM notifications WHERE state = 'parked' AND reason LIKE 'terminal-notifier is not%'") && helperPath()) this.store.tx((w) => w.run("UPDATE notifications SET state = 'queued', next_ms = NULL, reason = NULL WHERE state = 'parked' AND reason LIKE 'terminal-notifier is not%'"));
       for (const n of this.store.all<{ id: string; title: string; body: string; attempts: number; next_ms: number | null; delay_ms: number | null }>("SELECT * FROM notifications WHERE state = 'queued' ORDER BY cause_seq")) {
         if (n.next_ms !== null && !passed(`${n.id}:${n.attempts}`, n.next_ms, n.delay_ms ?? 0, false)) continue;
-        const helper = (process.env.PATH ?? "").split(delimiter).map((d) => join(d, "terminal-notifier")).find((f) => existsSync(f));
+        const helper = helperPath();
         const attempt = n.attempts + 1;
         if (!helper) {
           this.store.tx((w) => {
@@ -461,19 +542,7 @@ export class Agents {
   }
 }
 
-/** An idempotent owner request: the same key and payload answer the same way forever; a different payload is 409. */
-function once<T>(store: Store, key: string | undefined, op: string, payload: unknown, make: () => T): T {
-  if (!key || !/^rk_[0-9a-f]{24}$/.test(key)) throw new HttpError(400, "an Idempotency-Key from GET /v2/focus is required");
-  const digest = sha([op, payload]);
-  const used = store.get<{ op: string; digest: string; result: string }>("SELECT * FROM requests WHERE key = ?", key);
-  if (used) {
-    if (used.op !== op || used.digest !== digest) throw new HttpError(409, "this request key was used for a different request");
-    return JSON.parse(used.result) as T;
-  }
-  const result = make();
-  store.tx((w) => w.run("INSERT INTO requests (key, op, digest, result) VALUES (?, ?, ?, ?)", key as Clean, op as Clean, digest as Clean, json(result)));
-  return result;
-}
+const helperPath = () => (process.env.PATH ?? "").split(delimiter).map((d) => join(d, "terminal-notifier")).find((f) => existsSync(f));
 
 class Expired extends Error {}
 function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
@@ -511,7 +580,7 @@ function readerPrompt(frozen: Inputs, slot: number) {
 function challengerPrompt(frozen: Inputs, claims: ReadonlyArray<string>) {
   return `Challenge\n\nOthers concluded a problem in ${frozen.app}/${frozen.environment} is real. Treat these claims as hypotheses to test, not facts:\n` +
     `${claims.map((c) => `- ${c}`).join("\n") || "- (no claim text)"}\n\nRead the same evidence yourself with ow_telemetry and the code tools, and try to disprove the claims. ` +
-    `File exactly one ow_challenge: outcome upheld, disproved or unsure, a reason, and evidence handles you were given. ${DATA}${guidance(frozen)}`;
+    `File exactly one ow_challenge: outcome upheld, disproved or unsure, a reason, and evidence handles you were given. ${DATA}`;
 }
 
 function responderPrompt(subject: string, what: string, question: string, first: boolean) {

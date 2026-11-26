@@ -243,8 +243,10 @@ export function act(store: Store, config: Config, id: string, body: Record<strin
     if (actionSeq === null) throw new HttpError(400, "undo needs the actionSeq it undoes");
     if (!way || way.seq !== actionSeq) throw new HttpError(409, "that action is no longer the current one");
     return { seq: store.tx((w) => {
+      const before = groupNow(store, id);
       const seq = w.event("action", id as Clean, { action: "undo", actionSeq, previous: publicWay(way), way: publicWay(way.previous) });
       w.run("UPDATE incidents SET way = ?, decided_seq = ? WHERE id = ?", way.previous ? json(way.previous) : null, seq, id as Clean);
+      announce(w, store, id, before, seq); // back into Needs you: a new cause, told once
       return seq;
     }) };
   }
@@ -302,8 +304,10 @@ export function detail(store: Store, config: Config, id: string) {
 /** Questions and their answers, in the order they were asked. */
 export function turns(store: Store, by: "subject" | "job_id", value: string) {
   return store
-    .all<{ key: string; seq: number; text: string; state: string; session_id: string | null; answer: string | null; reason: string | null; job_id: string }>(`SELECT * FROM asks WHERE ${by} = ? ORDER BY seq`, value)
-    .map((a) => ({ askSeq: a.seq, jobId: a.job_id, text: a.text, sessionId: a.session_id, state: a.state, answer: a.answer, reason: a.reason }));
+    .all<{ key: string; seq: number; text: string; state: string; session_id: string | null; answer: string | null; reason: string | null; job_id: string; reads: number }>(
+      `SELECT a.*, (SELECT count(*) FROM evidence e JOIN work k ON k.run_id = e.run_id WHERE k.ask_key = a.key) AS reads FROM asks a WHERE a.${by} = ? ORDER BY a.seq`, value)
+    // `reads`: how many pieces of evidence the responder actually read for this answer. An answer cites none.
+    .map((a) => ({ askSeq: a.seq, jobId: a.job_id, text: a.text, sessionId: a.session_id, state: a.state, answer: a.answer, reason: a.reason, reads: a.reads }));
 }
 
 /** The deployed revision a subject is about (its app and environment), or null. */
@@ -346,18 +350,13 @@ export function ask(store: Store, config: Config, body: Record<string, unknown>,
   if (typeof subject !== "string" || label(store, config, subject) === null) throw new HttpError(400, "unknown subject");
   if (typeof text !== "string" || !text.trim() || text.length > 4000) throw new HttpError(400, "text is required (at most 4,000 characters)");
   if (mode !== "auto" && mode !== "new" && mode !== "continue") throw new HttpError(400, "mode is auto, new or continue");
-  const digest = createHash("sha256").update(JSON.stringify([subject, text, mode])).digest("hex");
   const result = (r: { subject: string; job_id: string; mode: string }) => ({ jobId: r.job_id, target: { subject: r.subject, mode: r.mode, jobId: r.job_id } });
-  const used = store.get<{ subject: string; job_id: string; mode: string; digest: string }>("SELECT * FROM asks WHERE key = ?", key);
-  if (used) {
-    if (used.digest !== digest) throw new HttpError(409, "this request key was used for a different prompt");
-    return result(used);
-  }
-  const open = target(store, subject, config).jobId;
-  if (mode === "continue" && !open) throw new HttpError(409, "there is no conversation on this subject that can continue");
-  const effective = mode === "new" || !open ? "new" : "continue";
-  const cleaned = clean(text.trim(), 4000);
-  return store.tx((w) => {
+  const cleaned = clean(text.trim(), 4000), digest = createHash("sha256").update(JSON.stringify([subject, text, mode])).digest("hex");
+  return receipt(store, key, "ask", subject, { text, mode }, (w) => {
+    // Decided inside the receipt: a replay answers as the first request did, whatever happened since.
+    const open = target(store, subject, config).jobId;
+    if (mode === "continue" && !open) throw new HttpError(409, "there is no conversation on this subject that can continue");
+    const effective = mode === "new" || !open ? "new" : "continue";
     const jobId = effective === "new" ? `job_${randomBytes(12).toString("hex")}` : open!;
     const seq = w.event("asked", subject as Clean, { subject, jobId, mode: effective, text: cleaned });
     if (effective === "new") {
@@ -414,4 +413,38 @@ export function search(store: Store, config: Config, q: string, cursor: string |
 /** Counts an occurrence by the hour of its event time, in the transaction that counts it. */
 export function hourly(w: Writer, incident: string, atMs: number, n = 1) {
   w.run("INSERT INTO hourly (incident, hour, count) VALUES (?, ?, ?) ON CONFLICT (incident, hour) DO UPDATE SET count = count + excluded.count", incident as Clean, Math.floor(atMs / HOUR), n);
+}
+
+/** A local notification intent, once per subject and cause, in the transaction that moved the subject into Needs you. */
+export function notify(w: Writer, subject: string, causeSeq: number, title: string, body: string) {
+  const nid = `ntf_${createHash("sha256").update(JSON.stringify([subject, causeSeq])).digest("hex").slice(0, 24)}`;
+  if (w.run("INSERT OR IGNORE INTO notifications (id, subject, cause_seq, state, title, body) VALUES (?, ?, ?, 'queued', ?, ?)", nid as Clean, subject as Clean, causeSeq, clean(title, 200), clean(body, 400)).changes)
+    w.event("notification_queued", subject as Clean, { id: nid, causeSeq });
+}
+
+/** After a change to a problem: if it has just moved into Needs you, the owner is told once for this cause. */
+export function announce(w: Writer, store: Store, subject: string, before: string | null, causeSeq: number) {
+  if (before === "needsYou" || groupNow(store, subject) !== "needsYou") return;
+  const inc = store.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", subject)!;
+  notify(w, subject, causeSeq, `Overwatch: ${inc.app}/${inc.environment} needs you`, inc.title);
+}
+
+/**
+ * Every owner write route goes through here: the receipt and the change it protects commit in one transaction, so a
+ * crash leaves both or neither. The same key with the same subject and body answers the same way forever; any other
+ * subject or body is 409.
+ */
+export function receipt<T>(store: Store, key: string | undefined, op: string, subject: string, body: unknown, change: (w: Writer) => T): T {
+  if (!key || !/^rk_[0-9a-f]{24}$/.test(key)) throw new HttpError(400, "an Idempotency-Key from GET /v2/focus is required");
+  const digest = createHash("sha256").update(JSON.stringify([op, subject, body])).digest("hex");
+  return store.tx((w) => {
+    const used = store.get<{ op: string; digest: string; result: string }>("SELECT * FROM requests WHERE key = ?", key);
+    if (used) {
+      if (used.op !== op || used.digest !== digest) throw new HttpError(409, "this request key was used for a different request");
+      return JSON.parse(used.result) as T;
+    }
+    const result = change(w);
+    w.run("INSERT INTO requests (key, op, digest, result) VALUES (?, ?, ?, ?)", key as Clean, op as Clean, digest as Clean, json(result));
+    return result;
+  });
 }

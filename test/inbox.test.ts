@@ -71,7 +71,7 @@ test("a request key answers the same way forever and refuses a different prompt;
   assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "continue" }, "rk_" + "b".repeat(24)), /no conversation/);
   const first = ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key);
   assert.deepEqual(ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key), first);
-  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "other", mode: "auto" }, key), /different prompt/);
+  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "other", mode: "auto" }, key), /different request/);
   assert.deepEqual(inbox(r.store).groups.working, ["inc_1"]);
   assert.deepEqual(search(r.store, r.config, "WHY?").items.map((i) => i.id), ["inc_1"]);
   assert.throws(() => ask(r.store, r.config, { subject: "env:shop/nowhere", text: "x", mode: "auto" }, "rk_" + "c".repeat(24)), /unknown subject/);
