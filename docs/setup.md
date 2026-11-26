@@ -5,6 +5,7 @@ check it.
 
 ```sh
 git clone <this repository's Git remote> overwatch && cd overwatch
+pnpm install            # Effect and the page's bundle
 bin/overwatch check     # step 2 first: write the configuration
 ```
 
@@ -12,15 +13,19 @@ bin/overwatch check     # step 2 first: write the configuration
 
 | Tool | Why | Check |
 | --- | --- | --- |
-| Node 22.13 or newer | Runs Overwatch (it strips the TypeScript types itself; nothing is built). | `node --version` |
+| Node 24, or 22.16 or newer | Runs Overwatch (it strips the TypeScript types itself). Node 23 cannot roll a failed change back (`node:sqlite` lacks `isTransaction`). | `node --version` |
+| pnpm | Installs Effect and builds the page. | `pnpm --version` |
 | git | Reads code from the deployed commit. | `git --version` |
 | `kubectl`, signed in to each cluster | Kubernetes, read-only: `get`, `describe`, `logs`, `top`. | `kubectl --context <ctx> -n <ns> get pods` |
 | Datadog API and application keys | Only if you watch Datadog. | `overwatch doctor` |
 | OpenCode 2.4.1 | Runs the model for `trial` and `doctor`'s model check. | `opencode --version` |
 | `gh` | Checked by `doctor` for later milestones. | `gh --version` |
 
-There is no `npm install` for running it: `"dependencies"` is empty. `pnpm install` only fetches the development
-tools (TypeScript, fast-check) for running the tests.
+`pnpm install` fetches the runtime dependencies, which are Effect's own packages (`effect`, `@effect/platform-node`,
+`@effect/sql-sqlite-node`, and `@effect/ui` with `@effect/ui-kit` for the page), and builds the page into `web/dist`
+with rolldown. The service itself is not built: Node runs its TypeScript directly. If a registry proxy blocks
+rolldown's native binding, the install still succeeds; build the page on another machine with `pnpm run build:web` and
+copy `web/dist` across.
 
 ## 2. Configure
 

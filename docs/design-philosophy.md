@@ -48,7 +48,9 @@ what is measured to be active now: a problem whose measurements have recovered d
 The model never supplies counts, order, identity, quotes, sources or confidence. The trial measures the owner's
 model on seeded cases before any automation is turned on.
 
-## Small, and nothing to install
+## Small, and built on one library
 
-One process, one file, Node's standard library, no build step. At most 5,500 lines for the service (5,000 until fixes and forecasting arrived in milestone 4). A fork can read
+One process, one file, and one library: Effect. Services are layers, failures are typed, every value from outside is
+decoded by a schema, and the database, programs, HTTP, MCP and the command line are Effect's own modules rather than
+hand-written ones, so there is less of ours to read. The service has no build step; only the page is bundled. At most 5,500 lines for the service (5,000 until fixes and forecasting arrived in milestone 4). A fork can read
 all of it.
