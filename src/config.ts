@@ -2,6 +2,7 @@
  * The configuration file: its grammar and the operating limits `check` enforces (specification section 10). Keys
  * outside the grammar, duplicate watchers and anything beyond a limit are refused, offline, before anything runs.
  */
+import { Context, Layer } from "effect";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -274,4 +275,9 @@ export function loadConfig(file: string): Config {
     if (error instanceof ConfigError) throw error;
     throw new ConfigError(`${file} is not valid JSON`);
   }
+}
+
+/** The configuration this process runs with, as a service: read with `yield* AppConfig`. */
+export class AppConfig extends Context.Service<AppConfig, Config>()("overwatch/AppConfig") {
+  static readonly layer = (config: Config) => Layer.succeed(AppConfig, config);
 }

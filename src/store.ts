@@ -10,9 +10,12 @@
  * transaction. `events.seq` is the only clock for "before" and "after". The writer cleans every string and every JSON
  * value it is given (see redact.ts), so text that did not pass redaction cannot be stored.
  */
-import { DatabaseSync } from "node:sqlite";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { SqliteClient } from "@effect/sql-sqlite-node";
+import { Cause, Context, Effect, FileSystem, Layer, Path, Predicate, PubSub, Schema, Stream } from "effect";
+import { Reactivity } from "effect/reactivity";
+import { SqlClient, SqlError } from "effect/sql";
+import { BackupError, Busy, Full, Incompatible } from "./errors.ts";
+export { BackupError, Busy, Full, Incompatible };
 import { clean, cleanDeep, type Clean } from "./redact.ts";
 export type { Clean };
 import { clock } from "./clock.ts";
@@ -254,35 +257,39 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   },
 ];
 
-const INDEXES = `CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms);
-CREATE INDEX IF NOT EXISTS occurrences_stream ON occurrences (stream, at_ms);
-CREATE INDEX IF NOT EXISTS coverage_recent ON coverage (source, reading, id);
-CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment);
-CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour);
-CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);
-CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms);
-CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq);
-CREATE INDEX IF NOT EXISTS samples_series ON samples (source, id);
-CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id);`;
+const INDEXES: ReadonlyArray<string> = [
+  "CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms)",
+  "CREATE INDEX IF NOT EXISTS occurrences_stream ON occurrences (stream, at_ms)",
+  "CREATE INDEX IF NOT EXISTS coverage_recent ON coverage (source, reading, id)",
+  "CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment)",
+  "CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour)",
+  "CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state)",
+  "CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms)",
+  "CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq)",
+  "CREATE INDEX IF NOT EXISTS samples_series ON samples (source, id)",
+  "CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id)",
+];
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
 const ADDED_TABLES = new Set(["onsets", "rollouts", "samples", "comparisons", "fixes", "proposals", "origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
 
-/** Rules kept by the database itself; created with the schema and on open of an older file. */
-const TRIGGERS = `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
+/** Rules kept by the database itself; created with the schema and on open of an older file. One statement each. */
+const TRIGGERS: ReadonlyArray<string> = [
+  `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
   INSERT OR IGNORE INTO citations (finding, handle)
     SELECT NEW.id, json_extract(p.value, '$.handle') FROM json_each(NEW.claims) c, json_each(c.value, '$.pieces') p;
-END;`;
+END`,
+];
 
-const MAINTENANCE = `CREATE TABLE maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), active INTEGER NOT NULL CHECK (active IN (0,1)));
-INSERT INTO maintenance VALUES (1, 0);
-CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
-CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events WHEN (SELECT active FROM maintenance) = 0
-  BEGIN SELECT RAISE(ABORT, 'events are append-only outside maintenance'); END;
-${INDEXES}
-${TRIGGERS}`;
-
-
+const MAINTENANCE: ReadonlyArray<string> = [
+  "CREATE TABLE maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), active INTEGER NOT NULL CHECK (active IN (0,1)))",
+  "INSERT INTO maintenance VALUES (1, 0)",
+  "CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END",
+  `CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events WHEN (SELECT active FROM maintenance) = 0
+  BEGIN SELECT RAISE(ABORT, 'events are append-only outside maintenance'); END`,
+  ...INDEXES,
+  ...TRIGGERS,
+];
 
 /**
  * Columns added within version 1 (additive, each with a default), with their definitions. Opening a file that lacks
@@ -342,11 +349,6 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
 
 /** Literal, case-insensitive matching across Unicode: compatibility-normalised, then folded through upper case (ß matches SS). */
 export const fold = (text: string) => text.normalize("NFKC").toUpperCase().toLowerCase();
-
-export class Busy extends Error {}
-/** The disk is short: nothing is admitted until there is room again. */
-export class Full extends Error {}
-export class Incompatible extends Error {}
 
 /** Identifiers Overwatch generates (hex digests, random hex): stored as they are. */
 declare const idBrand: unique symbol;
@@ -412,354 +414,390 @@ export class Permit {
   }
 }
 
-/** Writes inside one transaction. Each transaction gets its own, and it is dead once that transaction ends: a writer
- * kept past its callback cannot write without admission. */
+/** A statement's outcome: rows changed and the last row inserted. */
+export interface Changed {
+  readonly changes: number;
+  readonly lastInsertRowid: number;
+}
+const changed = (raw: unknown): Changed => {
+  const r = Predicate.isObject(raw) && !Array.isArray(raw) ? (raw as { changes?: number | bigint; lastInsertRowid?: number | bigint }) : {};
+  return { changes: Number(r.changes ?? 0), lastInsertRowid: Number(r.lastInsertRowid ?? 0) };
+};
+
+/**
+ * Writes inside one transaction. Each transaction gets its own, and it is dead once that transaction ends: a writer
+ * kept past its transaction cannot write without admission. Every method is an Effect that runs on the transaction's
+ * connection.
+ */
 export class Writer {
-  #db: DatabaseSync | null;
-  constructor(db: DatabaseSync) {
-    this.#db = db;
+  #sql: SqlClient.SqlClient | null;
+  readonly permits: Permit[] = [];
+  constructor(sql: SqlClient.SqlClient) {
+    this.#sql = sql;
   }
   end() {
-    this.#db = null;
+    this.#sql = null;
   }
-  get #open(): DatabaseSync {
-    if (!this.#db) throw new Error("this writer's transaction has ended");
-    return this.#db;
+  get #open(): Effect.Effect<SqlClient.SqlClient> {
+    return Effect.suspend(() => (this.#sql ? Effect.succeed(this.#sql) : Effect.die(new Error("this writer's transaction has ended"))));
   }
-  run(sql: string, ...params: ReadonlyArray<Param>): { changes: number; lastInsertRowid: number } {
-    const result = this.#open.prepare(sql).run(...params.map(normal));
-    tick();
-    return { changes: Number(result.changes), lastInsertRowid: Number(result.lastInsertRowid) };
+  run(query: string, ...params: ReadonlyArray<Param>): Effect.Effect<Changed> {
+    return this.#open.pipe(
+      Effect.flatMap((sql) => Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw)),
+      Effect.orDie,
+      Effect.map(changed),
+      Effect.tap(() => Effect.sync(tick)),
+    );
   }
   /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
-  next(): number {
-    return ((this.#open.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0) + 1;
+  next(): Effect.Effect<number> {
+    return this.#open.pipe(
+      Effect.flatMap((sql) => sql.unsafe<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")),
+      Effect.orDie,
+      Effect.map((rows) => (rows[0]?.seq ?? 0) + 1),
+    );
   }
-  readonly permits: Permit[] = [];
   /** Records an outbound effect's intent; the permit for it is live once this transaction commits. */
-  permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Permit {
-    const p = new Permit(kind, this.event("intent", subject, { kind, bind, ...(data as object) }), bind);
-    this.permits.push(p);
-    return p;
+  permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Effect.Effect<Permit> {
+    return Effect.map(this.event("intent", subject, { kind, bind, ...(data as object) }), (seq) => {
+      const p = new Permit(kind, seq, bind);
+      this.permits.push(p);
+      return p;
+    });
   }
   /** Appends to the log and returns its seq. */
-  event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): number {
-    return this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data)).lastInsertRowid;
+  event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): Effect.Effect<number> {
+    return Effect.suspend(() =>
+      this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data)),
+    ).pipe(Effect.map((r) => r.lastInsertRowid));
   }
 }
 
-export class Store {
-  private listeners = new Set<() => void>();
-  readonly #db: DatabaseSync;
+type Value = number | string | null;
+
+/** The database, owned by this process: reads, the one way to change it, and its maintenance. */
+export interface StoreShape {
   readonly file: string;
-  constructor(db: DatabaseSync, file: string) {
-    this.#db = db;
-    this.file = file;
-    // One case-folding for every literal match: Unicode, not SQLite's ASCII-only lower().
-    db.function("fold", { deterministic: true }, (v) => (typeof v === "string" ? fold(v) : v));
-  }
-
-  /**
-   * Takes ownership of the data directory's database, or throws Busy. Exclusive locking, WAL and a committed write
-   * come first; only then is the schema read or created.
-   */
-  static own(dataDir: string): Store {
-    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    try {
-      chmodSync(dataDir, 0o700);
-    } catch {
-      // Not ours to change; the doctor says so.
-    }
-    const file = join(dataDir, "overwatch.db");
-    let db: DatabaseSync;
-    try {
-      db = new DatabaseSync(file);
-    } catch (error) {
-      throw new Busy(`cannot open ${file}: ${(error as Error).message}`);
-    }
-    try {
-      // Incremental auto-vacuum must be chosen before the first page is written (WAL writes it); see reclaim().
-      db.exec("PRAGMA busy_timeout = 0; PRAGMA locking_mode = EXCLUSIVE; PRAGMA auto_vacuum = INCREMENTAL;");
-      db.exec("PRAGMA journal_mode = WAL;");
-      db.exec("BEGIN IMMEDIATE; COMMIT;");
-    } catch (error) {
-      db.close();
-      const message = (error as Error).message;
-      if (/locked|busy/i.test(message)) throw new Busy(`${file} is in use by another process`);
-      throw new Incompatible(`${file} is not an Overwatch database (${message})`);
-    }
-    db.exec("PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;");
-    const app = (db.prepare("PRAGMA application_id").get() as { application_id: number }).application_id;
-    const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    const tables = (db.prepare("SELECT count(*) AS n FROM sqlite_schema").get() as { n: number }).n;
-    if (app === 0 && version === 0 && tables === 0) {
-      db.exec("BEGIN IMMEDIATE");
-      for (const t of TABLES) db.exec(t.ddl);
-      db.exec(MAINTENANCE);
-      db.exec(`PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${USER_VERSION};`);
-      db.exec("COMMIT");
-    } else if (app === APPLICATION_ID && version === USER_VERSION) {
-      db.exec("BEGIN IMMEDIATE");
-      for (const t of TABLES) if (ADDED_TABLES.has(t.name)) db.exec(t.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
-      for (const [table, column, definition] of ADDED) {
-        const has = (db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column) as object | undefined) !== undefined;
-        if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
-      }
-      db.exec(INDEXES);
-      db.exec(TRIGGERS);
-      db.exec(`INSERT OR IGNORE INTO citations (finding, handle) SELECT f.id, json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
-        WHERE json_extract(p.value, '$.handle') IN (SELECT handle FROM evidence)`);
-      db.exec("COMMIT");
-    }
-    if (app !== 0 && (app !== APPLICATION_ID || version !== USER_VERSION)) {
-      db.close();
-      throw new Incompatible(
-        app !== APPLICATION_ID ? `${file} is not an Overwatch database` : `${file} has schema version ${version}; this program reads version ${USER_VERSION}`,
-      );
-    } else if (app === 0 && (version !== 0 || tables !== 0)) {
-      db.close();
-      throw new Incompatible(`${file} is not an Overwatch database`);
-    }
-    if ((db.prepare("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum !== 2) {
-      db.exec("VACUUM"); // once, at start, for a file made without incremental auto-vacuum
-    }
-    return new Store(db, file);
-  }
-
-  /** One change: one IMMEDIATE transaction. Listeners hear of it after it commits. */
+  readonly all: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Effect.Effect<T[]>;
+  readonly get: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Effect.Effect<T | undefined>;
+  readonly seq: Effect.Effect<number>;
+  readonly meta: (key: string) => Effect.Effect<string | null>;
+  /** One change: one IMMEDIATE transaction, admitted by the guard. Listeners hear of it after it commits. */
+  readonly tx: <A, E, R>(work: (w: Writer) => Effect.Effect<A, E, R>) => Effect.Effect<A, E | Full, R>;
+  /** One outbound effect's intent, in its own transaction; the returned permit is live. */
+  readonly permit: (kind: string, subject: string | null, data?: unknown, bind?: ReadonlyArray<string>) => Effect.Effect<Permit, Full>;
   /**
    * Admission for every write: set by the owner of the disk check, it runs before each transaction opens, so a
    * failure record, a deadline or a page action is refused by the same rule as a slice. Only maintenance (making
    * room) passes without it.
    */
-  guard: (() => void) | null = null;
+  readonly setGuard: (guard: Effect.Effect<void, Full> | null) => Effect.Effect<void>;
+  /** One element after each committed transaction. */
+  readonly changes: Stream.Stream<void>;
+  /** Lets the write-ahead log go back to the file system (tests measure the file). */
+  readonly checkpoint: Effect.Effect<void>;
+  /** A consistent standalone copy. Never overwrites a file. */
+  readonly backup: (target: string) => Effect.Effect<{ file: string; seq: number }, BackupError>;
+  readonly restore: (source: string) => Effect.Effect<{ file: string; seq: number }, Incompatible | Full>;
+  /** The bytes the database holds: its pages in use (free pages are reused before the file grows) and its log. */
+  readonly liveBytes: Effect.Effect<number>;
+  readonly reclaim: (maxBytes?: number) => Effect.Effect<number>;
+  readonly expire: (now: number) => Effect.Effect<number>;
+  readonly retain: (now: number, over: Effect.Effect<boolean>, keepEvents?: number) => Effect.Effect<void>;
+}
 
-  tx<A>(work: (w: Writer) => A): A {
-    this.guard?.();
-    return this.#transact(work);
+/** The innermost message of an error from SQLite, for diagnostics. */
+const reason = (error: unknown): string => {
+  let e: unknown = error;
+  for (let depth = 0; depth < 5 && Predicate.isObject(e) && "cause" in e && (e as { cause?: unknown }).cause !== undefined; depth++) e = (e as { cause: unknown }).cause;
+  return e instanceof Error ? e.message : String(e);
+};
+
+/**
+ * Takes ownership of the data directory's database, or fails with Busy. Exclusive locking, WAL and a committed write
+ * come first; only then is the schema read or created. The connection lives as long as the surrounding scope.
+ */
+const own = Effect.fn("Store.own")(function* (dataDir: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(dataDir, { recursive: true, mode: 0o700 }).pipe(Effect.orDie);
+  // Not ours to change when it fails; the doctor says so.
+  yield* fs.chmod(dataDir, 0o700).pipe(Effect.ignore);
+  const file = path.join(dataDir, "overwatch.db");
+  // One connection, busy timeout 0, and WAL entered here after exclusive locking is chosen: the client's own WAL
+  // switch would come before it.
+  const sql = yield* SqliteClient.make({ filename: file, busyTimeout: 0, disableWAL: true }).pipe(
+    Effect.provide(Reactivity.layer),
+    Effect.mapError((e) => new Busy({ message: `cannot open ${file}: ${reason(e)}` })),
+  );
+  const exec = (query: string) => Effect.suspend(() => sql.unsafe(query).raw);
+  const value = <T>(query: string) => Effect.map(sql.unsafe<Record<string, T>>(query), (rows) => Object.values(rows[0] ?? {})[0] as T);
+
+  // Incremental auto-vacuum must be chosen before the first page is written (WAL writes it); see reclaim().
+  yield* Effect.forEach(["PRAGMA locking_mode = EXCLUSIVE", "PRAGMA auto_vacuum = INCREMENTAL", "PRAGMA journal_mode = WAL"], exec).pipe(
+    Effect.andThen(sql.withTransaction(Effect.void)),
+    Effect.mapError((e) => {
+      const message = reason(e);
+      return /locked|busy/i.test(message) ? new Busy({ message: `${file} is in use by another process` }) : new Incompatible({ message: `${file} is not an Overwatch database (${message})` });
+    }),
+  );
+  yield* Effect.forEach(["PRAGMA synchronous = FULL", "PRAGMA foreign_keys = ON"], exec).pipe(Effect.orDie);
+  const app = yield* value<number>("PRAGMA application_id").pipe(Effect.orDie);
+  const version = yield* value<number>("PRAGMA user_version").pipe(Effect.orDie);
+  const tables = yield* value<number>("SELECT count(*) AS n FROM sqlite_schema").pipe(Effect.orDie);
+  if (app === 0 && version === 0 && tables === 0) {
+    yield* sql
+      .withTransaction(Effect.forEach([...TABLES.map((t) => t.ddl), ...MAINTENANCE, `PRAGMA application_id = ${APPLICATION_ID}`, `PRAGMA user_version = ${USER_VERSION}`], exec))
+      .pipe(Effect.orDie);
+  } else if (app === APPLICATION_ID && version === USER_VERSION) {
+    yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          for (const t of TABLES) if (ADDED_TABLES.has(t.name)) yield* exec(t.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
+          for (const [table, column, definition] of ADDED) {
+            const has = (yield* sql.unsafe(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`, [column])).length > 0;
+            if (!has) yield* exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+          }
+          for (const statement of [...INDEXES, ...TRIGGERS]) yield* exec(statement);
+          yield* exec(`INSERT OR IGNORE INTO citations (finding, handle) SELECT f.id, json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
+            WHERE json_extract(p.value, '$.handle') IN (SELECT handle FROM evidence)`);
+        }),
+      )
+      .pipe(Effect.orDie);
   }
+  if (app !== 0 && (app !== APPLICATION_ID || version !== USER_VERSION)) {
+    return yield* new Incompatible({
+      message: app !== APPLICATION_ID ? `${file} is not an Overwatch database` : `${file} has schema version ${version}; this program reads version ${USER_VERSION}`,
+    });
+  } else if (app === 0 && (version !== 0 || tables !== 0)) {
+    return yield* new Incompatible({ message: `${file} is not an Overwatch database` });
+  }
+  if ((yield* value<number>("PRAGMA auto_vacuum").pipe(Effect.orDie)) !== 2) {
+    yield* exec("VACUUM").pipe(Effect.orDie); // once, at start, for a file made without incremental auto-vacuum
+  }
+
+  const commits = yield* PubSub.unbounded<void>();
+  let guard: Effect.Effect<void, Full> | null = null;
+
+  const all = <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>): Effect.Effect<T[]> =>
+    Effect.suspend(() => sql.unsafe<Record<string, unknown>>(query, params)).pipe(Effect.orDie, Effect.map((rows) => rows as unknown as T[]));
+  const get = <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>): Effect.Effect<T | undefined> =>
+    Effect.map(all<T>(query, ...params), (rows) => rows[0]);
+  const pragma = (name: string) => Effect.map(get<Record<string, number>>(`PRAGMA ${name}`), (row) => Object.values(row ?? {})[0] ?? 0);
+  const seq = Effect.map(get<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'"), (row) => row?.seq ?? 0);
+
+  const transact = <A, E, R>(work: (w: Writer) => Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    Effect.suspend(() => {
+      const writer = new Writer(sql);
+      return sql
+        .withTransaction(
+          Effect.gen(function* () {
+            // References are checked when the change commits, as one whole: a violation rolls the transaction back.
+            yield* exec("PRAGMA defer_foreign_keys = ON").pipe(Effect.orDie);
+            const result = yield* work(writer);
+            yield* sql.afterCommit(
+              Effect.sync(() => {
+                tick();
+                for (const p of writer.permits) issue(p);
+              }).pipe(Effect.andThen(PubSub.publish(commits, undefined)), Effect.asVoid),
+            );
+            return result;
+          }),
+        )
+        .pipe(
+          // A failed COMMIT (a deferred reference) is a defect, like any broken constraint; the change is undone whole.
+          Effect.catchIf(SqlError.isSqlError, (e) => Effect.die(e)),
+          Effect.ensuring(Effect.sync(() => writer.end())),
+        ) as Effect.Effect<A, E, R>;
+    });
+
+  const tx = <A, E, R>(work: (w: Writer) => Effect.Effect<A, E, R>): Effect.Effect<A, E | Full, R> =>
+    Effect.suspend(() => guard ?? Effect.void).pipe(Effect.andThen(transact(work)));
 
   /**
    * Making room (age, pressure) is the only write that passes without admission; it is private to the store, so no
    * caller can carry a business write through it. Its events are only `compacted`.
    */
-  #maintain(work: (w: Writer) => number, step: string, throughSeq: number) {
-    return this.#transact((w) => {
-      const removed = work(w);
-      w.event("compacted", null, { step, removed, throughSeq });
-      return removed;
-    });
-  }
-
-  /** One outbound effect's intent, in its own transaction; the returned permit is live. */
-  permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Permit {
-    return this.tx((w) => w.permit(kind, subject, data, bind));
-  }
-
-  /** Lets the write-ahead log go back to the file system (tests measure the file). */
-  checkpoint() {
-    this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-  }
-
-  #transact<A>(work: (w: Writer) => A): A {
-    this.#db.exec("BEGIN IMMEDIATE");
-    // References are checked when the change commits, as one whole: a violation rolls the transaction back.
-    this.#db.exec("PRAGMA defer_foreign_keys = ON");
-    let result: A;
-    const writer = new Writer(this.#db);
-    try {
-      result = work(writer);
-      this.#db.exec("COMMIT");
-    } catch (error) {
-      // A failed change is undone whole. (A statement that raises leaves the transaction open, so this always runs.)
-      try {
-        this.#db.exec("ROLLBACK");
-      } catch {
-        // SQLite already rolled back.
-      }
-      throw error;
-    } finally {
-      writer.end();
-    }
-    tick();
-    for (const p of writer.permits) issue(p);
-    for (const listener of this.listeners) listener();
-    return result;
-  }
-
-  all<T = Record<string, unknown>>(sql: string, ...params: ReadonlyArray<number | string | null>): T[] {
-    return this.#db.prepare(sql).all(...params) as T[];
-  }
-  get<T = Record<string, unknown>>(sql: string, ...params: ReadonlyArray<number | string | null>): T | undefined {
-    return this.#db.prepare(sql).get(...params) as T | undefined;
-  }
-  seq(): number {
-    return (this.get<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")?.seq ?? 0) as number;
-  }
-  meta(key: string): string | null {
-    return this.get<{ value: string }>("SELECT value FROM meta WHERE key = ?", key)?.value ?? null;
-  }
-  onCommit(listener: () => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-  close() {
-    try {
-      this.#db.close();
-    } catch {
-      // Already closed.
-    }
-  }
-
-  /** A consistent standalone copy. Never overwrites a file. */
-  backup(target: string): { file: string; seq: number } {
-    if (existsSync(target)) throw new Error(`${target} exists; choose a new file`);
-    const seq = this.seq();
-    this.#db.prepare("VACUUM INTO ?").run(target);
-    return { file: target, seq };
-  }
-
-  /**
-   * Replaces every row with a backup's, in one transaction on this owned connection: the file and its lock never
-   * change. The backup is opened read-only, checked (its identity, version and integrity), and only its known columns
-   * are read as values; every value passes the writer, so constraints and redaction apply exactly as to new data. Any
-   * failure rolls back and leaves the current rows as they were. No SQL from the backup runs.
-   */
-  restore(source: string): { file: string; seq: number } {
-    let backup: DatabaseSync;
-    try {
-      backup = new DatabaseSync(source, { readOnly: true });
-    } catch (error) {
-      throw new Incompatible(`${source} does not open as a database`);
-    }
-    try {
-      let app: number, version: number, integrity: string;
-      try {
-        app = (backup.prepare("PRAGMA application_id").get() as { application_id: number }).application_id;
-        version = (backup.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-        integrity = (backup.prepare("PRAGMA integrity_check").get() as { integrity_check: string }).integrity_check;
-      } catch {
-        throw new Incompatible(`${source} is not an Overwatch backup: it is not a database`);
-      }
-      if (app !== APPLICATION_ID) throw new Incompatible(`${source} is not an Overwatch backup`);
-      if (version !== USER_VERSION) throw new Incompatible(`${source} has schema version ${version}; this program restores version ${USER_VERSION}`);
-      if (integrity !== "ok") throw new Incompatible(`${source} fails SQLite's integrity check`);
-      const present = new Set((backup.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as Array<{ name: string }>).map((r) => r.name));
-      for (const t of TABLES) if (!present.has(t.name) && !ADDED_TABLES.has(t.name)) throw new Incompatible(`${source} has no ${t.name} table`);
-      const high = (backup.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0;
-      try {
-        this.tx((w) => {
-          // References are checked once, on the whole staged copy, by the database's own foreign keys.
-          w.run("UPDATE maintenance SET active = 1");
-          for (const t of [...TABLES].reverse()) w.run(`DELETE FROM ${t.name}`);
-          for (const t of TABLES) {
-            if (!present.has(t.name) || t.derived) continue;
-            // A backup from an earlier build of version 1 may lack columns added since; they take their defaults.
-            const has = new Set((backup.prepare(`SELECT name FROM pragma_table_info('${t.name}')`).all() as Array<{ name: string }>).map((r) => r.name));
-            const columns = t.columns.filter((c) => has.has(c) || !ADDED.some(([table, column]) => table === t.name && column === c));
-            const insert = `INSERT INTO ${t.name} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
-            // The statement is held for the whole loop: Node may finalize an unreferenced one mid-iteration.
-            const select = backup.prepare(`SELECT ${columns.map((c) => `"${c}"`).join(", ")} FROM main."${t.name}"`);
-            for (const row of select.iterate() as Iterable<Record<string, unknown>>) {
-              w.run(insert, ...columns.map((c) => valueOf(row[c], t.json?.includes(c) ?? false)));
-            }
-          }
-          // The backup's own high-water mark: a row beyond it is an invariant violation, not a reason to raise it.
-          w.run("DELETE FROM sqlite_sequence WHERE name = 'events'");
-          w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
-          const broken = this.all<{ table: string; parent: string }>("PRAGMA foreign_key_check");
-          if (broken.length) throw new Error(`a ${broken[0]!.table} row refers to a ${broken[0]!.parent} row that does not exist (${broken.length})`);
-          for (const [table, column, parent, key] of references()) {
-            const n = this.get<{ n: number }>(`SELECT count(*) AS n FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent})`)!.n;
-            if (n) throw new Error(`a ${table}.${column} refers to a ${parent} row that does not exist (${n})`);
-          }
-          for (const [what, sql] of INVARIANTS) {
-            const violations = Object.values(this.get<Record<string, number>>(sql) ?? {})[0] ?? 0;
-            if (violations > 0) throw new Error(`${what} (${violations})`);
-          }
-          w.run("UPDATE maintenance SET active = 0");
-        });
-      } catch (error) {
-        throw new Incompatible(`${source} cannot be restored: ${clean((error as Error).message, 300)}`);
-      }
-      return { file: source, seq: this.seq() };
-    } finally {
-      backup.close();
-    }
-  }
-
-  /** The bytes the database holds: its pages in use (free pages are reused before the file grows) and its log. */
-  liveBytes(): number {
-    const pragma = (name: string) => Object.values(this.get<Record<string, number>>(`PRAGMA ${name}`) ?? {})[0] ?? 0;
-    let wal = 0;
-    try {
-      wal = statSync(`${this.file}-wal`).size;
-    } catch {
-      // No log yet.
-    }
-    return (pragma("page_count") - pragma("freelist_count")) * pragma("page_size") + wal;
-  }
-
-  /**
-   * Gives free pages back to the file system: at most `maxBytes` per call, for any page size. Incremental vacuum
-   * moves pages from the end of the file into free slots and truncates it; with auto-vacuum every (usable / 5)th page
-   * is a pointer-map page that goes too, so fewer data pages are asked for than fit in the bound. Then the write-ahead
-   * log is checkpointed and truncated. A full VACUUM is not used after start: it rewrites the whole file into a copy
-   * (up to twice the space, on a disk that may be short of it) and holds the only connection for as long as that
-   * takes, so no poll could commit meanwhile. Returns the free pages left.
-   */
-  reclaim(maxBytes = LIMITS.reclaimBytes): number {
-    const pragma = (name: string) => Object.values(this.get<Record<string, number>>(`PRAGMA ${name}`) ?? {})[0] ?? 0;
-    if (pragma("freelist_count") === 0) return 0;
-    const size = pragma("page_size"), budget = Math.floor(maxBytes / size), perMap = Math.floor(size / 5);
-    // n data pages and at most ceil(n / perMap) + 1 pointer-map pages must fit in the budget.
-    const pages = Math.max(0, Math.floor(((budget - 2) * perMap) / (perMap + 1)));
-    if (pages === 0) return pragma("freelist_count");
-    this.#db.prepare(`PRAGMA incremental_vacuum(${pages})`).all();
-    this.#db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    return pragma("freelist_count");
-  }
-
-  /**
-   * Age: what has outlived its use goes, on every pass, whatever the disk: trial messages and uncited trial evidence
-   * after seven days; real messages and uncited evidence after fourteen; coverage rows and hourly counts after thirty.
-   * A finding and the evidence it cites are never removed (the citations table restricts it). One audited
-   * transaction, only when something is due.
-   */
-  expire(now: number): number {
-    const day = 86_400_000;
-    const old = (days: number, trial: boolean) =>
-      `SELECT r.id FROM runs r JOIN jobs j ON j.id = r.job_id WHERE r.state = 'terminal' AND (j.kind = 'trial') = ${trial ? 1 : 0} AND r.started_ms < ${now - days * day}`;
-    const due = [
-      `DELETE FROM evidence WHERE run_id IN (${old(7, true)}) AND handle NOT IN (SELECT handle FROM citations)`,
-      `DELETE FROM messages WHERE run_id IN (${old(7, true)})`,
-      `DELETE FROM evidence WHERE run_id IN (${old(14, false)}) AND handle NOT IN (SELECT handle FROM citations)`,
-      `DELETE FROM messages WHERE run_id IN (${old(14, false)})`,
-      `DELETE FROM coverage WHERE to_ms < ${now - 30 * day}`,
-      `DELETE FROM hourly WHERE hour < ${Math.floor((now - 30 * day) / 3_600_000)}`,
-      `DELETE FROM lines WHERE at_ms < ${now - 30 * day}`,
-    ];
-    const any = due.some((sql) => this.get(sql.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1") !== undefined);
-    if (!any) return 0;
-    return this.#maintain((w) => due.reduce((n, sql) => n + w.run(sql).changes, 0), "age", 0);
-  }
-
-  /**
-   * Makes room under pressure: old events (counts and the sequence are kept), then what age allows. Nothing else is
-   * removed; if that is not enough, the caller pauses collection. Cited evidence is never removed.
-   */
-  retain(now: number, over: () => boolean, keepEvents = 10_000): void {
-    if (over()) {
-      const throughSeq = Math.max(0, this.seq() - keepEvents);
-      this.#maintain((w) => {
-        w.run("UPDATE maintenance SET active = 1");
-        const removed = w.run("DELETE FROM events WHERE seq <= ?", throughSeq).changes;
-        w.run("UPDATE maintenance SET active = 0");
+  const maintain = (work: (w: Writer) => Effect.Effect<number>, step: string, throughSeq: number) =>
+    transact((w) =>
+      Effect.gen(function* () {
+        const removed = yield* work(w);
+        yield* w.event("compacted", null, { step, removed, throughSeq });
         return removed;
-      }, "events", throughSeq);
-    }
-    if (over()) this.expire(now);
-  }
+      }),
+    );
+
+  const expire = (now: number): Effect.Effect<number> =>
+    Effect.gen(function* () {
+      const day = 86_400_000;
+      const old = (days: number, trial: boolean) =>
+        `SELECT r.id FROM runs r JOIN jobs j ON j.id = r.job_id WHERE r.state = 'terminal' AND (j.kind = 'trial') = ${trial ? 1 : 0} AND r.started_ms < ${now - days * day}`;
+      const due = [
+        `DELETE FROM evidence WHERE run_id IN (${old(7, true)}) AND handle NOT IN (SELECT handle FROM citations)`,
+        `DELETE FROM messages WHERE run_id IN (${old(7, true)})`,
+        `DELETE FROM evidence WHERE run_id IN (${old(14, false)}) AND handle NOT IN (SELECT handle FROM citations)`,
+        `DELETE FROM messages WHERE run_id IN (${old(14, false)})`,
+        `DELETE FROM coverage WHERE to_ms < ${now - 30 * day}`,
+        `DELETE FROM hourly WHERE hour < ${Math.floor((now - 30 * day) / 3_600_000)}`,
+        `DELETE FROM lines WHERE at_ms < ${now - 30 * day}`,
+      ];
+      let any = false;
+      for (const query of due) if ((yield* get(query.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1")) !== undefined) any = true;
+      if (!any) return 0;
+      return yield* maintain(
+        (w) =>
+          Effect.gen(function* () {
+            let removed = 0;
+            for (const query of due) removed += (yield* w.run(query)).changes;
+            return removed;
+          }),
+        "age",
+        0,
+      );
+    });
+
+  const restore = (source: string) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const backup = yield* SqliteClient.make({ filename: source, readonly: true }).pipe(
+          Effect.provide(Reactivity.layer),
+          Effect.mapError(() => new Incompatible({ message: `${source} does not open as a database` })),
+        );
+        const one = <T>(query: string) => Effect.map(backup.unsafe<Record<string, T>>(query), (rows) => Object.values(rows[0] ?? {})[0] as T);
+        const [app, version, integrity] = yield* Effect.all([one<number>("PRAGMA application_id"), one<number>("PRAGMA user_version"), one<string>("PRAGMA integrity_check")]).pipe(
+          Effect.mapError(() => new Incompatible({ message: `${source} is not an Overwatch backup: it is not a database` })),
+        );
+        if (app !== APPLICATION_ID) return yield* new Incompatible({ message: `${source} is not an Overwatch backup` });
+        if (version !== USER_VERSION) return yield* new Incompatible({ message: `${source} has schema version ${version}; this program restores version ${USER_VERSION}` });
+        if (integrity !== "ok") return yield* new Incompatible({ message: `${source} fails SQLite's integrity check` });
+        const read = <T>(query: string) => backup.unsafe<Record<string, unknown>>(query).pipe(Effect.orDie, Effect.map((rows) => rows as unknown as T[]));
+        const present = new Set((yield* read<{ name: string }>("SELECT name FROM sqlite_schema WHERE type = 'table'")).map((r) => r.name));
+        for (const t of TABLES) if (!present.has(t.name) && !ADDED_TABLES.has(t.name)) return yield* new Incompatible({ message: `${source} has no ${t.name} table` });
+        const high = (yield* read<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'"))[0]?.seq ?? 0;
+        yield* tx((w) =>
+          Effect.gen(function* () {
+            // References are checked once, on the whole staged copy, by the database's own foreign keys.
+            yield* w.run("UPDATE maintenance SET active = 1");
+            for (const t of [...TABLES].reverse()) yield* w.run(`DELETE FROM ${t.name}`);
+            for (const t of TABLES) {
+              if (!present.has(t.name) || t.derived) continue;
+              // A backup from an earlier build of version 1 may lack columns added since; they take their defaults.
+              const has = new Set((yield* read<{ name: string }>(`SELECT name FROM pragma_table_info('${t.name}')`)).map((r) => r.name));
+              const columns = t.columns.filter((c) => has.has(c) || !ADDED.some(([table, column]) => table === t.name && column === c));
+              const insert = `INSERT INTO ${t.name} (${columns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`;
+              for (const row of yield* read<Record<string, unknown>>(`SELECT ${columns.map((c) => `"${c}"`).join(", ")} FROM main."${t.name}"`)) {
+                yield* w.run(insert, ...columns.map((c) => valueOf(row[c], t.json?.includes(c) ?? false)));
+              }
+            }
+            // The backup's own high-water mark: a row beyond it is an invariant violation, not a reason to raise it.
+            yield* w.run("DELETE FROM sqlite_sequence WHERE name = 'events'");
+            yield* w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
+            const broken = yield* all<{ table: string; parent: string }>("PRAGMA foreign_key_check");
+            if (broken.length) return yield* Effect.fail(`a ${broken[0]!.table} row refers to a ${broken[0]!.parent} row that does not exist (${broken.length})`);
+            for (const [table, column, parent, key] of references()) {
+              const n = (yield* get<{ n: number }>(`SELECT count(*) AS n FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent})`))!.n;
+              if (n) return yield* Effect.fail(`a ${table}.${column} refers to a ${parent} row that does not exist (${n})`);
+            }
+            for (const [what, query] of INVARIANTS) {
+              const violations = Object.values((yield* get<Record<string, number>>(query)) ?? {})[0] ?? 0;
+              if (violations > 0) return yield* Effect.fail(`${what} (${violations})`);
+            }
+            yield* w.run("UPDATE maintenance SET active = 0");
+          }),
+        ).pipe(
+          Effect.catchCause((cause): Effect.Effect<never, Incompatible | Full> => {
+            const failure = Cause.findErrorOption(cause);
+            if (failure._tag === "Some" && Predicate.isTagged(failure.value, "Full")) return Effect.fail(failure.value as Full);
+            const text = failure._tag === "Some" ? String(failure.value) : reason(Cause.squash(cause));
+            return Effect.fail(new Incompatible({ message: `${source} cannot be restored: ${clean(text, 300)}` }));
+          }),
+        );
+        return { file: source, seq: yield* seq };
+      }),
+    );
+
+  const shape: StoreShape = {
+    file,
+    all,
+    get,
+    seq,
+    meta: (key) => Effect.map(get<{ value: string }>("SELECT value FROM meta WHERE key = ?", key), (row) => row?.value ?? null),
+    tx,
+    permit: (kind, subject, data = {}, bind = []) => tx((w) => w.permit(kind, subject, data, bind)),
+    setGuard: (next) => Effect.sync(() => void (guard = next)),
+    changes: Stream.fromPubSub(commits),
+    checkpoint: exec("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.orDie, Effect.asVoid),
+    backup: (target) =>
+      Effect.gen(function* () {
+        if (yield* fs.exists(target).pipe(Effect.orElseSucceed(() => false))) return yield* new BackupError({ message: `${target} exists; choose a new file` });
+        const at = yield* seq;
+        yield* Effect.suspend(() => sql.unsafe("VACUUM INTO ?", [target]).raw).pipe(Effect.mapError((e) => new BackupError({ message: reason(e) })));
+        return { file: target, seq: at };
+      }),
+    restore,
+    liveBytes: Effect.gen(function* () {
+      const wal = yield* fs.stat(`${file}-wal`).pipe(
+        Effect.map((info) => Number(info.size)),
+        Effect.orElseSucceed(() => 0), // no log yet
+      );
+      return ((yield* pragma("page_count")) - (yield* pragma("freelist_count"))) * (yield* pragma("page_size")) + wal;
+    }),
+    /**
+     * Gives free pages back to the file system: at most `maxBytes` per call, for any page size. Incremental vacuum
+     * moves pages from the end of the file into free slots and truncates it; with auto-vacuum every (usable / 5)th
+     * page is a pointer-map page that goes too, so fewer data pages are asked for than fit in the bound. Then the
+     * write-ahead log is checkpointed and truncated. A full VACUUM is not used after start: it rewrites the whole file
+     * into a copy (up to twice the space, on a disk that may be short of it) and holds the only connection for as long
+     * as that takes, so no poll could commit meanwhile. Returns the free pages left.
+     */
+    reclaim: (maxBytes = LIMITS.reclaimBytes) =>
+      Effect.gen(function* () {
+        if ((yield* pragma("freelist_count")) === 0) return 0;
+        const size = yield* pragma("page_size"), budget = Math.floor(maxBytes / size), perMap = Math.floor(size / 5);
+        // n data pages and at most ceil(n / perMap) + 1 pointer-map pages must fit in the budget.
+        const pages = Math.max(0, Math.floor(((budget - 2) * perMap) / (perMap + 1)));
+        if (pages === 0) return yield* pragma("freelist_count");
+        yield* all(`PRAGMA incremental_vacuum(${pages})`);
+        yield* exec("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.orDie);
+        return yield* pragma("freelist_count");
+      }),
+    /**
+     * Age: what has outlived its use goes, on every pass, whatever the disk: trial messages and uncited trial
+     * evidence after seven days; real messages and uncited evidence after fourteen; coverage rows and hourly counts
+     * after thirty. A finding and the evidence it cites are never removed (the citations table restricts it). One
+     * audited transaction, only when something is due.
+     */
+    expire,
+    /**
+     * Makes room under pressure: old events (counts and the sequence are kept), then what age allows. Nothing else is
+     * removed; if that is not enough, the caller pauses collection. Cited evidence is never removed.
+     */
+    retain: (now, over, keepEvents = 10_000) =>
+      Effect.gen(function* () {
+        if (yield* over) {
+          const throughSeq = Math.max(0, (yield* seq) - keepEvents);
+          yield* maintain(
+            (w) =>
+              Effect.gen(function* () {
+                yield* w.run("UPDATE maintenance SET active = 1");
+                const removed = (yield* w.run("DELETE FROM events WHERE seq <= ?", throughSeq)).changes;
+                yield* w.run("UPDATE maintenance SET active = 0");
+                return removed;
+              }),
+            "events",
+            throughSeq,
+          );
+        }
+        if (yield* over) yield* expire(now);
+      }),
+  };
+  return shape;
+});
+
+/** The database service: owned for as long as the layer's scope lasts. */
+export class Store extends Context.Service<Store, StoreShape>()("overwatch/Store") {
+  static readonly own = own;
+  static readonly layer = (dataDir: string) => Layer.effect(Store, own(dataDir));
 }
 
 function valueOf(value: unknown, isJson: boolean): Param {
@@ -774,16 +812,12 @@ function valueOf(value: unknown, isJson: boolean): Param {
 }
 
 /** The discovery record a running service leaves: it routes requests and never establishes ownership. */
-export interface Discovery {
-  readonly url: string;
-  readonly pid: number;
-  readonly version: 2;
-}
-export function readDiscovery(dataDir: string): Discovery | null {
-  try {
-    const value = JSON.parse(readFileSync(join(dataDir, "service.json"), "utf8")) as Discovery;
-    return typeof value.url === "string" && typeof value.pid === "number" ? value : null;
-  } catch {
-    return null;
-  }
-}
+export const Discovery = Schema.Struct({ url: Schema.String, pid: Schema.Number, version: Schema.optional(Schema.Number) });
+export type Discovery = typeof Discovery.Type;
+export const readDiscovery = (dataDir: string): Effect.Effect<Discovery | null, never, FileSystem.FileSystem | Path.Path> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const text = yield* fs.readFileString(path.join(dataDir, "service.json"));
+    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Discovery))(text);
+  }).pipe(Effect.orElseSucceed(() => null));

@@ -3,7 +3,9 @@
  * (back-off, freshness, run budgets). Neither decides order: `events.seq` does. Under the test descriptor both are
  * set by the test, together.
  */
+import { Effect } from "effect";
 import { performance } from "node:perf_hooks";
+import { Expired } from "./errors.ts";
 
 let manual: { now: number; mono: number } | null = null;
 // When this process's clocks began: at load, or at the test's first setting. Deadlines carried over a restart are
@@ -25,18 +27,18 @@ export const clock = {
   },
 };
 
-export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+export { Expired };
 
-export class Expired extends Error {}
-/** The work's result, or Expired once the service's monotonic clock reaches the deadline, whichever comes first. */
-export function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
-  work.catch(() => undefined);
-  return new Promise<T>((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (clock.mono() < deadline) return;
-      clearInterval(timer);
-      reject(new Expired());
-    }, 50);
-    work.then((v) => (clearInterval(timer), resolve(v)), (e) => (clearInterval(timer), reject(e)));
-  });
-}
+/**
+ * The work's result, or Expired once the service's monotonic clock reaches the deadline, whichever comes first. The
+ * clock is checked every 50 ms, so a deadline moved by the test descriptor is noticed; the loser is interrupted.
+ */
+export const bounded = <A, E, R>(work: Effect.Effect<A, E, R>, deadline: number): Effect.Effect<A, E | Expired, R> =>
+  Effect.raceFirst(
+    work,
+    Effect.gen(function* () {
+      do yield* Effect.sleep("50 millis");
+      while (clock.mono() < deadline);
+      return yield* new Expired();
+    }),
+  );

@@ -1,11 +1,11 @@
 {
   "name": "overwatch",
   "version": "2.0.0",
-  "description": "Overwatch: one local process that watches Kubernetes and Datadog, counts exactly inside declared limits, and investigates with OpenCode.",
+  "description": "Overwatch: one local process that watches Kubernetes and Datadog, counts exactly inside declared limits, and investigates with OpenCode. Built on Effect.",
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.16 <23 || >=24"
   },
   "bin": {
     "overwatch": "./bin/overwatch"
@@ -16,7 +16,11 @@
     "check": "pnpm run typecheck && pnpm test",
     "accept": "node --no-warnings --test --test-concurrency=2 accept/m1/*.test.mjs"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@effect/platform-node": "4.1.6",
+    "@effect/sql-sqlite-node": "4.1.6",
+    "effect": "4.1.6"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "fast-check": "^3.23.2",
