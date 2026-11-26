@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { Collector, hysteresis, METRIC_RULES } from "../src/collect.ts";
 import { LIMITS, parseConfig } from "../src/config.ts";
 import { Store } from "../src/store.ts";
+import { snapshot } from "../src/snapshot.ts";
 import { clock } from "../src/clock.ts";
 
 const HOUR = 3_600_000;
@@ -30,12 +31,13 @@ const counter = ${JSON.stringify(join(bin, "listed"))};
 const listed = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
 const listing = (n) => w.listings[Math.min(n, w.listings.length - 1)];
 if (verb === "get" && args[1] === "pods") {
+  if (w.unauthorized) { console.error("error: You must be logged in to the server (Unauthorized)"); process.exit(1); }
   fs.writeFileSync(counter, String(listed + 1));
   console.log(JSON.stringify({ items: listing(listed) }));
 } else if (verb === "get") console.log(JSON.stringify({ items: [] }));
 else if (verb === "top") {
   if (w.memory === null) { console.error("Forbidden: cannot list resource pods.metrics.k8s.io"); process.exit(1); }
-  console.log(listing(listed - 1).map((p) => p.metadata.name + " api 1m " + w.memory + "Mi").join("\\n"));
+  console.log(listing(listed - 1).slice(0, w.topPods ?? 99).map((p) => p.metadata.name + " api 1m " + w.memory + "Mi").join("\\n"));
 } else if (verb === "logs") {
   if (w.failLogs && w.failLogs.includes(fs.readFileSync(${JSON.stringify(calls)}, "utf8").split("\\n").filter((l) => l.includes('"logs"')).length)) { console.error("dial tcp: connection refused"); process.exit(1); }
   const pod = listing(listed - 1).find((p) => p.metadata.name === args[1]);
@@ -56,11 +58,12 @@ const pod = (name: string, uid: string, c: Container, ready = true) => ({
   metadata: { name, uid },
   spec: { containers: [{ name: "api", resources: { limits: { memory: "512Mi" } } }] },
   status: {
+    phase: "Running",
     conditions: [{ type: "Ready", status: ready ? "True" : "False" }],
     containerStatuses: [{ name: "api", restartCount: c.restarts ?? (c.previous ? 1 : 0), containerID: c.current, lastState: c.previous ? { terminated: { containerID: c.previous } } : {} }],
   },
 });
-type World = { listings: unknown[][]; logs: Record<string, Array<[string, string]>>; memory?: number | null; failLogs?: number[] };
+type World = { listings: unknown[][]; logs: Record<string, Array<[string, string]>>; memory?: number | null; failLogs?: number[]; unauthorized?: boolean; topPods?: number };
 const set = (w: World) => {
   writeFileSync(world, JSON.stringify({ memory: 10, ...w }));
   writeFileSync(join(bin, "listed"), "0");
@@ -68,24 +71,32 @@ const set = (w: World) => {
 };
 const at = (ms: number) => new Date(ms).toISOString().replace("Z", "000000Z");
 
-function rig(readings: string[] = ["logs"]) {
+function rig(readings: string[] = ["logs"], namespaces = ["shop"]) {
   const dataDir = mkdtempSync(join(tmpdir(), "ow-kube-test-"));
+  const sources = Object.fromEntries(namespaces.map((namespace, i) => [i ? `pods${i}` : "pods", { type: "kubernetes", context: "lab", namespace, selector: "app=shop", readings }]));
   const config = parseConfig(
-    {
-      version: 2, dataDir,
-      apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop", readings } } } } } },
-      watchers: [{ app: "shop", environment: "prod", every: "1m" }],
-    },
+    { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },
     join(dataDir, "c.json"),
   );
   const store = Store.own(dataDir);
-  const collector = new Collector(store, config, dataDir);
+  let collector = new Collector(store, config, dataDir);
   collector.setSpace({ freeBytes: 1024 ** 4, dbBytes: 0 });
   let now = Date.UTC(2026, 10, 1), mono = 1_000_000;
   clock.set(now, mono);
   return {
     store,
+    config,
     pass: () => collector.pass(),
+    /** A new process: what was only in memory is gone. */
+    restart() {
+      collector = new Collector(store, config, dataDir);
+      collector.setSpace({ freeBytes: 1024 ** 4, dbBytes: 0 });
+    },
+    setWall(ms: number) {
+      now = ms;
+      clock.set(now, mono);
+    },
+    health: () => snapshot(store, config, collector, true).environments[0]!.health,
     advance(ms: number) {
       now += ms;
       mono += ms;
@@ -252,4 +263,83 @@ test("hysteresis agrees with the kept rule: open after n measured samples over i
     }),
     { numRuns: 300 },
   );
+});
+
+test("a refused sign-in on a shared cluster costs one call per interval, for every source on it", async () => {
+  const r = rig(["logs"], ["shop", "other"]);
+  set({ listings: [[]], logs: {}, unauthorized: true });
+  await r.pass();
+  assert.equal(readFileSync(calls, "utf8").trim().split("\n").length, 1);
+  assert.deepEqual(r.store.all<{ failure: string }>("SELECT failure FROM sources ORDER BY id").map((s) => s.failure), ["signin", "signin"]);
+  assert.equal(r.health(), "signed_out");
+  r.close();
+});
+
+test("after a restart with the wall clock set back, a failing source is probed within its own delay", async () => {
+  const r = rig();
+  set({ listings: [[]], logs: {}, unauthorized: true });
+  await r.pass();
+  r.restart();
+  r.setWall(r.now - HOUR);
+  set({ listings: [[pod("shop-a", "uid-a", { current: "c-1" })]], logs: { "c-1": [] } });
+  await r.pass();
+  assert.equal(readFileSync(calls, "utf8").trim(), "", "not due yet");
+  r.advance(60_000);
+  await r.pass();
+  assert.equal(r.store.get<{ failure: string | null }>("SELECT failure FROM sources")!.failure, null);
+  r.close();
+});
+
+test("memory measured for one pod of two is not measured: it neither clears nor confirms a breach", async () => {
+  const r = rig(["usage"]);
+  const pods = [pod("shop-a", "uid-a", { current: "c-1" }), pod("shop-b", "uid-b", { current: "c-2" })];
+  const step = async (memory: number, topPods?: number) => {
+    set({ listings: [pods], logs: {}, memory, ...(topPods ? { topPods } : {}) });
+    r.advance(60_000);
+    await r.pass();
+  };
+  await step(490);
+  await step(490);
+  assert.equal(r.health(), "attention");
+  await step(64, 1);
+  await step(64, 1);
+  assert.equal(r.store.get<{ breach: number }>("SELECT breach FROM metrics")!.breach, 1);
+  assert.equal(r.health(), "partial");
+  await step(64);
+  await step(64);
+  assert.equal(r.health(), "quiet", "two fully measured samples under the limit clear it");
+  r.close();
+});
+
+test("a log problem goes quiet after three fully measured intervals with nothing new; an unmeasured one starts the count again", async () => {
+  const r = rig();
+  const p = pod("shop-a", "uid-a", { current: "c-1" });
+  set({ listings: [[p]], logs: { "c-1": [[at(r.now - 10_000), "ERROR payment failed"]] } });
+  await r.pass();
+  assert.equal(r.health(), "attention");
+  const step = async (listing = p) => {
+    set({ listings: [[listing]], logs: { "c-1": [], "c-2": [] } });
+    r.advance(60_000);
+    await r.pass();
+  };
+  await step();
+  await step();
+  await step(pod("shop-a", "uid-a", { current: "c-1", restarts: 1 })); // restarted, previous unreadable: a gap
+  assert.equal(r.health(), "partial");
+  await step();
+  await step();
+  assert.equal(r.health(), "attention", "the gap restarted the count");
+  await step();
+  assert.equal(r.health(), "quiet");
+  const i = r.store.get<{ count: number; exact: number; active: number }>("SELECT count, exact, active FROM incidents")!;
+  assert.deepEqual([i.count, i.exact, i.active], [1, 0, 0], "the gap made the total a lower bound; quiet keeps it");
+  r.close();
+});
+
+test("a running container without an instance cannot be read, and is a gap", async () => {
+  const r = rig();
+  set({ listings: [[pod("shop-a", "uid-a", { current: "" })]], logs: {} });
+  await r.pass();
+  assert.equal(r.logs(), "gap");
+  r.close();
 });

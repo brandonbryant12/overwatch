@@ -4,7 +4,8 @@ import fc from "fast-check";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { problem, Slice } from "../src/collect.ts";
+import { problem, Slice, within } from "../src/collect.ts";
+import { count, num, time } from "../src/parse.ts";
 import { LIMITS, parseConfig } from "../src/config.ts";
 import { backoff, classify } from "../src/failures.ts";
 import { snapshot } from "../src/snapshot.ts";
@@ -32,7 +33,7 @@ test("problems group by their words: numbers and IDs do not split them", () => {
 test("a slice admits at most the occurrence limit and folds problems past 500 into one overflow", () => {
   fc.assert(
     fc.property(fc.integer({ min: 0, max: 520 }), fc.integer({ min: 1, max: 3 }), (distinct, each) => {
-      const slice = new Slice(source.sources[0]!, 0, 1, []);
+      const slice = new Slice(source.sources[0]!, { from: 0, to: 10 }, []);
       let n = 0;
       for (let d = 0; d < distinct; d++) for (let e = 0; e < each; e++) slice.add(`k${n++}`, "s", 1, `fp${d}`, `ERROR w${d}`, "error");
       assert.equal(slice.admitted.length, Math.min(n, LIMITS.occurrencesPerSlice));
@@ -45,12 +46,12 @@ test("a slice admits at most the occurrence limit and folds problems past 500 in
 });
 
 test("past the storm limit the count is a lower bound, and a saturated interval admits nothing on replay", () => {
-  const slice = new Slice(source.sources[0]!, 0, 10, []);
+  const slice = new Slice(source.sources[0]!, { from: 0, to: 10 }, []);
   for (let i = 0; i < LIMITS.occurrencesPerSlice + 7; i++) slice.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(slice.admitted.length, LIMITS.occurrencesPerSlice);
   assert.equal(slice.buckets.get("storm")!.inexact, true);
   assert.ok(slice.capped);
-  const replay = new Slice(source.sources[0]!, 0, 20, [{ from: 0, to: 10 }]);
+  const replay = new Slice(source.sources[0]!, { from: 0, to: 20 }, [{ from: 0, to: 10 }]);
   for (let i = 0; i < 100; i++) replay.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(replay.admitted.length, 0);
 });
@@ -122,4 +123,40 @@ test("the demo stays as seeded for as long as it runs", async () => {
   }
   assert.deepEqual(health(), seeded);
   store.close();
+});
+
+test("only what is new is charged: replays and saturated records leave room, and problem slots, for a fresh record", () => {
+  const stored = new Set(Array.from({ length: LIMITS.occurrencesPerSlice + 1 }, (_, i) => `old${i}`));
+  const slice = new Slice(source.sources[0]!, { from: 0, to: 100 }, [{ from: 50, to: 60 }], (k) => stored.has(k));
+  for (const key of stored) slice.add(key, "s", 10, `fp-${key}`, "ERROR storm", "error");
+  for (let i = 0; i < 10; i++) slice.add(`new-in-saturated${i}`, "s", 55, "fp-sat", "ERROR storm", "error");
+  slice.add("fresh", "s", 70, "fp-fresh", "ERROR fresh", "error");
+  assert.deepEqual(slice.admitted.map((a) => a.key), ["fresh"]);
+  assert.equal(slice.fresh, 1);
+  assert.deepEqual([...slice.buckets.keys()], ["fp-fresh"], "replayed problems do not take distinct-problem slots");
+  assert.equal(slice.capped, false);
+});
+
+test("every window is half-open: a record at a slice's end belongs to the next one", () => {
+  fc.assert(
+    fc.property(fc.integer({ min: 0, max: 1000 }), fc.integer({ min: 1, max: 1000 }), fc.integer({ min: -5, max: 2005 }), (from, length, at) => {
+      const to = from + length, next = to + length;
+      const a = new Slice(source.sources[0]!, { from, to }, []), b = new Slice(source.sources[0]!, { from: to, to: next }, []);
+      a.add("k", "s", at, "fp", "ERROR x", "error");
+      b.add("k", "s", at, "fp", "ERROR x", "error");
+      assert.equal(a.admitted.length + b.admitted.length, at >= from && at < next ? 1 : 0);
+      assert.equal(within({ from, to }, at), at >= from && at < to);
+    }),
+    { numRuns: 300 },
+  );
+});
+
+test("an outside value that is not clearly a number, count or time is not measured", () => {
+  fc.assert(
+    fc.property(fc.oneof(fc.constant(null), fc.constant(undefined), fc.constant(""), fc.constant("  "), fc.boolean(), fc.constant(NaN), fc.constant(Infinity), fc.string().filter((s) => !/^\s*-?\d/.test(s)), fc.object()), (v) => {
+      assert.equal(num(v), null);
+      assert.equal(count(v), null);
+    }),
+  );
+  assert.deepEqual([num("1.5"), num(0), count("3"), count(-1), count(1.5), time("2026-01-01T00:00:00Z"), time("soon"), time(null)], [1.5, 0, 3, null, null, Date.UTC(2026, 0, 1), null, null]);
 });

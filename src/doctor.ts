@@ -22,6 +22,9 @@ export interface Check {
 }
 
 const LABEL = "dev.overwatch.service";
+/** The tools as OpenCode names them for the agent: the MCP server's name, then the tool's. */
+const TOOLS = ["ow_telemetry", "ow_code_read", "ow_code_search", "ow_history", "ow_finding"];
+const glob = (pattern: string) => new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
 
 /** OpenCode fills its catalogs after start: read again for a few seconds before deciding something is missing. */
 async function settled<T>(read: () => Promise<T[]>, ok: (list: T[]) => boolean): Promise<T[]> {
@@ -66,7 +69,8 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
   const registry = (process.env.npm_config_registry || "https://registry.npmjs.org/").replace(/\/+$/, "");
   await check("proxy", `Check the proxy (HTTPS_PROXY) and the registry setting (npm config get registry): ${registry}`, async () => {
     const r = await fetch(`${registry}/-/ping`, { signal: AbortSignal.timeout(10_000) });
-    if (r.status >= 500) throw new Error(`the registry answered ${r.status}`);
+    // Reaching the registry is not enough: only a success shows it accepted this laptop's credentials and proxy.
+    if (!r.ok) throw new Error(`the registry answered ${r.status}${r.status === 401 || r.status === 403 ? ": its credentials were refused" : ""}`);
     await r.body?.cancel();
     return `registry ${registry.replace(/\/\/[^@/]*@/, "//")} answered; proxy ${proxy ? new URL(proxy).host : "none"}`;
   });
@@ -97,11 +101,13 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
   await check("agent", "Add the ow-investigator agent (deny all, allow the ow_ tools) to your OpenCode configuration", async () => {
     const agent = (await settled(() => need().agents(emptyDir), (l) => l.some((a) => a.id === "ow-investigator"))).find((a) => a.id === "ow-investigator" || a.name === "ow-investigator");
     if (!agent) throw new Error("OpenCode has no ow-investigator agent");
-    // OpenCode puts its defaults first and the last matching rule wins: after the last deny-all, only ow_ tools may be allowed.
+    // OpenCode puts its defaults first and the last matching rule wins: evaluate the rules as it does.
     const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
-    const denyAll = rules.findLastIndex((r) => r.action === "*" && r.resource === "*" && r.effect === "deny");
-    if (denyAll < 0 || rules.slice(denyAll + 1).some((r) => r.effect !== "deny" && !String(r.action).startsWith("ow_"))) throw new Error("ow-investigator does not deny everything by default");
-    return "ow-investigator denies everything but the Overwatch tools";
+    const effect = (action: string) => rules.findLast((r) => glob(String(r.action ?? "")).test(action) && String(r.resource ?? "*") === "*")?.effect ?? "allow";
+    for (const other of ["bash", "edit", "read", "webfetch", "ow_other"]) if (effect(other) !== "deny") throw new Error(`ow-investigator does not deny ${other}`);
+    const missing = TOOLS.filter((t) => effect(`ow_${t}`) !== "allow");
+    if (missing.length) throw new Error(`ow-investigator cannot use ${missing.map((t) => `ow_${t}`).join(", ")}`);
+    return "ow-investigator denies everything but the five Overwatch tools, which it can use";
   });
   await check("mcp", "Add the remote MCP server ow (url …/mcp, Authorization Bearer, codemode false) to your OpenCode configuration", async () => {
     const entry = (await settled(() => need().mcp(emptyDir), (l) => l.some((m) => m.name === "ow" && JSON.stringify(m.status).includes("connected")))).find((m) => m.name === "ow");

@@ -8,9 +8,12 @@
  * container, container instance, the full timestamp, a digest of the line and its ordinal among identical lines at
  * that timestamp in that instance; for a Datadog log, its ID; for a Kubernetes event, its UID with the cumulative
  * count kept as a baseline beyond the overlap.
+ *
+ * Every window of event time is a half-open Span [from, to): a slice, its overlap, the 14-day floor and a saturated
+ * interval. A record at a slice's end belongs to the next slice.
  */
 import { createHash } from "node:crypto";
-import { statfsSync, statSync } from "node:fs";
+import { statfsSync } from "node:fs";
 import { LIMITS, type Config, type Source } from "./config.ts";
 import { clock } from "./clock.ts";
 import { kubectl, parseEvents, parsePods, parseRevision, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
@@ -22,9 +25,13 @@ import { type Clean, type Store, type Writer } from "./store.ts";
 const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
+/** A half-open interval of event time. */
+export type Span = { readonly from: number; readonly to: number };
+export const within = (s: Span, at: number) => at >= s.from && at < s.to;
+
 /** Lines that are problems, how bad, and what groups them: numbers, IDs, quoted values and times do not. */
 export function problem(text: string): { fingerprint: string; title: string; severity: "error" | "warn" } | null {
-  const severity = /\b(error|fatal|panic|exception|critical|emergency)\b/i.test(text) ? "error" : /\bwarn(ing)?\b/i.test(text) ? "warn" : null;
+  const severity = /\b(error|fatal|panic|exception|critical)\b/i.test(text) ? "error" : /\bwarn(ing)?\b/i.test(text) ? "warn" : null;
   if (!severity) return null;
   const normal = clean(text.split("\n")[0]!, 2000)
     .replace(/\d{4}-\d{2}-\d{2}[T ][\d:.,]+(Z|[+-]\d{2}:?\d{2})?/g, "<ts>")
@@ -39,7 +46,9 @@ export function problem(text: string): { fingerprint: string; title: string; sev
   return { fingerprint: normal, title, severity };
 }
 
+type Severity = "error" | "warn" | "info";
 type Reading = { state: "ok" | "capped" | "gap" | "failed"; missed: number | null };
+type Bucket = { title: string; severity: Severity; reading: string; inexact: boolean; seen: boolean };
 
 /** A container's identity: its current and previous instance. */
 const identity = (c: Pod["containers"][number]) => c.instances.map((i) => `${i.previous ? "previous" : "current"}:${i.id}`).join(" ");
@@ -63,57 +72,76 @@ export function hysteresis(rule: { over: number; samples: number }, state: Hyste
   return { over, under, breach: state.breach ? under < rule.samples : over >= rule.samples };
 }
 
-/** What one slice of one source read, before it is committed. Bounded: at most the occurrence limit is kept. */
+/**
+ * What one slice of one source read, before it is committed. Only what is new is charged against the occurrence
+ * limit: a record outside the slice, inside a saturated interval, or whose key is already stored (a replay) is
+ * passed over before it is charged, so a replay can never use up the room a fresh record needs.
+ */
 export class Slice {
   readonly admitted: Array<{ key: string; stream: string; at: number; bucket: string }> = [];
-  readonly buckets = new Map<string, { title: string; severity: "error" | "warn" | "info"; inexact: boolean }>();
+  readonly buckets = new Map<string, Bucket>();
   readonly baselines: Array<{ key: string; count: number; bucket: string }> = [];
   readonly readings = new Map<string, Reading>();
   /** Gauge samples; null is a sample that could not be measured. */
-  readonly metrics: Array<{ name: string; value: number | null; at: number }> = [];
-  eligible = 0;
+  readonly metrics: Array<{ name: string; reading: string; value: number | null; at: number }> = [];
+  /** Incidents whose stored total is now known to be a lower bound (lines counted before were lost). */
+  readonly uncertain = new Set<string>();
+  fresh = 0;
   revision: string | null = null;
   readonly source: Source;
-  readonly from: number;
-  readonly to: number;
-  private readonly saturated: ReadonlyArray<{ from: number; to: number }>;
-  constructor(source: Source, from: number, to: number, saturated: ReadonlyArray<{ from: number; to: number }>) {
+  readonly span: Span;
+  private readonly saturated: ReadonlyArray<Span>;
+  private readonly known: (key: string) => boolean;
+  private readonly keys = new Set<string>();
+  constructor(source: Source, span: Span, saturated: ReadonlyArray<Span>, known: (key: string) => boolean = () => false) {
     this.source = source;
-    this.from = from;
-    this.to = to;
+    this.span = span;
     this.saturated = saturated;
+    this.known = known;
   }
 
-  private bucket(fingerprint: string, title: string, severity: "error" | "warn" | "info"): string {
+  /** The problem's bucket; past the distinct-problem limit, the overflow one. */
+  bucket(fingerprint: string, title: string, severity: Severity, reading: string): string {
     if (this.buckets.has(fingerprint)) return fingerprint;
     const distinct = [...this.buckets.keys()].filter((k) => k !== "overflow").length;
     if (distinct < LIMITS.problemsPerSlice) {
-      this.buckets.set(fingerprint, { title, severity, inexact: false });
+      this.buckets.set(fingerprint, { title, severity, reading, inexact: false, seen: false });
       return fingerprint;
     }
-    if (!this.buckets.has("overflow")) this.buckets.set("overflow", { title: "many other errors", severity: "error", inexact: false });
+    if (!this.buckets.has("overflow")) this.buckets.set("overflow", { title: "many other errors", severity: "error", reading, inexact: false, seen: false });
     return "overflow";
   }
 
+  /** A problem that may have occurred but could not be counted: its total becomes a lower bound. */
+  unsure(fingerprint: string, title: string, severity: Severity, reading: string) {
+    this.buckets.get(this.bucket(fingerprint, title, severity, reading))!.inexact = true;
+  }
+
   /** One occurrence. Past the limit it is not admitted, and its problem's count becomes a lower bound. */
-  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: "error" | "warn" | "info") {
-    const bucket = this.bucket(fingerprint, title, severity);
-    this.eligible++;
-    if (this.saturated.some((s) => at >= s.from && at <= s.to)) return;
-    if (this.eligible > LIMITS.occurrencesPerSlice) {
+  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: Severity, reading = "logs") {
+    if (!within(this.span, at) || this.saturated.some((s) => within(s, at))) return;
+    if (this.keys.has(key) || this.known(key)) return;
+    this.keys.add(key);
+    const bucket = this.bucket(fingerprint, title, severity, reading);
+    if (++this.fresh > LIMITS.occurrencesPerSlice) {
       this.buckets.get(bucket)!.inexact = true;
       return;
     }
     this.admitted.push({ key, stream, at, bucket });
   }
 
-  /** A cumulative counter (a Kubernetes event's count): only its increase since the stored baseline counts. */
-  counter(key: string, count: number, fingerprint: string, title: string, severity: "error" | "warn" | "info") {
-    this.baselines.push({ key, count, bucket: this.bucket(fingerprint, title, severity) });
+  /**
+   * A cumulative counter (a Kubernetes event's count, a monitor's state): only its increase since the stored baseline
+   * counts. `present` says the problem is still there now even if the counter did not move.
+   */
+  counter(key: string, count: number, fingerprint: string, title: string, severity: Severity, reading: string, present = false) {
+    const bucket = this.bucket(fingerprint, title, severity, reading);
+    if (present) this.buckets.get(bucket)!.seen = true;
+    this.baselines.push({ key, count, bucket });
   }
 
   get capped() {
-    return this.eligible > LIMITS.occurrencesPerSlice;
+    return this.fresh > LIMITS.occurrencesPerSlice;
   }
 }
 
@@ -122,9 +150,16 @@ export interface Space {
   dbBytes: number;
 }
 
+/** The disk is short: nothing is admitted and collection pauses. */
+class Full extends Error {}
+
+const incidentId = (source: Source, bucket: string) => `inc_${sha(source.app, source.environment, source.id, bucket).slice(0, 32)}`;
+
 export class Collector {
   private readonly nextMono = new Map<string, number>();
   private readonly okMono = new Map<string, number>();
+  /** Refusals that hold for an endpoint (sign-in, unreachable), within one pass: one failed call, not one per source. */
+  private readonly refused = new Map<string, SourceFailure>();
   private wakeAt: number | null = null;
   private override: Space | null = null;
   private running: Promise<void> | null = null;
@@ -152,29 +187,42 @@ export class Collector {
 
   private space(): Space {
     if (this.override) return this.override;
-    let free = Number.MAX_SAFE_INTEGER, size = 0;
+    let free = Number.MAX_SAFE_INTEGER;
     try {
       const s = statfsSync(this.directory);
       free = Number(s.bavail) * Number(s.bsize);
     } catch {
       // Unknown free space is not a reason to stop.
     }
-    for (const suffix of ["", "-wal"]) {
-      try {
-        size += statSync(this.store.file + suffix).size;
-      } catch {
-        // Absent.
-      }
-    }
-    return { freeBytes: free, dbBytes: size };
+    return { freeBytes: free, dbBytes: this.store.liveBytes() };
   }
 
+  /**
+   * Whether there is room to admit: the free-space floor and the database budget. Over the budget, `maintain` first
+   * makes room in the declared order, and measures again. No room: collection pauses with the reason `disk`.
+   */
+  private room(maintain: boolean): boolean {
+    let space = this.space();
+    if (maintain && space.dbBytes > LIMITS.databaseBudgetBytes) {
+      this.store.retain(clock.now(), () => this.space().dbBytes > LIMITS.databaseBudgetBytes);
+      space = this.space();
+    }
+    const ok = space.freeBytes >= LIMITS.freeFloorBytes && space.dbBytes <= LIMITS.databaseBudgetBytes;
+    this.paused = ok ? null : "disk";
+    return ok;
+  }
+
+  /**
+   * Whether a source is due. The stored wall-clock time decides, and the monotonic clock bounds it: after a restart
+   * the live deadline is rebuilt as at most the delay that was chosen, so a wall clock moved backwards cannot
+   * postpone a probe.
+   */
   private due(source: Source): boolean {
-    const row = this.store.get<{ next_ms: number | null; failure: string | null }>("SELECT next_ms, failure FROM sources WHERE id = ?", source.id);
+    const row = this.store.get<{ next_ms: number | null; delay_ms: number | null; failure: string | null }>("SELECT next_ms, delay_ms, failure FROM sources WHERE id = ?", source.id);
     if (!row || row.next_ms === null) return true;
     if (clock.now() >= row.next_ms) return true;
-    const mono = this.nextMono.get(source.id);
-    if (mono !== undefined && clock.mono() >= mono) return true;
+    if (!this.nextMono.has(source.id)) this.nextMono.set(source.id, clock.mono() + Math.min(row.next_ms - clock.now(), row.delay_ms ?? source.everyMs));
+    if (clock.mono() >= this.nextMono.get(source.id)!) return true;
     return row.failure !== null && this.wakeAt !== null && clock.mono() >= this.wakeAt;
   }
 
@@ -185,41 +233,46 @@ export class Collector {
   }
 
   private async passOnce() {
-    const space = this.space();
-    if (space.dbBytes > LIMITS.databaseBudgetBytes) this.store.compact();
-    this.store.reclaim(); // what compaction freed goes back to the disk a bounded step per pass
-    if (space.freeBytes < LIMITS.freeFloorBytes) {
-      this.paused = "disk";
-      return;
-    }
-    this.paused = null;
+    const roomy = this.room(true);
+    this.store.reclaim(); // what was freed goes back to the disk a bounded step per pass
+    if (!roomy) return;
     const woke = this.wakeAt !== null && clock.mono() >= this.wakeAt;
+    this.refused.clear();
     for (const source of this.config.sources) {
       if (!this.due(source)) continue;
       try {
+        const earlier = this.refused.get(endpoint(source));
+        if (earlier) throw earlier;
         if (source.kind === "kubernetes") await this.kubernetes(source);
         else await this.datadog(source);
       } catch (error) {
+        if (error instanceof Full) return;
+        if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) this.refused.set(endpoint(source), error);
         this.fail(source, error);
       }
     }
     if (woke) this.wakeAt = null;
   }
 
-  /** Where the next slice starts, and the gap (older than the catch-up limit) it cannot read. */
+  /**
+   * Where reading starts: the checkpoint, never before the 14-day floor. Older time is the gap [checkpoint, floor).
+   * `scheduled` is true for an ordinary interval (not a catch-up after a sleep).
+   */
   private window(source: Source, overlap: number) {
-    const now = clock.now();
+    const now = clock.now(), floor = now - LIMITS.catchUpMs;
     const row = this.store.get<{ checkpoint_ms: number | null }>("SELECT checkpoint_ms FROM sources WHERE id = ?", source.id);
-    let start = row?.checkpoint_ms ?? now - source.everyMs;
-    let gap: { from: number; to: number } | null = null;
-    if (now - start > LIMITS.catchUpMs) {
-      gap = { from: start, to: now - LIMITS.catchUpMs };
-      start = now - LIMITS.catchUpMs;
-    }
+    let start = Math.min(row?.checkpoint_ms ?? now - source.everyMs, now);
+    const gap: Span | null = start < floor ? { from: start, to: floor } : null;
+    if (gap) start = floor;
     const saturated = this.store
       .all<{ from_ms: number; to_ms: number }>("SELECT from_ms, to_ms FROM saturated WHERE source = ?", source.id)
-      .map((s) => ({ from: s.from_ms, to: s.to_ms }));
-    return { now, start, gap, overlap, saturated };
+      .map((s): Span => ({ from: s.from_ms, to: s.to_ms }));
+    return { now, start, floor, gap, overlap, saturated, scheduled: now - start <= 2 * source.everyMs };
+  }
+
+  private slice(source: Source, w: ReturnType<Collector["window"]>, start: number, end: number) {
+    const known = (key: string) => this.store.get("SELECT 1 FROM occurrences WHERE key = ?", key) !== undefined;
+    return new Slice(source, { from: Math.max(start - w.overlap, w.floor), to: end }, w.saturated, known);
   }
 
   /**
@@ -235,14 +288,14 @@ export class Collector {
     let start = w.start, gap = w.gap, stuck = false;
     do {
       const end = Math.min(start + LIMITS.sliceMs, w.now);
-      const slice = new Slice(source, start - w.overlap, end, w.saturated);
+      const slice = this.slice(source, w, start, end);
       if (source.readings.includes("logs")) {
         pods = await this.logs(t, source, slice, pods);
         // Logs that cannot be read keep the checkpoint where it is; the present state is still read.
         if (slice.readings.get("logs")!.state === "failed") stuck = true;
       }
       if (end === w.now) await this.present(t, source, slice, pods, w.now);
-      this.commit(slice, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes);
+      this.commit(slice, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, w.scheduled && end === w.now);
       gap = null;
       start = stuck ? Math.max(end, w.now - LIMITS.sliceMs) : end;
     } while (start < w.now);
@@ -255,7 +308,7 @@ export class Collector {
   }
 
   /** A reading the source refused (permission, configuration) is recorded as failed; any other failure fails the pass. */
-  private refused(slice: Slice, reading: string, stderr: string) {
+  private refusedReading(slice: Slice, reading: string, stderr: string) {
     const kind = classify(stderr);
     if (kind !== "permission" && kind !== "config") throw new SourceFailure(kind, stderr);
     slice.readings.set(reading, { state: "failed", missed: null });
@@ -263,10 +316,11 @@ export class Collector {
 
   /**
    * One slice of logs. A container's records are kept only if its identity (its current and previous instance) is
-   * the same in the pod list after the read as before it; otherwise the read is ambiguous, is discarded, and is a
-   * gap. What a read shows was lost (a line counted before and no longer returned: rotation or truncation) or a
-   * restarted container with no previous instance to read is a gap too: the count is then a lower bound.
-   * Returns the pod list taken after the read.
+   * the same in the pod list after the read as before it; otherwise the read is ambiguous, is discarded, is a gap,
+   * and the problems it showed become lower bounds. What a read shows was lost (a line counted before and no longer
+   * returned: rotation or truncation) is a gap and makes those lines' problems lower bounds. A running container
+   * with no instance, or a restarted one with no previous instance to read, is a gap. A line without a readable
+   * time cannot be placed and is a gap. Returns the pod list taken after the read.
    */
   private async logs(t: Target, source: Source, slice: Slice, before: ReadonlyArray<Pod>): Promise<Pod[]> {
     const order: Reading["state"][] = ["ok", "gap", "capped", "failed"];
@@ -274,21 +328,23 @@ export class Collector {
     const worse = (s: Reading["state"]) => {
       if (order.indexOf(s) > order.indexOf(state.state)) state = { state: s, missed: null };
     };
-    type Record = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn" };
-    const reads: Array<{ uid: string; container: string; identity: string; records: Record[] }> = [];
+    type Line = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn" };
+    const reads: Array<{ uid: string; container: string; identity: string; lines: Line[] }> = [];
     for (const pod of before.slice(0, LIMITS.podsPerSource)) {
       for (const container of pod.containers) {
-        const records: Record[] = [];
+        const lines: Line[] = [];
+        if (!container.instances.some((i) => !i.previous) && (pod.running || container.restarts > 0)) worse("gap");
         if (container.restarts > 0 && !container.instances.some((i) => i.previous)) worse("gap");
         for (const instance of container.instances) {
           const stream = sha("k8s", t.context, t.namespace, pod.uid, container.name, instance.id);
           const ordinals = new Map<string, number>();
           const seen = new Set<string>();
-          let lastAt = slice.from;
-          const read = await streamLogs(t, pod.name, container.name, iso(slice.from), instance.previous, LIMITS.bytesPerPodCall, (stamp, text) => {
+          let lastAt = slice.span.from;
+          const read = await streamLogs(t, pod.name, container.name, iso(slice.span.from), instance.previous, LIMITS.bytesPerPodCall, (stamp, text) => {
             const at = Date.parse(stamp);
-            if (!Number.isFinite(at) || at < slice.from) return;
-            if (at > slice.to) return false;
+            if (!Number.isFinite(at)) return void worse("gap");
+            if (at < slice.span.from) return;
+            if (at >= slice.span.to) return false;
             lastAt = at;
             const p = problem(text);
             if (!p) return;
@@ -297,23 +353,26 @@ export class Collector {
             ordinals.set(stamp + digest, ordinal + 1);
             const key = sha("k8s", t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
             seen.add(key);
-            records.push({ key, stream, at, ...p });
+            lines.push({ key, stream, at, ...p });
           });
           if (read.code !== 0) {
             if (instance.previous && /previous terminated container|not found/i.test(read.stderr)) worse("gap");
             else {
-              this.refused(slice, "logs", read.stderr);
+              this.refusedReading(slice, "logs", read.stderr);
               worse("failed");
             }
             continue;
           }
           if (read.capped) worse("capped");
           else if (read.cutTail) worse("gap");
-          const through = read.capped || read.cutTail ? lastAt : slice.to;
-          const stored = this.store.all<{ key: string }>("SELECT key FROM occurrences WHERE stream = ? AND at_ms >= ? AND at_ms <= ?", stream, slice.from, through);
-          if (stored.some((r) => !seen.has(r.key))) worse("gap");
+          const through = read.capped || read.cutTail ? lastAt : slice.span.to;
+          const lost = this.store
+            .all<{ key: string; incident: string }>("SELECT key, incident FROM occurrences WHERE stream = ? AND at_ms >= ? AND at_ms < ?", stream, slice.span.from, through)
+            .filter((r) => !seen.has(r.key));
+          if (lost.length) worse("gap");
+          for (const r of lost) if (r.incident) slice.uncertain.add(r.incident);
         }
-        reads.push({ uid: pod.uid, container: container.name, identity: identity(container), records });
+        reads.push({ uid: pod.uid, container: container.name, identity: identity(container), lines });
       }
     }
     const after = await this.pods(t, source);
@@ -321,50 +380,54 @@ export class Collector {
       const now = after.find((p) => p.uid === r.uid)?.containers.find((c) => c.name === r.container);
       if (!now || identity(now) !== r.identity) {
         worse("gap");
+        for (const x of r.lines) slice.unsure(x.fingerprint, x.title, x.severity, "logs");
         continue;
       }
-      for (const x of r.records) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity);
+      for (const x of r.lines) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity);
     }
-    if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.eligible - LIMITS.occurrencesPerSlice };
+    if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice };
     slice.readings.set("logs", state);
     return after;
   }
 
-  /** What the cluster says now: warning events, the running revision and readiness, memory use against limits. */
+  /**
+   * What the cluster says now: warning events, the running revision and readiness, memory use against limits. The
+   * memory sample is measured only when every container with a limit was measured: one pod cannot speak for another.
+   */
   private async present(t: Target, source: Source, slice: Slice, pods: ReadonlyArray<Pod>, now: number) {
     if (source.readings.includes("events")) {
       const r = await kubectl(t, "get", ["events", "-o", "json"]);
-      if (r.code !== 0) this.refused(slice, "events", r.stderr);
+      if (r.code !== 0) this.refusedReading(slice, "events", r.stderr);
       else {
         for (const e of parseEvents(r.stdout)) {
           if (e.type !== "Warning") continue;
           const p = problem(`WARN ${e.reason}: ${e.message}`)!;
-          slice.counter(sha("k8s-event", t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn");
+          slice.counter(sha("k8s-event", t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
         slice.readings.set("events", { state: "ok", missed: null });
       }
     }
     if (source.readings.includes("workloads")) {
       const r = await kubectl(t, "get", ["deployments", "-l", source.selector!, "-o", "json"]);
-      if (r.code !== 0) this.refused(slice, "workloads", r.stderr);
+      if (r.code !== 0) this.refusedReading(slice, "workloads", r.stderr);
       else {
         slice.revision = parseRevision(r.stdout);
         slice.readings.set("workloads", { state: slice.revision ? "ok" : "gap", missed: null });
       }
-      slice.metrics.push({ name: NOT_READY, value: pods.filter((p) => !p.ready).length, at: now });
+      slice.metrics.push({ name: NOT_READY, reading: "workloads", value: pods.filter((p) => !p.ready).length, at: now });
     }
     if (source.readings.includes("usage")) {
       const r = await kubectl(t, "top", ["pod", "-l", source.selector!, "--containers", "--no-headers"]);
       let worst: number | null = null;
-      if (r.code !== 0) this.refused(slice, "usage", r.stderr);
+      if (r.code !== 0) this.refusedReading(slice, "usage", r.stderr);
       else {
-        for (const row of parseTop(r.stdout)) {
-          const limit = pods.find((p) => p.name === row.pod)?.containers.find((c) => c.name === row.container)?.memoryLimit;
-          if (limit) worst = Math.max(worst ?? 0, (100 * row.memory) / limit);
-        }
+        const rows = parseTop(r.stdout);
+        const limited = pods.flatMap((p) => p.containers.filter((c) => c.memoryLimit).map((c) => ({ pod: p.name, container: c.name, limit: c.memoryLimit! })));
+        const used = limited.map((c) => rows.find((row) => row.pod === c.pod && row.container === c.container)?.memory ?? null);
+        if (limited.length && used.every((m) => m !== null)) worst = Math.max(...used.map((m, i) => (100 * m!) / limited[i]!.limit));
         slice.readings.set("usage", { state: worst === null ? "gap" : "ok", missed: null });
       }
-      slice.metrics.push({ name: MEMORY, value: worst === null ? null : Math.round(worst * 10) / 10, at: now });
+      slice.metrics.push({ name: MEMORY, reading: "usage", value: worst === null ? null : Math.round(worst * 10) / 10, at: now });
     }
   }
 
@@ -374,47 +437,56 @@ export class Collector {
     let gap = w.gap;
     do {
       const end = Math.min(start + LIMITS.sliceMs, w.now);
-      const slice = new Slice(source, start - w.overlap, end, w.saturated);
+      const slice = this.slice(source, w, start, end);
       try {
         if (source.readings.includes("logs")) {
-          await datadog.searchLogs(source, start - w.overlap, end, (log) => {
+          let unplaced = false;
+          await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
+            if (log.at === null) return void (unplaced = true);
             const p = problem(/^(error|critical|emergency|alert)$/i.test(log.status) ? `ERROR ${log.message}` : /^warn/i.test(log.status) ? `WARN ${log.message}` : log.message);
             if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity);
           });
-          slice.readings.set("logs", { state: slice.capped ? "capped" : "ok", missed: slice.capped ? slice.eligible - LIMITS.occurrencesPerSlice : null });
+          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice } : { state: unplaced ? "gap" : "ok", missed: null });
         }
         if (end === w.now && source.readings.includes("monitors")) {
+          let unknown = false;
           for (const m of await datadog.monitors(source)) {
-            if (!/^(alert|warn)/i.test(m.state)) continue;
+            if (m.state === null) unknown = true;
+            if (!m.state || !/^(alert|warn)/i.test(m.state)) continue;
             const severity = /^alert/i.test(m.state) ? "error" : "warn";
-            slice.counter(sha("dd-monitor", source.id, m.id, m.state), 1, `monitor:${m.id}:${m.state}`, `Monitor ${clean(m.name, 200)} is ${clean(m.state, 40)}`, severity);
+            // One incident per monitor across Warn and Alert; each change of state counts once.
+            slice.counter(sha("dd-monitor", source.id, m.id, m.state), 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
           }
-          slice.readings.set("monitors", { state: "ok", missed: null });
+          slice.readings.set("monitors", { state: unknown ? "gap" : "ok", missed: null });
         }
         if (end === w.now && source.readings.includes("metrics")) {
           const point = await datadog.metric(source, end - source.everyMs, end);
-          if (point) slice.metrics.push({ name: point.name, value: point.value, at: point.at });
+          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", value: point?.value ?? null, at: point?.at ?? end });
           slice.readings.set("metrics", { state: point ? "ok" : "gap", missed: null });
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
         throw error;
       }
-      this.commit(slice, gap, end, LIMITS.overlapMs.datadog);
+      this.commit(slice, gap, end, LIMITS.overlapMs.datadog, w.scheduled && end === w.now);
       gap = null;
       start = end;
     } while (start < w.now);
   }
 
-  /** The slice, in one transaction. */
-  private commit(slice: Slice, gap: { from: number; to: number } | null, checkpoint: number | null, overlap: number) {
+  /**
+   * The slice, in one transaction, after checking there is room. `scheduled` marks an ordinary complete interval:
+   * only those count toward a problem going quiet (three in a row with nothing new and the reading fully measured).
+   */
+  private commit(slice: Slice, gap: Span | null, checkpoint: number | null, overlap: number, scheduled: boolean) {
+    if (!this.room(false)) throw new Full();
     const source = slice.source;
     const now = clock.now();
     this.store.tx((w) => {
       const seq = w.event("slice", source.id as Clean, {
-        from: slice.from,
-        to: slice.to,
-        eligible: slice.eligible,
+        from: slice.span.from,
+        to: slice.span.to,
+        fresh: slice.fresh,
         admitted: slice.admitted.length,
         readings: Object.fromEntries(slice.readings),
       });
@@ -424,7 +496,10 @@ export class Collector {
       }
       const counts = new Map<string, number>();
       for (const record of slice.admitted) {
-        const inserted = w.run("INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms) VALUES (?, ?, ?, ?)", record.key as Clean, source.id as Clean, record.stream as Clean, record.at).changes;
+        const inserted = w.run(
+          "INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms, incident) VALUES (?, ?, ?, ?, ?)",
+          record.key as Clean, source.id as Clean, record.stream as Clean, record.at, incidentId(source, record.bucket) as Clean,
+        ).changes;
         if (inserted) counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
       }
       for (const b of slice.baselines) {
@@ -435,14 +510,23 @@ export class Collector {
           b.key as Clean, source.id as Clean, b.count, now,
         );
       }
+      const touched = new Set<string>();
       for (const [bucket, info] of slice.buckets) {
         const added = counts.get(bucket) ?? 0;
-        if (added === 0 && !info.inexact) continue;
-        incident(w, source, bucket, info.title, info.severity, added, !info.inexact, now, seq);
+        if (added > 0 || info.seen) touched.add(incidentId(source, bucket));
+        if (added === 0 && !info.inexact && !info.seen) continue;
+        if (added === 0 && !info.inexact && !this.store.get("SELECT 1 FROM incidents WHERE id = ?", incidentId(source, bucket))) continue;
+        incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen);
       }
-      if (slice.capped) w.run("INSERT OR REPLACE INTO saturated (source, reading, from_ms, to_ms) VALUES (?, 'logs', ?, ?)", source.id as Clean, slice.from, slice.to);
+      for (const id of slice.uncertain) w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
+      // Time a reading did not fully cover: the totals of problems active then are lower bounds from now on.
       for (const [reading, r] of slice.readings) {
-        w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, ?, ?, ?, ?, ?)", seq, source.id as Clean, reading as Clean, slice.from, slice.to, r.state as Clean, r.missed);
+        if (r.state !== "ok") w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND reading = ? AND active = 1", source.id as Clean, reading as Clean);
+      }
+      if (gap) w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id as Clean);
+      if (slice.capped) w.run("INSERT OR REPLACE INTO saturated (source, reading, from_ms, to_ms) VALUES (?, 'logs', ?, ?)", source.id as Clean, slice.span.from, slice.span.to);
+      for (const [reading, r] of slice.readings) {
+        w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, ?, ?, ?, ?, ?)", seq, source.id as Clean, reading as Clean, slice.span.from, slice.span.to, r.state as Clean, r.missed);
         w.run(
           `INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
@@ -451,17 +535,19 @@ export class Collector {
         if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono());
       }
       for (const m of slice.metrics) this.metric(w, source, m, now, seq);
+      this.quiet(w, slice, touched, scheduled, seq);
       if (slice.revision) this.deploy(w, source, slice.revision);
       if (checkpoint !== null) {
         const before = this.store.get<{ failure: string | null }>("SELECT failure FROM sources WHERE id = ?", source.id);
         w.run(
-          `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint) VALUES (?, ?, NULL, 0, ?, 0, NULL, ?)
-           ON CONFLICT (id) DO UPDATE SET checkpoint_ms = excluded.checkpoint_ms, failure = NULL, streak = 0, next_ms = excluded.next_ms, suspended = 0, fix = NULL`,
-          source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean,
+          `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, NULL, 0, ?, 0, NULL, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET checkpoint_ms = excluded.checkpoint_ms, failure = NULL, streak = 0, next_ms = excluded.next_ms, suspended = 0, fix = NULL,
+             endpoint = excluded.endpoint, delay_ms = excluded.delay_ms`,
+          source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean, source.everyMs,
         );
         if (before?.failure) w.event("source_recovered", source.id as Clean, { was: before.failure });
         w.run("DELETE FROM occurrences WHERE source = ? AND at_ms < ?", source.id as Clean, checkpoint - overlap);
-        w.run("DELETE FROM saturated WHERE source = ? AND to_ms < ?", source.id as Clean, checkpoint - overlap);
+        w.run("DELETE FROM saturated WHERE source = ? AND to_ms <= ?", source.id as Clean, checkpoint - overlap);
         w.run("DELETE FROM baselines WHERE source = ? AND seen_ms < ?", source.id as Clean, now - LIMITS.catchUpMs);
         w.run(
           "DELETE FROM coverage WHERE source = ? AND state = 'ok' AND id NOT IN (SELECT id FROM coverage WHERE source = ? ORDER BY id DESC LIMIT 200)",
@@ -472,6 +558,26 @@ export class Collector {
     if (checkpoint !== null) this.nextMono.set(source.id, clock.mono() + source.everyMs);
   }
 
+  /**
+   * An occurrence problem stays active until three ordinary intervals in a row read its reading completely and found
+   * nothing new; an interval that was not fully measured starts the count again. Gauge problems follow their breach.
+   */
+  private quiet(w: Writer, slice: Slice, touched: ReadonlySet<string>, scheduled: boolean, seq: number) {
+    const active = this.store.all<{ id: string; reading: string; streak: number }>("SELECT id, reading, streak FROM incidents WHERE source = ? AND active = 1 AND reading <> 'gauge'", slice.source.id);
+    for (const i of active) {
+      const state = slice.readings.get(i.reading)?.state;
+      if (touched.has(i.id) || state === undefined) continue;
+      if (state !== "ok" || !scheduled) {
+        if (state !== "ok" && i.streak > 0) w.run("UPDATE incidents SET streak = 0 WHERE id = ?", i.id as Clean);
+        continue;
+      }
+      if (i.streak + 1 >= LIMITS.quietIntervals) {
+        w.run("UPDATE incidents SET active = 0, streak = 0 WHERE id = ?", i.id as Clean);
+        w.event("quieted", i.id as Clean, { slice: seq });
+      } else w.run("UPDATE incidents SET streak = streak + 1 WHERE id = ?", i.id as Clean);
+    }
+  }
+
   /** One gauge sample through its rule's hysteresis; the breach that opens is counted as one occurrence of its problem. */
   private metric(w: Writer, source: Source, m: Slice["metrics"][number], now: number, seq: number) {
     const row = this.store.get<{ value: number; at_ms: number; over: number; under: number; breach: number }>("SELECT * FROM metrics WHERE source = ? AND name = ?", source.id, m.name);
@@ -480,9 +586,12 @@ export class Collector {
     const was = { over: row?.over ?? 0, under: row?.under ?? 0, breach: row?.breach === 1 };
     const next = rule ? hysteresis(rule, was, m.value) : { over: 0, under: 0, breach: false };
     if (rule && next.breach && !was.breach) {
-      incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", 1, true, now, seq);
-      w.event("metric_breach", source.id as Clean, { name: m.name, value: m.value, over: rule.over });
-    } else if (was.breach && !next.breach) w.event("metric_clear", source.id as Clean, { name: m.name, value: m.value });
+      incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", "gauge", 1, true, now, seq, true);
+      w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value: m.value, over: rule.over });
+    } else if (was.breach && !next.breach) {
+      w.run("UPDATE incidents SET active = 0 WHERE id = ?", incidentId(source, `metric:${m.name}`) as Clean);
+      w.event("incident", source.id as Clean, { metric: m.name, state: "clear", value: m.value });
+    }
     w.run(
       "INSERT OR REPLACE INTO metrics (source, name, value, at_ms, over, under, breach) VALUES (?, ?, ?, ?, ?, ?, ?)",
       source.id as Clean, m.name as Clean, m.value ?? row!.value, m.value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0,
@@ -507,22 +616,28 @@ export class Collector {
     this.store.tx((w) => {
       w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
       w.run(
-        `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix`,
-        source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean,
+        `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
+           delay_ms = excluded.delay_ms`,
+        source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean, next.delayMs,
       );
     });
     this.nextMono.set(source.id, clock.mono() + next.delayMs);
   }
 }
 
-/** Adds to a problem's count, creating it the first time; an inexact addition makes the count a lower bound. */
-function incident(w: Writer, source: Source, bucket: string, title: string, severity: string, added: number, exact: boolean, now: number, seq: number) {
-  const id = `inc_${sha(source.app, source.environment, source.id, bucket).slice(0, 32)}`;
+/**
+ * Adds to a problem's count, creating it the first time; an inexact addition makes the count a lower bound. A
+ * problem observed now (`active`) is active again and its quiet count starts over.
+ */
+function incident(w: Writer, source: Source, bucket: string, title: string, severity: Severity, reading: string, added: number, exact: boolean, now: number, seq: number, active: boolean) {
   w.run(
-    `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (id) DO UPDATE SET count = count + excluded.count, exact = min(exact, excluded.exact), last_ms = max(last_ms, excluded.last_ms), seq = excluded.seq`,
-    id as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
+    `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+     ON CONFLICT (id) DO UPDATE SET count = count + excluded.count, exact = min(exact, excluded.exact), last_ms = max(last_ms, excluded.last_ms), seq = excluded.seq,
+       severity = CASE WHEN excluded.severity = 'error' THEN 'error' ELSE severity END,
+       active = max(active, excluded.active), streak = CASE WHEN excluded.active = 1 THEN 0 ELSE streak END`,
+    incidentId(source, bucket) as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
+    reading as Clean, active ? 1 : 0,
   );
 }
 
@@ -536,4 +651,5 @@ export class SourceFailure extends Error {
   }
 }
 
-export const endpoint = (s: Source) => (s.kind === "kubernetes" ? `kubernetes:${s.context}` : `datadog:${s.baseUrl}`);
+/** What a refusal is shared by: a cluster context, or a Datadog site and key. */
+export const endpoint = (s: Source) => (s.kind === "kubernetes" ? `kubernetes:${s.context}` : `datadog:${s.baseUrl}:${s.apiKey}`);

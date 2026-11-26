@@ -6,6 +6,7 @@
 import { LIMITS, type Source } from "./config.ts";
 import { secret } from "./exec.ts";
 import { sleep } from "./clock.ts";
+import { list, num, rec, str, time } from "./parse.ts";
 
 export class HttpFailure extends Error {
   readonly status: number;
@@ -31,7 +32,7 @@ async function request(source: Source, path: string, init: { method?: string; bo
       throw new HttpFailure(0, `Datadog unreachable: ${(error as Error).message}`);
     }
     if (response.status === 429) {
-      const wait = Number(response.headers.get("retry-after") ?? "60");
+      const wait = num(response.headers.get("retry-after")) ?? Infinity;
       await response.body?.cancel();
       if (attempt < LIMITS.retryAfterTimes && Number.isFinite(wait) && wait <= LIMITS.retryAfterMaxS) {
         await sleep(Math.max(0, wait) * 1000);
@@ -47,11 +48,11 @@ async function request(source: Source, path: string, init: { method?: string; bo
   }
 }
 
-const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 
 export interface DatadogLog {
   readonly id: string;
-  readonly at: number;
+  /** null when the log has no readable time: it cannot be placed in a window. */
+  readonly at: number | null;
   readonly message: string;
   readonly status: string;
 }
@@ -66,10 +67,10 @@ export async function searchLogs(source: Source, from: number, to: number, each:
       sort: "timestamp",
     };
     const reply = rec(await request(source, "/api/v2/logs/events/search", { method: "POST", body }));
-    for (const row of Array.isArray(reply.data) ? reply.data : []) {
+    for (const row of list(reply.data)) {
       const a = rec(rec(row).attributes);
-      const id = rec(row).id, at = Date.parse(String(a.timestamp ?? ""));
-      if (typeof id === "string" && Number.isFinite(at)) each({ id, at, message: String(a.message ?? ""), status: String(a.status ?? "error") });
+      const id = str(rec(row).id);
+      if (id) each({ id, at: time(a.timestamp), message: typeof a.message === "string" ? a.message : "", status: str(a.status) ?? "error" });
     }
     const after = rec(rec(reply.meta).page).after;
     if (typeof after !== "string" || !after) return;
@@ -80,25 +81,28 @@ export async function searchLogs(source: Source, from: number, to: number, each:
 export interface Monitor {
   readonly id: string;
   readonly name: string;
-  readonly state: string;
+  readonly state: string | null;
 }
 
 export async function monitors(source: Source): Promise<Monitor[]> {
   const reply = await request(source, `/api/v1/monitor?monitor_tags=&name=&tags=${encodeURIComponent(source.query ?? "")}`);
-  return (Array.isArray(reply) ? reply : []).map(rec).flatMap((m) =>
-    m.id === undefined ? [] : [{ id: String(m.id), name: String(m.name ?? `monitor ${m.id}`), state: String(m.overall_state ?? "OK") }],
-  );
+  // A monitor without a readable state is not reported as OK: it is left out, and the reading is incomplete.
+  return list(reply).map(rec).flatMap((m) => {
+    const id = num(m.id) ?? str(m.id);
+    return id === null ? [] : [{ id: String(id), name: str(m.name) ?? `monitor ${id}`, state: str(m.overall_state) }];
+  });
 }
 
 /** The latest point of the configured metric over the window. */
 export async function metric(source: Source, from: number, to: number): Promise<{ name: string; value: number; at: number } | null> {
   const q = `from=${Math.floor(from / 1000)}&to=${Math.floor(to / 1000)}&query=${encodeURIComponent(source.metric ?? "")}`;
   const reply = rec(await request(source, `/api/v1/query?${q}`));
-  for (const series of Array.isArray(reply.series) ? reply.series : []) {
-    const points = rec(series).pointlist;
-    const last = Array.isArray(points) ? points.at(-1) : undefined;
-    if (Array.isArray(last) && Number.isFinite(Number(last[1])))
-      return { name: `${String(rec(series).metric ?? source.metric)} (${source.metric})`, value: Number(last[1]), at: Number(last[0]) || to };
+  // The latest point that has both a time and a value; a null point is not measured, never zero.
+  for (const series of list(reply.series)) {
+    for (const point of list(rec(series).pointlist).reverse()) {
+      const at = num(list(point)[0]), value = num(list(point)[1]);
+      if (at !== null && value !== null) return { name: `${str(rec(series).metric) ?? source.metric} (${source.metric})`, value, at };
+    }
   }
   return null;
 }

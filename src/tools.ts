@@ -25,7 +25,8 @@ export interface Code {
 export interface RunContext {
   readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string }>>>;
   readonly repo: string | null;
-  readonly startMono: number;
+  /** The run's end on the service's monotonic clock: the same value the driver waits on. */
+  readonly deadline: number;
 }
 
 export interface Piece {
@@ -97,7 +98,7 @@ export class Tools {
     const context = run ? this.contexts.get(run.id) : undefined;
     if (!run || run.state !== "active" || !context) throw new Refusal("this session has no active Overwatch investigation");
     if (run.calls >= LIMITS.toolCallsPerRun) throw new Refusal(`this investigation has used its ${LIMITS.toolCallsPerRun} tool calls`);
-    if (clock.mono() - context.startMono > LIMITS.runActiveMs) throw new Refusal("this investigation's five minutes have passed");
+    if (clock.mono() >= context.deadline) throw new Refusal("this investigation's five minutes have passed");
     this.authored.get(run.id)?.push(JSON.stringify(args));
     this.store.tx((w) => {
       w.run("UPDATE runs SET calls = calls + 1 WHERE id = ?", run.id as Clean);

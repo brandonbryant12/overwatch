@@ -56,25 +56,45 @@ test("a backup restores to the same rows and sequence; a rejected one leaves the
   n.exec("pragma ignore_check_constraints = on");
   n.prepare("update incidents set count = -1").run();
   n.close();
-  for (const bad of [text, foreign, negative]) {
+  // Intact but impossible: an incident that names a sequence number the backup never issued.
+  const impossible = join(d, "impossible.sqlite");
+  store.backup(impossible);
+  const i = new DatabaseSync(impossible);
+  i.prepare("update incidents set seq = seq + 100").run();
+  i.close();
+  for (const bad of [text, foreign, negative, impossible]) {
     assert.throws(() => store.restore(bad), Incompatible);
     assert.deepEqual(rows(store), before);
   }
   store.close();
 });
 
-test("compaction drops old history but keeps counts and the next sequence", () => {
-  const store = Store.own(dir());
-  for (let i = 0; i < 30; i++) store.tx((w) => w.event("slice", "s" as Clean, { i }));
-  const before = store.seq();
-  const through = store.compact(10);
-  assert.equal(through, before - 10);
-  assert.equal(store.seq(), before + 1);
-  assert.equal(store.get<{ n: number }>("SELECT min(seq) AS n FROM events")!.n, through + 1);
+test("a file from an earlier build of version 1 gains the columns added since, with their defaults", () => {
+  const d = dir();
+  Store.own(d).close();
+  const raw = new DatabaseSync(join(d, "overwatch.db"));
+  raw.exec("ALTER TABLE incidents DROP COLUMN active; ALTER TABLE occurrences DROP COLUMN incident; ALTER TABLE sources DROP COLUMN delay_ms");
+  raw.close();
+  const store = Store.own(d);
+  store.tx((w) => w.run("INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq) VALUES ('inc_1', 'a', 'e', 's', 'ERROR x', 'error', 1, 1, 0, 0, 0)"));
+  assert.equal(store.get<{ active: number }>("SELECT active FROM incidents")!.active, 1);
+  assert.ok(store.get("SELECT incident FROM occurrences LIMIT 0") === undefined);
   store.close();
 });
 
-test("after compaction the file shrinks, a bounded step at a time", () => {
+test("retention drops old history in its declared order but keeps counts and the next sequence", () => {
+  const store = Store.own(dir());
+  for (let i = 0; i < 30; i++) store.tx((w) => w.event("slice", "s" as Clean, { i }));
+  const before = store.seq();
+  let checks = 0;
+  store.retain(Date.now(), () => ++checks <= 1, 10);
+  assert.equal(store.seq(), before + 1, "it stopped as soon as the database fitted");
+  assert.equal(store.get<{ n: number }>("SELECT min(seq) AS n FROM events")!.n, before - 10 + 1);
+  assert.deepEqual(JSON.parse(store.get<{ data: string }>("SELECT data FROM events WHERE kind = 'compacted'")!.data), { step: "events", removed: before - 10, throughSeq: before - 10 });
+  store.close();
+});
+
+test("after compaction the file shrinks, a bounded number of bytes at a time", () => {
   const d = dir();
   const store = Store.own(d);
   const size = () => ["", "-wal"].reduce((n, x) => n + (statSync(join(d, "overwatch.db") + x, { throwIfNoEntry: false })?.size ?? 0), 0);
@@ -82,20 +102,20 @@ test("after compaction the file shrinks, a bounded step at a time", () => {
   const words = "lorem ipsum dolor sit amet ".repeat(300);
   for (let i = 0; i < 40; i++) store.tx((w) => { for (let j = 0; j < 50; j++) w.event("slice", "s" as Clean, { words, i, j }); });
   assert.equal(store.reclaim(), 0);
-  store.compact(10);
+  store.retain(Date.now(), () => true, 10);
+  store.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   const full = size();
   assert.ok(full > 10 * 1024 ** 2, `wrote ${full} bytes`);
   const sizes = [full];
   let left = Infinity, steps = 0;
   while (left > 0 && steps++ < 1000) {
-    left = store.reclaim(256);
+    left = store.reclaim(1024 ** 2);
     sizes.push(size());
   }
   assert.equal(left, 0);
   assert.ok(steps > 3, "the work was split into bounded steps");
-  for (let i = 1; i < sizes.length; i++) assert.ok(sizes[i]! <= sizes[i - 1]!, "every step leaves the file no larger");
+  for (let i = 1; i < sizes.length; i++) assert.ok(sizes[i - 1]! - sizes[i]! <= 1024 ** 2 && sizes[i]! <= sizes[i - 1]!, `step ${i} freed ${sizes[i - 1]! - sizes[i]!} bytes`);
   assert.ok(sizes.at(-1)! < 1024 ** 2, `shrank to ${sizes.at(-1)} bytes`);
-  assert.equal(store.get<{ n: number }>("SELECT count(*) AS n FROM events")!.n, 11);
   store.close();
 });
 

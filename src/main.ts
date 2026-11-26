@@ -84,8 +84,11 @@ async function post(url: string, path: string, body: unknown, timeoutMs: number)
 function humanStatus(s: ReturnType<typeof snapshot>): string {
   const lines = [`Overwatch ${s.live ? "live" : "offline"} at seq ${s.seq}${s.paused ? ` (paused: ${s.paused})` : ""}`];
   for (const e of s.environments) lines.push(`  ${e.app}/${e.environment}: ${e.health.replace("_", " ")}${e.excluded.length ? ` (not measured here: ${e.excluded.join(", ")})` : ""}`);
-  for (const c of s.causes) lines.push(`  cause: ${c.kind} (${c.sources.join(", ")})`);
-  for (const i of s.incidents.slice(-20)) lines.push(`  ${i.exact ? i.count : `${i.count}+`} × ${i.title}`);
+  for (const c of s.causes) lines.push(`  cause: ${c.kind} (${c.sources.join(", ")})${"fix" in c && c.fix ? `\n    fix: ${c.fix}` : ""}`);
+  for (const i of s.incidents.slice(-20)) lines.push(`  ${i.exact ? i.count : `${i.count}+`} × ${i.title}${i.active ? "" : " (quiet)"}`);
+  const trial = s.trial.jobs.filter((j) => j.state === "queued" || j.state === "running").length;
+  if (s.jobs.length) lines.push(`  work: ${s.jobs.length} jobs`);
+  if (trial) lines.push(`  trial (calibration, not real work): ${trial} jobs in progress`);
   return lines.join("\n");
 }
 

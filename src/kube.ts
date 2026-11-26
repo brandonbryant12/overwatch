@@ -3,6 +3,7 @@
  * context and namespace, and only with the flags and value shapes listed here: an allowlist, so anything else is
  * refused before a process starts. Logs are read line by line with a byte cap; nothing builds a list of all it read.
  */
+import { count, list, rec, str, time } from "./parse.ts";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { run, type Result } from "./exec.ts";
@@ -137,11 +138,10 @@ export interface Pod {
   readonly uid: string;
   readonly containers: ReadonlyArray<{ readonly name: string; readonly instances: ReadonlyArray<Instance>; readonly memoryLimit: number | null; readonly restarts: number }>;
   readonly ready: boolean;
+  /** The pod says it is running: its containers have instances whose logs can be read. */
+  readonly running: boolean;
 }
 
-const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
-const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
-const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 /** Memory quantities: "512Mi", "1Gi", "64M", "1048576". */
 export function bytes(quantity: string): number | null {
@@ -170,11 +170,11 @@ export function parsePods(stdout: string): Pod[] {
         name: cname,
         instances: [...(previous ? [{ id: previous, previous: true }] : []), ...(current ? [{ id: current, previous: false }] : [])],
         memoryLimit: limit ? bytes(limit) : null,
-        restarts: typeof s.restartCount === "number" ? s.restartCount : 0,
+        restarts: count(s.restartCount) ?? 0,
       }];
     });
     const ready = list(status.conditions).map(rec).some((c) => c.type === "Ready" && c.status === "True");
-    pods.push({ name, uid, containers, ready });
+    pods.push({ name, uid, containers, ready, running: status.phase === "Running" });
   }
   return pods.sort((a, b) => (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0));
 }
@@ -199,15 +199,18 @@ export interface KubeEvent {
   readonly reason: string;
   readonly message: string;
   readonly type: string;
-  readonly at: number;
+  readonly at: number | null;
 }
 
 export function parseEvents(stdout: string): KubeEvent[] {
   return list(rec(JSON.parse(stdout)).items).map(rec).flatMap((e) => {
     const uid = str(rec(e.metadata).uid);
     if (!uid) return [];
-    const at = Date.parse(String(e.lastTimestamp ?? e.eventTime ?? e.firstTimestamp ?? ""));
-    return [{ uid, count: Math.max(1, Number(e.count) || 1), reason: String(e.reason ?? "Event"), message: String(e.message ?? ""), type: String(e.type ?? "Normal"), at: Number.isFinite(at) ? at : 0 }];
+    // An EventSeries carries its cumulative count in series.count; the legacy field stays at the first value.
+    const series = rec(e.series);
+    const n = Math.max(count(series.count) ?? 0, count(e.count) ?? 0, count(e.deprecatedCount) ?? 0, 1);
+    const at = time(series.lastObservedTime) ?? time(e.lastTimestamp) ?? time(e.eventTime) ?? time(e.firstTimestamp);
+    return [{ uid, count: n, reason: str(e.reason) ?? "Event", message: typeof e.message === "string" ? e.message : "", type: str(e.type) ?? "Normal", at }];
   });
 }
 

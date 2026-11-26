@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkKubectl, parsePods, parseRevision, parseTop } from "../src/kube.ts";
+import { checkKubectl, parseEvents, parsePods, parseRevision, parseTop } from "../src/kube.ts";
 import { Store, json, type Clean } from "../src/store.ts";
 import { Tools } from "../src/tools.ts";
 import { clock } from "../src/clock.ts";
@@ -36,6 +36,15 @@ test("pods come back in UID order with each container's current and previous ins
   assert.equal(parseRevision(JSON.stringify({ items: [{ spec: { template: { metadata: { annotations: { "overwatch.dev/revision": "abc1234" } } } } }] })), "abc1234");
   assert.equal(parseRevision(JSON.stringify({ items: [{ spec: { template: { spec: { containers: [{ image: "shop:0f1e2d3c" }] } } } }] })), "0f1e2d3c");
   assert.deepEqual(parseTop("p-a api 100m 64Mi\n"), [{ pod: "p-a", container: "api", memory: 64 * 1024 ** 2 }]);
+  assert.deepEqual(parseTop("p-a api 100m lots\n"), [], "an unreadable quantity is not a measurement");
+});
+
+test("an event series counts by its cumulative series count; an event without a time has none", () => {
+  const event = (extra: object) => JSON.stringify({ items: [{ metadata: { uid: "u" }, type: "Warning", reason: "BackOff", message: "retrying", count: 1, ...extra }] });
+  assert.equal(parseEvents(event({ series: { count: 7 } }))[0]!.count, 7);
+  assert.equal(parseEvents(event({ count: "3" }))[0]!.count, 3);
+  assert.equal(parseEvents(event({ count: null }))[0]!.count, 1);
+  assert.equal(parseEvents(event({}))[0]!.at, null);
 });
 
 test("a filing cites only handles delivered to its own attempt, and one valid filing closes the attempt", async () => {
@@ -47,7 +56,7 @@ test("a filing cites only handles delivered to its own attempt, and one valid fi
       w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq) VALUES (?, 'trial', 'x', 'x', 'running', 1)", `job_${run}` as Clean);
       w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms) VALUES (?, ?, 1, ?, 'active', 0, ?, 0)", run as Clean, `job_${run}` as Clean, session as Clean, json(code));
     });
-    tools.contexts.set(run, { telemetry: { pods: [{ at: 0, text: "ERROR payments timeout" }] }, repo: null, startMono: clock.mono() });
+    tools.contexts.set(run, { telemetry: { pods: [{ at: 0, text: "ERROR payments timeout" }] }, repo: null, deadline: clock.mono() + 300_000 });
   }
   const a = (await tools.call("ses_aaaaaaaa", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };
   const b = (await tools.call("ses_bbbbbbbb", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };

@@ -9,6 +9,7 @@
  */
 import { LIMITS, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
+import { approvalKey } from "./trial.ts";
 import type { Collector } from "./collect.ts";
 import type { Store } from "./store.ts";
 
@@ -22,6 +23,7 @@ interface SourceRow {
   next_ms: number | null;
   suspended: number;
   endpoint: string | null;
+  fix: string | null;
 }
 
 export function snapshot(store: Store, config: Config, collector: Collector | null, live: boolean) {
@@ -30,7 +32,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
   const readings = new Map(
     store.all<{ source: string; reading: string; state: string; ok_ms: number | null }>("SELECT source, reading, state, ok_ms FROM readings").map((r) => [`${r.source}|${r.reading}`, r]),
   );
-  const errors = new Set(store.all<{ place: string }>("SELECT DISTINCT app || '/' || environment AS place FROM incidents WHERE severity = 'error' AND count > 0").map((r) => r.place));
+  const errors = new Set(store.all<{ place: string }>("SELECT DISTINCT app || '/' || environment AS place FROM incidents WHERE severity = 'error' AND active = 1").map((r) => r.place));
 
   const environments = config.watchers.map((w) => {
     const limit = LIMITS.freshIntervals * w.everyMs;
@@ -64,7 +66,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
 
   const sources = config.sources.map((s) => {
     const r = rows.get(s.id);
-    return { id: s.id, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1 };
+    return { id: s.id, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1, fix: r?.failure ? r.fix : null };
   });
 
   // One cause per failure; everything unreachable at once, across several independent endpoints, is one: offline.
@@ -73,7 +75,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
   const offline = failing.length >= 2 && failing.length === config.sources.length && endpoints.size >= 2 && failing.every((s) => rows.get(s.id)!.failure === "unreachable");
   const causes = offline
     ? [{ id: "offline", kind: "offline", sources: failing.map((s) => s.id) }]
-    : failing.map((s) => ({ id: s.id, kind: rows.get(s.id)!.failure!, sources: [s.id] }));
+    : failing.map((s) => ({ id: s.id, kind: rows.get(s.id)!.failure!, sources: [s.id], fix: rows.get(s.id)!.fix }));
 
   const coverage = store
     .all<{ source: string; reading: string; from_ms: number; to_ms: number; state: string; missed: number | null }>(
@@ -90,28 +92,45 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
     atMs: now,
     live,
     paused: collector?.paused ?? null,
-    automation: store.meta("automation") === "on",
+    pausedFix: collector?.paused === "disk"
+      ? `Free disk space (collection needs ${LIMITS.freeFloorBytes / 1024 ** 2} MiB free) or move dataDir to a larger disk; the database is kept under ${LIMITS.databaseBudgetBytes / 1024 ** 3} GiB by dropping old history, never evidence a finding cites`
+      : null,
+    automation: store.meta(approvalKey(config)) === "on",
     environments,
     sources,
     incidents: store
-      .all<{ id: string; title: string; count: number; exact: number; severity: string; app: string; environment: string }>(
-        "SELECT id, title, count, exact, severity, app, environment FROM incidents ORDER BY seq, id",
+      .all<{ id: string; title: string; count: number; exact: number; severity: string; app: string; environment: string; active: number }>(
+        "SELECT id, title, count, exact, severity, app, environment, active FROM incidents ORDER BY seq, id",
       )
-      .map((i) => ({ id: i.id, title: i.title, count: i.count, exact: i.exact === 1, severity: i.severity, app: i.app, environment: i.environment })),
+      .map((i) => ({ id: i.id, title: i.title, count: i.count, exact: i.exact === 1, severity: i.severity, app: i.app, environment: i.environment, active: i.active === 1 })),
     coverage,
     metrics: store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name").map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),
     causes,
-    jobs: store
-      .all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null }>(
-        `SELECT j.id, j.state, j.kind, j.subject, j.reason, (SELECT session_id FROM runs r WHERE r.job_id = j.id ORDER BY attempt DESC LIMIT 1) AS session_id
-         FROM jobs j ORDER BY j.created_seq, j.id`,
-      )
-      .map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason })),
-    findings: store
-      .all<{ id: string; verdict: string; claims: string; code: string }>("SELECT id, verdict, claims, code FROM findings ORDER BY rowid")
-      .map((f) => ({ id: f.id, verdict: f.verdict, claims: JSON.parse(f.claims), code: JSON.parse(f.code) })),
+    // Real work at the top; the trial's calibration work in its own namespace.
+    jobs: jobs(store, false),
+    findings: findings(store, false),
+    trial: { jobs: jobs(store, true), findings: findings(store, true) },
   };
+}
+
+function jobs(store: Store, trial: boolean) {
+  return store
+    .all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null }>(
+      `SELECT j.id, j.state, j.kind, j.subject, j.reason, (SELECT session_id FROM runs r WHERE r.job_id = j.id ORDER BY attempt DESC LIMIT 1) AS session_id
+       FROM jobs j WHERE (j.kind = 'trial') = ? ORDER BY j.created_seq, j.id`,
+      trial ? 1 : 0,
+    )
+    .map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason }));
+}
+
+function findings(store: Store, trial: boolean) {
+  return store
+    .all<{ id: string; verdict: string; claims: string; code: string }>(
+      "SELECT f.id, f.verdict, f.claims, f.code FROM findings f JOIN runs r ON r.id = f.run_id JOIN jobs j ON j.id = r.job_id WHERE (j.kind = 'trial') = ? ORDER BY f.rowid",
+      trial ? 1 : 0,
+    )
+    .map((f) => ({ id: f.id, verdict: f.verdict, claims: JSON.parse(f.claims), code: JSON.parse(f.code) }));
 }
 
 export type Snapshot = ReturnType<typeof snapshot>;

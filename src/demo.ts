@@ -71,6 +71,9 @@ export function seedDemo(store: Store, config: Config) {
 export function freshen(store: Store) {
   const now = clock.now();
   const oldest = store.get<{ ok: number | null }>("SELECT min(ok_ms) AS ok FROM readings WHERE source NOT LIKE 'shop/qa/%'")?.ok;
-  if (oldest == null || now - oldest < 60_000) return;
-  store.tx((w) => w.run("UPDATE readings SET at_ms = ?, ok_ms = ? WHERE source NOT LIKE 'shop/qa/%'", now, now));
+  if (oldest == null || Math.abs(now - oldest) < 60_000) return; // either way: a wall clock set back still renews
+  store.tx((w) => {
+    w.run("UPDATE readings SET at_ms = ?, ok_ms = ? WHERE source NOT LIKE 'shop/qa/%'", now, now);
+    w.event("slice", null, { demo: true, renewed: "readings", atMs: now });
+  });
 }
