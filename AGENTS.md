@@ -54,15 +54,18 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   so slices, failure records, deadlines, page actions and tool writes are admitted by the same rule. Maintenance
   (`expire`, `retain`) is the only write without admission, and it is private to the store (`#maintain`), as is the
   connection. A `Writer` lives for one transaction; one kept past it throws. Foreign keys are deferred to commit.
-- **References are derived.** SQL `REFERENCES` where the database must enforce them (cited evidence: `citations`, kept
-  by a trigger on findings, RESTRICTs deleting it). Restore also checks every column whose name is in the reference
-  vocabulary (`run_id`, `job_id`, `incident`, `finding`, `handle`; `references()` in `src/store.ts`) against its parent,
-  read from the schema itself: a new table with such a column is covered without a list, and the class property in
-  `test/classes.test.ts` fails until a row of it is seeded. Name a reference column from the vocabulary.
-- **One receipt per owner write.** Every keyed owner write (ask, investigate, correction, handoff, notification
-  retry) goes through `receipt()` (`src/inbox.ts`): the receipt and its change commit in one transaction; the same key
-  with another subject or body is 409. Anything that leaves the process (a prompt, a handoff, a notice) has its intent
-  written first and is reconciled by that intent after a restart; a committed filing is final.
+- **The schema is declared once.** Every table in `TABLES` (`src/store.ts`) lists every column, and in `refs` each one
+  that refers to a named parent ("table.key"). Restore checks every declared reference whatever the column is called;
+  a build test fails when a created table has a column the list does not declare, and the class property fails until a
+  row of a new referencing table is seeded. Whether a column is data or a reference is still the author's call.
+- **One receipt per keyed owner write, from the router.** Keyed routes are declared only in the router's `KEYED` table
+  (`src/server.ts`); a handler returns a `Plan` (operation, subject, body, change, optional outbound step) and
+  `keyed()` wraps the change in its receipt. `receipt()` is private to `src/inbox.ts`, and a build test fails when the
+  request key is read anywhere else.
+- **Nothing leaves without an intent.** `src/exec.ts` is the only module that starts a program (a build test checks
+  it); `run()` refuses outbound commands (`gh`, `git push`, the notifier) and `effect()` runs them only with a
+  `Permit` that a `Writer` made in the transaction recording the intent, live once that commits and spent by its use.
+  OpenCode writes (sessions, prompts, interrupts) take permits too. A permit constructed anywhere else is never live.
 - **Age, then pressure.** `Store.expire` removes by age on every pass; `Store.retain` adds old events under
   pressure. Neither can remove a finding or its cited evidence.
   `Store.reclaim` frees at most `LIMITS.reclaimBytes` per pass for any page size and truncates the WAL. Never run a
@@ -90,18 +93,27 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   path or commit is refused and ends the attempt. `derive()` (`src/fixes.ts`) builds the commit from Git objects on the
   base tip in a private mirror and `check()` judges the whole tree (allowlisted existing regular files, same mode,
   not a verify input or a build, CI, lock or credential file, at most 3 files and 80 lines, 16 KiB).
-- **Publishing takes the verified commit.** An attempt's head is written before any ref changes and it is the only
-  thing pushed, to `ow/fix/<attempt>`, never forced; a moved base or a different commit on the branch voids it.
-  After a restart, publication is reconciled by branch and PR marker. Nothing merges. A real verify failure revokes
-  the fix gate. Verify runs under `sandbox-exec` with no network and writes only in its checkout; without it, it fails
-  closed.
+- **Publication is gated effects.** Every attempt transition is compare-and-set on its `version`, so the owner's
+  decline (or any newer decision) wins over a worker. Each host step and the push get their permit only from
+  `gate()`, which checks right then: the owner has not stopped or decided, both trial gates stand, the deployment is
+  the one the finding is about, the base tip is the candidate's, and protection is positively known to allow a push.
+  After each effect the host is read back for the exact object (branch head, base, marker, draft); anything else is
+  `unresolved` with a reason and a bounded retry. Only the verified commit is pushed, to `ow/fix/<attempt>`, never
+  forced; nothing merges. Draft text passes `outbound()` (secrets and private paths) as a final document.
+- **A green verify means something.** The verifier and every file it imports come from the base (a change touching
+  one is refused); `sandbox-exec` runs it deny-by-default: no network, reads only of the system, the program's
+  installation and the checkout, writes only in the checkout and its temporary folder; links are never followed. A
+  real verify failure revokes the fix gate; each calibration credit is earned by its named operation.
 - **Onset is the provider's.** A problem qualifies only if its first line's provider time is strictly after its
   deployment's rollout: the replica set's creation time when the cluster gives one, else the interval between the
   last observation of the previous revision and the first of the new one (never first-seen as an onset), with a
   clean, ordinary, fully measured interval before it.
-- **Looking ahead never guesses.** A forecast needs six fresh, distinct, consistent provider samples (`forecast()` in
-  `src/outlook.ts`); a staging comparison needs two aligned, ordinary, fully measured intervals on both sides.
-  Otherwise the answer is unknown, with the reason.
+- **Looking ahead never guesses.** A forecast needs six fresh, distinct, consistent provider samples in one provider
+  unit (`forecast()` in `src/outlook.ts`); a staging comparison needs two aligned (same end, within a second), ordinary,
+  fully measured intervals on both sides, and a production rollout invalidates it. Otherwise the answer is unknown,
+  with the reason. An unknown monitor state, a reply that says it is partial and a point outside the queried window
+  are gaps. Consumers are given the time to compare against: passing the wall clock where a provider time belongs is
+  still a convention.
 
 ## The page
 
