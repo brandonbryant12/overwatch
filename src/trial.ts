@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { LIMITS, type Config } from "./config.ts";
-import { clock, sleep } from "./clock.ts";
+import { bounded, clock, Expired, sleep } from "./clock.ts";
 import { run as exec } from "./exec.ts";
 import { connect, OpenCode } from "./opencode.ts";
 import { json, type Clean, type Store } from "./store.ts";
@@ -238,24 +238,6 @@ export class Trial {
     }
     throw new Expired();
   }
-}
-
-class Expired extends Error {}
-
-/** The work's result, or Expired once the service's monotonic clock reaches the deadline, whichever comes first. */
-function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
-  work.catch(() => undefined);
-  return new Promise<T>((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (clock.mono() < deadline) return;
-      clearInterval(timer);
-      reject(new Expired());
-    }, 50);
-    work.then(
-      (v) => (clearInterval(timer), resolve(v)),
-      (e) => (clearInterval(timer), reject(e)),
-    );
-  });
 }
 
 /** Automation is approved for one model (and this trial): a trial of another model never approves it. */

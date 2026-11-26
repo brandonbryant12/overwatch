@@ -47,7 +47,10 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const agents = new Agents(store, tools, config, empty, options.log);
   const fixes = new Fixes(store, tools, config, empty, options.log);
   // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
-  const itemOf = (id: string) => ({ ...detail(store, config, id), fixes: fixes.forItem(id), comparison: comparisons(store, config).find((c) => c.incident === id) ?? null });
+  const itemOf = (id: string) => {
+    const d = detail(store, config, id);
+    return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: fixes.forItem(id), comparison: comparisons(store, config).find((c) => c.incident === id) ?? null };
+  };
   const key = (req: IncomingMessage) => req.headers["idempotency-key"] as string | undefined;
   // The owner's tools in an ordinary OpenCode session call exactly what the page calls.
   tools.owner = {

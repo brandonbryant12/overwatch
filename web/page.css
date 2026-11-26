@@ -405,3 +405,25 @@ body[data-link="down"] .groups, body[data-link="down"] .stage { opacity: 0.55; f
   .dock { position: sticky; bottom: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ------------------------------------------------------------ looking ahead: time left and staging signals */
+.env-state .ahead { display: block; margin-top: 2px; font-size: var(--text-xs, 12px); color: var(--state-warn); font-variant-numeric: tabular-nums; }
+.env-state .ahead.warn { color: var(--state-warn); }
+.note.warn { color: var(--state-warn); }
+
+/* ------------------------------------------------------------ fix proposals: the change is readable in place */
+.fixes .fix { border: 1px solid var(--border-strong); border-radius: var(--radius-lg); padding: 12px 14px; margin-top: 10px; background: var(--bg-deck); }
+.fixes .fix.live { border-left: 4px solid var(--cyan); }
+.fixes .fix.working { border-left: 4px dashed var(--state-active); }
+.fixes .fix.stopped { border-left: 4px solid var(--border-strong); }
+.fix header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+.fix header a { color: var(--cyan); font-variant-numeric: tabular-nums; }
+.fix header button { margin-left: auto; }
+.fix .eligible { color: var(--ink-secondary); font-size: var(--text-sm); }
+.fix .diff { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; line-height: 1.45; padding: 10px 12px; border-radius: var(--radius-md, 8px); background: var(--bg-base, rgba(0,0,0,.25)); overflow-x: auto; white-space: pre; }
+.fix .diff ins { text-decoration: none; color: var(--state-ok); }
+.fix .diff del { text-decoration: none; color: var(--state-error); }
+.fix .verification { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; font-size: var(--text-sm); }
+.fix .verification li { display: flex; gap: 12px; justify-content: space-between; }
+.fix .verification li.ok span { color: var(--state-ok); }
+.fix .verification li.failed span { color: var(--state-error); }

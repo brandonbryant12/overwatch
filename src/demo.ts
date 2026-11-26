@@ -3,6 +3,7 @@
  * No cluster, Datadog or OpenCode is contacted. Production has a timeout that followed a deploy, staging has harmless
  * noise, QA's cluster is signed out, and an older incident has been resolved.
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,10 +22,21 @@ export function demoConfig(port: number): Config {
       version: 2,
       dataDir,
       port,
-      apps: { shop: { checkout: "checkout", environments: { production: { sources: { pods: pods("prod-east") } }, staging: { sources: { pods: pods("staging-east") } }, qa: { sources: { pods: pods("qa-east") } } } } },
+      apps: {
+        shop: {
+          checkout: "checkout",
+          fixes: { remote: "origin", base: "main", paths: ["config/database.json", "config/payments.json"], verify: [["npm", "test", "--", "config"]] },
+          promotion: { staging: "staging", production: "production" },
+          environments: {
+            production: { sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
+            staging: { sources: { pods: pods("staging-east") } },
+            qa: { sources: { pods: pods("qa-east") } },
+          },
+        },
+      },
       watchers: [
         { app: "shop", environment: "production", every: "2m" },
-        { app: "shop", environment: "staging", every: "10m" },
+        { app: "shop", environment: "staging", every: "2m" },
         { app: "shop", environment: "qa", every: "10m" },
       ],
     },
@@ -52,7 +64,7 @@ export function seedDemo(store: Store, config: Config) {
       w.run(
         "INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         s(source.id), signedOut ? now - hour : now, signedOut ? s("signin") : null, signedOut ? 2 : 0, now + source.everyMs, signedOut ? 1 : 0,
-        signedOut ? s(`Sign in to ${source.context} again, then check with: kubectl --context ${source.context} -n shop get pods`) : null, s(`kubernetes:${source.context}`), source.everyMs,
+        signedOut ? s(`Sign in to ${source.context} again, then check with: kubectl --context ${source.context} -n shop get pods`) : null, s(`${source.kind}:${source.context ?? source.baseUrl}`), source.everyMs,
       );
       for (const reading of source.readings) {
         w.run("INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, 'ok', ?, ?)", s(source.id), s(reading), signedOut ? now - hour : now, signedOut ? now - hour : now);
@@ -70,6 +82,17 @@ export function seedDemo(store: Store, config: Config) {
     problem(w, "inc_d0c4ab11", "production", "ERROR checkout: payments timeout after 300ms", "error", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 11, 16, 12], seeded("inc_d0c4ab11", "production"));
     problem(w, "inc_d0c3f00d", "staging", "WARN cache warm-up took longer than 2s", "warn", [1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0], seeded("inc_d0c3f00d", "staging"));
     problem(w, "inc_d0c1ed9e", "production", "WARN ledger reconciliation lag above 120s on shard 4", "warn", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 1, 1], seeded("inc_d0c1ed9e", "production"));
+    problem(w, "inc_d0c0db05", "production", "ERROR orders: no free database connection (pool of 5 exhausted)", "error", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 7, 9, 6], seeded("inc_d0c0db05", "production"));
+    // Disk use on the orders database host, rising evenly: time left, from six provider samples.
+    const series = createHash("sha256").update(JSON.stringify(["avg:orders.disk.used{*}", "disk", "bytes", 500e9])).digest("hex");
+    for (let n = 5; n >= 0; n--) w.run("INSERT INTO samples (source, series, at_ms, value) VALUES ('shop/production/disk', ?, ?, ?)", s(series), now - n * 2 * min, 410e9 + (5 - n) * 2.6e9);
+    // Staging took a new release; production did not. Two compared intervals found a staging-only problem.
+    const staged = w.event("deploy", s("shop/staging"), { revision: "b7c6d5e4f3a2", previous: "a1b2c3d4e5f6", demo: true });
+    w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, 'shop', 'staging', 'b7c6d5e4f3a2', 'a1b2c3d4e5f6')", staged);
+    problem(w, "inc_d0c5a6e0", "staging", "New in staging since b7c6d5e4f3a2: ERROR shipping quote failed for EU addresses (production a1b2c3d4e5f6 unchanged)", "warn", [0, 0, 3, 2], seeded("inc_d0c5a6e0", "staging"));
+    w.run("UPDATE incidents SET reading = 'comparison', source = 'shop/staging/comparison' WHERE id = 'inc_d0c5a6e0'");
+    w.run(`INSERT INTO comparisons (id, app, staging_revision, production_revision, start_seq, state, reason, staging_count, production_count, data, incident)
+      VALUES ('cmp_d0c5a6e0', 'shop', 'b7c6d5e4f3a2', 'a1b2c3d4e5f6', ?, 'regression', 'ERROR shipping quote failed for EU addresses: 5 in staging over two intervals, none in production', 5, 0, '{}', 'inc_d0c5a6e0')`, staged);
   });
   // The owner's history, through the same rules as real work: an old issue put away with Done; the staging warning
   // put away with Later, then a finding on it brings it back; a question about the ledger lag queued for an agent.
@@ -89,7 +112,16 @@ export function seedDemo(store: Store, config: Config) {
     afterFinding(w, store, "inc_d0c3f00d", filed, "not_real");
   });
   ask(store, config, { subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c1ed9e0000000000000001");
-  investigated(store);
+  investigated(store, TIMEOUT);
+  investigated(store, POOL);
+  // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, open as a draft.
+  store.tx((w) => {
+    const job = "job_d0c0db050000000000000001", seq = w.event("fix", "inc_d0c0db05" as Clean, { id: "fx_d0c0db05", state: "draft", demo: true });
+    const diff = 'diff --git a/config/database.json b/config/database.json\n--- a/config/database.json\n+++ b/config/database.json\n@@ -1,5 +1,5 @@\n {\n   "host": "orders-db",\n-  "pool_size": 5,\n+  "pool_size": 20,\n   "timeout_ms": 2000\n }\n';
+    const data = { title: POOL.title, summary: "Restore pool_size in config/database.json to 20, its value at 9f8e7d6c5b4a", paths: ["config/database.json"], proposal: { kind: "setting", path: "config/database.json", key: "pool_size" },
+      verification: [{ argv: ["npm", "test", "--", "config"], exitCode: 0, elapsedMs: 8412, summary: "12 passing" }], pr: { number: 412, url: "https://git.example/shop/pull/412", draft: true, state: "OPEN" } };
+    w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'draft', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq);
+  });
   // An answered question on the staging warning, as an agent would have answered it.
   ask(store, config, { subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c3f00d0000000000000002");
   store.tx((w) => {
@@ -101,35 +133,54 @@ export function seedDemo(store: Store, config: Config) {
   });
 }
 
-/** The production timeout, investigated: three readings (two real, one dissent) and a challenger that upheld. */
-function investigated(store: Store) {
-  const s = (v: string) => v as Clean;
-  const subject = "inc_d0c4ab11", job = "job_d0c4ab110000000000000001", code = { expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true };
-  const lines = ["ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 1)", "ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 2)"];
-  const diff = "config/payments.yaml @ a1b2c3d\n- timeout_ms: 3000\n+ timeout_ms: 300";
-  const votes: Array<[string, string, string, string]> = [
+type Spec = { subject: string; tag: string; title: string; lines: string[]; diff: string; votes: Array<[string, string, string, string]>; upheld: string };
+/** The production timeout: three readings (two real, one dissent) and a challenger that upheld. */
+const TIMEOUT: Spec = {
+  subject: "inc_d0c4ab11", tag: "d0c4ab11", title: "ERROR checkout: payments timeout after 300ms",
+  lines: ["ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 1)", "ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 2)"],
+  diff: "config/payments.yaml @ a1b2c3d\n- timeout_ms: 3000\n+ timeout_ms: 300",
+  votes: [
     ["real", "The a1b2c3d deploy cut the payments timeout from 3000 ms to 300 ms", "Every timeout follows the deploy and stops at exactly 300 ms", "telemetry"],
     ["real", "The timeout value changed in a1b2c3d", "The deployed config sets timeout_ms to 300, down from 3000", "code"],
     ["not_real", "The provider was slow for a few minutes", "Timeouts could be the provider's own slowness", "telemetry"],
-  ];
+  ],
+  upheld: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.",
+};
+/** The connection pool: three of three real, upheld, observed. Eligible, so it has a draft fix. */
+const POOL: Spec = {
+  subject: "inc_d0c0db05", tag: "d0c0db05", title: "ERROR orders: no free database connection (pool of 5 exhausted)",
+  lines: ["ERROR orders: no free database connection (pool of 5 exhausted, 41 waiting)", "ERROR orders: no free database connection (pool of 5 exhausted, 38 waiting)"],
+  diff: "config/database.json @ a1b2c3d\n- \"pool_size\": 20,\n+ \"pool_size\": 5,",
+  votes: [
+    ["real", "a1b2c3d lowered pool_size from 20 to 5", "Exhaustion starts with the deploy and every error names a pool of 5", "telemetry"],
+    ["real", "The pool is too small for the order rate since a1b2c3d", "41 requests wait for 5 connections at the peak", "telemetry"],
+    ["real", "pool_size changed in the deploy", "Waiting requests track checkout traffic, not database latency", "telemetry"],
+  ],
+  upheld: "Database latency stayed under 4 ms; only the pool size changed, and every failure names it.",
+};
+
+function investigated(store: Store, spec: Spec) {
+  const s = (v: string) => v as Clean;
+  const { subject, lines, diff } = spec, job = `job_${spec.tag}0000000000000001`, code = { expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true };
+  const votes = spec.votes;
   store.tx((w) => {
     const seq = w.event("investigation_queued", s(subject), { job, origin: "automatic", demo: true });
-    w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq, inputs) VALUES (?, 'investigation', ?, 'ERROR checkout: payments timeout after 300ms', 'completed', ?, ?)", s(job), s(subject), seq, json({ planned: 3, demo: true }));
+    w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq, inputs) VALUES (?, 'investigation', ?, ?, 'completed', ?, ?)", s(job), s(subject), s(spec.title), seq, json({ planned: 3, demo: true }));
     const readings = votes.map(([verdict, cause, statement, kind], n) => {
-      const run = `run_d0c4ab11000000000000000${n + 1}`, session = `ses_d0c4ab11000000000000000${n + 1}`, finding = `f_d0c4ab11000000000000000${n + 1}`;
+      const run = `run_${spec.tag}000000000000000${n + 1}`, session = `ses_${spec.tag}000000000000000${n + 1}`, finding = `f_${spec.tag}000000000000000${n + 1}`;
       w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role, slot) VALUES (?, ?, ?, ?, 'terminal', 3, ?, ?, 'investigator', ?)", s(run), s(job), n + 1, s(session), json(code), clock.now(), n + 1);
       const pieces = (kind === "code" ? [diff] : lines).map((text, k) => {
-        const handle = `e_d0c4ab11${n}${k}0000000000000000`;
+        const handle = `e_${spec.tag}${n}${k}0000000000000000`;
         w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, ?, ?, ?)", s(handle), s(run), s(session), s(kind === "code" ? "code" : "pods"), s(text), k + 1);
         w.run("INSERT INTO origins (handle, origin) VALUES (?, ?)", s(handle), s(kind === "code" ? "code" : "telemetry"));
         return { handle, source: kind === "code" ? "code" : "pods", text };
       });
       const body = { cause, ruled_out: verdict === "real" ? ["provider outage (status page green)", "database latency"] : [], not_checked: ["the provider's own logs"], next_check: "Restore timeout_ms to 3000 and watch the rate", impact: "checkout payments fail", affected: ["shop/production"], since: null, status: "investigated" };
       w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES (?, ?, ?, ?, ?, ?)", s(finding), s(run), s(verdict), json([{ statement, pieces }]), json(code), json(body));
-      w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, run_id, seq) VALUES (?, ?, 'reading', ?, 1, 'done', ?, ?)", s(`wk_d0c4ab11${n}`), s(job), n + 1, s(run), seq);
+      w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, run_id, seq) VALUES (?, ?, 'reading', ?, 1, 'done', ?, ?)", s(`wk_${spec.tag}${n}`), s(job), n + 1, s(run), seq);
       return { slot: n + 1, sessionId: session, verdict: verdict as "real" | "not_real", findingId: finding, reason: null, telemetry: kind !== "code", observed: kind === "code" ? [] : lines };
     });
-    const challenge = { outcome: "upheld" as const, reason: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.", pieces: [{ handle: "e_d0c4ab11c00000000000000000", source: "pods", text: lines[0]! }] };
+    const challenge = { outcome: "upheld" as const, reason: spec.upheld, pieces: [{ handle: `e_${spec.tag}00000000000000000000`, source: "pods", text: lines[0]! }] };
     const decided = adjudicate(3, readings, challenge);
     const at = w.next();
     const observations = new Set(readings.filter((r) => r.verdict === decided.verdict).flatMap((r) => r.observed)).size;
@@ -146,6 +197,7 @@ export function freshen(store: Store) {
   if (oldest == null || Math.abs(now - oldest) < 60_000) return; // either way: a wall clock set back still renews
   store.tx((w) => {
     w.run("UPDATE readings SET at_ms = ?, ok_ms = ? WHERE source NOT LIKE 'shop/qa/%'", now, now);
+    w.run("UPDATE samples SET at_ms = at_ms + ? ", now - (store.get<{ t: number }>("SELECT max(at_ms) AS t FROM samples")?.t ?? now));
     w.event("slice", null, { demo: true, renewed: "readings", atMs: now });
   });
 }

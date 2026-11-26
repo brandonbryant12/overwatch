@@ -78,7 +78,7 @@ export function command(key, { typing = false, overlay = false, shift = false, m
   if (overlay) return null;
   const map = {
     j: "next", ArrowDown: "next", k: "previous", ArrowUp: "previous", d: "done", l: "later", w: "worse", n: "never", u: "undo",
-    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct",
+    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct", f: "fix",
   };
   if (shift && key === "?") return "help";
   return map[key] ?? null;
@@ -204,3 +204,40 @@ export function answerBasis(turn) {
 
 /** An evidence handle, short for reading; the page keeps the full handle on hover and copy. */
 export const shortHandle = (h) => (typeof h === "string" && h.length > 10 ? `${h.slice(0, 8)}…` : String(h ?? ""));
+
+/** Time left in words, only from a forecast the service made; otherwise null (the reason is shown when asked). */
+export function timeLeft(f, nowMs) {
+  if (!f || f.state !== "forecast") return null;
+  const at = f.asOfMs + f.etaMinutes * 60_000;
+  const left = Math.max(0, at - nowMs), h = Math.floor(left / 3_600_000), mins = Math.ceil((left % 3_600_000) / 60_000);
+  const span = h ? `${h} h ${mins} min` : `${mins} min`;
+  const amount = (v) => (f.unit === "bytes" ? bytes(v) : `${Number(v.toPrecision(3)).toLocaleString("en-US")} units`);
+  return { short: `${f.resource} full in ~${span}`, long: `${f.resource} reaches its limit of ${amount(f.limit)} in about ${span} (around ${new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}), at the rate of the last ${f.samples} readings: +${amount(f.ratePerMinute)} a minute. A projection, not a promise.` };
+}
+
+/** A fix attempt's state in words: what it is, and the one rule or step that explains it. */
+export const FIX_LABEL = {
+  queued: "Checking eligibility", proposing: "A model is selecting a change", verifying: "Verifying in isolation", publishing: "Publishing a draft",
+  draft: "Draft pull request open", awaiting_deploy: "Merged, waiting for a release", released_quiet: "Released and quiet: closed by rule",
+  closed_unmerged: "Closed without merging", blocked: "No proposal: blocked", ineligible: "No proposal: not eligible", refused: "No proposal: refused",
+  verify_failed: "Verify failed", stale: "Void: no longer current", declined: "Declined by you",
+};
+export const fixTone = (state) => (["draft", "awaiting_deploy", "released_quiet"].includes(state) ? "live" : ["queued", "proposing", "verifying", "publishing"].includes(state) ? "working" : "stopped");
+
+/** A staging comparison in words: regression, no signal, unknown (with the side and reason), or the same release. */
+export function comparisonText(c) {
+  if (!c) return null;
+  const st = String(c.stagingRevision ?? "").slice(0, 12), pr = String(c.productionRevision ?? "unknown").slice(0, 12);
+  if (c.state === "regression") return `New in ${c.staging} since ${st}: ${c.stagingCount} occurrences over two intervals; production ${pr} unchanged with ${c.productionCount}. A staging signal only: it does not decide a promotion.`;
+  if (c.state === "no_signal") return `${c.staging} ${st} against production ${pr}: no new staging-only problem in two intervals. Low traffic cannot certify a release.`;
+  if (c.state === "same_release") return `${c.staging} runs the production revision ${pr}.`;
+  return `${c.staging} ${st} against production ${pr}: unknown. ${c.reason ?? ""}`;
+}
+
+/** Bytes in decimal units, three significant figures: 1.3 GB, 500 GB. */
+export function bytes(v) {
+  const units = ["bytes", "kB", "MB", "GB", "TB", "PB"];
+  let i = 0;
+  while (Math.abs(v) >= 1000 && i < units.length - 1) (v /= 1000), i++;
+  return `${Number(v.toPrecision(3))} ${units[i]}`;
+}

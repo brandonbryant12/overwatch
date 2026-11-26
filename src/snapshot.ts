@@ -7,6 +7,7 @@
  * failed, missing, capped or cut, or collection is paused; needs a look (attention) if an error is open; and only then
  * quiet. With no expected reading at all it can never be quiet.
  */
+import { comparisons, forecasts } from "./outlook.ts";
 import { LIMITS, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { approvalKey } from "./trial.ts";
@@ -111,6 +112,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
     coverage,
     metrics: store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name").map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),
+    outlook: { forecasts: forecasts(store, config), comparisons: comparisons(store, config) },
     causes,
     // Real work at the top; the trial's calibration work in its own namespace.
     jobs: jobs(store, false),

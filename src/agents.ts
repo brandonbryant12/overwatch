@@ -12,7 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { LIMITS, type Config } from "./config.ts";
-import { clock, sleep } from "./clock.ts";
+import { bounded, clock, Expired, sleep } from "./clock.ts";
 import { run as exec } from "./exec.ts";
 import { afterFinding, announce, groupNow, HttpError, label, passed, receipt } from "./inbox.ts";
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
@@ -559,18 +559,6 @@ export class Agents {
 
 const helperPath = () => (process.env.PATH ?? "").split(delimiter).map((d) => join(d, "terminal-notifier")).find((f) => existsSync(f));
 
-class Expired extends Error {}
-function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
-  work.catch(() => undefined);
-  return new Promise<T>((resolve, reject) => {
-    const timer = setInterval(() => {
-      if (clock.mono() < deadline) return;
-      clearInterval(timer);
-      reject(new Expired());
-    }, 50);
-    work.then((v) => (clearInterval(timer), resolve(v)), (e) => (clearInterval(timer), reject(e)));
-  });
-}
 
 // ---------------------------------------------------------------- prompts: text from logs, code or a model is data
 

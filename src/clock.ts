@@ -26,3 +26,17 @@ export const clock = {
 };
 
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export class Expired extends Error {}
+/** The work's result, or Expired once the service's monotonic clock reaches the deadline, whichever comes first. */
+export function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
+  work.catch(() => undefined);
+  return new Promise<T>((resolve, reject) => {
+    const timer = setInterval(() => {
+      if (clock.mono() < deadline) return;
+      clearInterval(timer);
+      reject(new Expired());
+    }, 50);
+    work.then((v) => (clearInterval(timer), resolve(v)), (e) => (clearInterval(timer), reject(e)));
+  });
+}

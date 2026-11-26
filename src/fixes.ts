@@ -15,7 +15,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { FORBIDDEN, LIMITS, type Config, type Fixes as Policy } from "./config.ts";
-import { clock, sleep } from "./clock.ts";
+import { bounded, clock, Expired, sleep } from "./clock.ts";
 import { run as exec } from "./exec.ts";
 import { HttpError, doneByRule, receipt } from "./inbox.ts";
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
@@ -644,14 +644,16 @@ async function session(store: Store, tools: Tools, config: Config, emptyDir: str
     while (slots.active >= slots.max) await sleep(50);
     slots.active++;
     try {
-      await oc.createSession({ id: sessionId, title, agent: "ow-fixer", model: config.opencode.model, directory: emptyDir });
+      await bounded(oc.createSession({ id: sessionId, title, agent: "ow-fixer", model: config.opencode.model, directory: emptyDir }), deadline);
       for (const text of [prompt, "You have not filed a proposal yet. File exactly one ow_proposal now, or abstain."]) {
         if (store.get("SELECT 1 FROM proposals WHERE run_id = ?", runId)) break;
         const message = `msg_${randomBytes(12).toString("hex")}`;
         store.tx((w) => w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, 'prompt')", message as Clean, runId as Clean));
-        await oc.prompt(sessionId, { id: message, text });
-        while (clock.mono() < deadline && !OpenCode.after(await oc.messages(sessionId), message).idle) await sleep(25);
+        await bounded(oc.prompt(sessionId, { id: message, text }), deadline);
+        while (clock.mono() < deadline && !OpenCode.after(await bounded(oc.messages(sessionId), deadline), message).idle) await sleep(25);
       }
+    } catch (e) {
+      if (!(e instanceof Expired)) throw e; // the session's five minutes are up; the next attempt or none
     } finally {
       slots.active--;
       tools.contexts.delete(runId);

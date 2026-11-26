@@ -178,13 +178,41 @@ function renderStrip() {
       const h = m.cellHealth(e, state.connection, serverNow());
       const errors = s.incidents.filter((i) => i.app === e.app && i.environment === e.environment && i.active && i.severity === "error").length;
       const detail = h === "attention" ? `${errors} active error${errors === 1 ? "" : "s"}` : h === "unknown" ? "until the service answers" : h === "signed_out" ? "sign in again" : h === "stale" ? "readings are old" : h === "partial" ? "not every reading" : "every reading fresh";
+      const { left, signal } = ahead(e);
       return `<button type="button" class="env ${h}${state.focus === e.subject ? " focused" : ""}" data-env="${esc(e.environment)}" data-app="${esc(e.app)}" data-health="${h}" data-subject="${esc(e.subject)}">
         <span class="glyph">${GLYPH[h] ?? GLYPH.unknown}</span>
         <span class="env-name"><b>${esc(e.environment)}</b><span>${esc(e.app)}</span></span>
-        <span class="env-state"><b>${esc(m.HEALTH_LABEL[h])}</b><span>${esc(detail)}</span></span>
+        <span class="env-state"><b>${esc(m.HEALTH_LABEL[h])}</b><span>${esc(detail)}</span>${left ? `<span class="ahead" title="${esc(left.long)}">${esc(left.short)}</span>` : ""}${signal?.state === "regression" ? `<span class="ahead warn">new problem in staging</span>` : ""}</span>
       </button>`;
     })
     .join("");
+}
+
+/** What lies ahead for an environment: time left on its capacity sources, and its staging comparison. */
+function ahead(e) {
+  const o = state.snap.outlook ?? { forecasts: [], comparisons: [] }, now = serverNow() ?? state.snap.atMs;
+  const forecasts = o.forecasts.filter((f) => f.source.startsWith(`${e.app}/${e.environment}/`));
+  return { forecasts, left: forecasts.map((f) => m.timeLeft(f, now)).find(Boolean) ?? null, signal: o.comparisons.find((c) => c.app === e.app && c.staging === e.environment) ?? null };
+}
+function outlookPanels(e) {
+  const { forecasts, signal } = ahead(e), now = serverNow() ?? state.snap.atMs;
+  const lines = forecasts.map((f) => { const t = m.timeLeft(f, now); return `<li class="${t ? "breach" : ""}"><span>${esc(f.source)} · ${esc(f.resource)}</span><b>${t ? esc(t.short) : "no estimate"}</b><em>${esc(t ? t.long : f.reason ?? "")}</em></li>`; }).join("");
+  return `${lines ? `<section class="panel"><h3>Time left</h3><ul class="gauges">${lines}</ul></section>` : ""}${signal ? `<section class="panel"><h3>Staging against production</h3><p class="note${signal.state === "regression" ? " warn" : ""}">${esc(m.comparisonText(signal))}</p></section>` : ""}`;
+}
+
+/** A fix attempt: its state, the one rule that stopped it or why it is eligible, the change, its verification, the draft. */
+function fixPanel(i, d) {
+  const list = [...(d?.fixes ?? [])].reverse();
+  if (!list.length) return d?.fixable && (d?.investigations ?? []).some((x) => x.result?.verdict === "real") ? `<section class="panel fixes"><h3>Fix</h3><p class="note">No proposal yet. <kbd>f</kbd> asks for one: it is made only when every rule holds.</p></section>` : "";
+  const diff = (text) => text.split("\n").slice(0, 60).map((l) => (l.startsWith("+") && !l.startsWith("+++") ? `<ins>${esc(l)}</ins>` : l.startsWith("-") && !l.startsWith("---") ? `<del>${esc(l)}</del>` : esc(l))).join("\n");
+  return `<section class="panel fixes"><h3>Fix proposal</h3>${list.map((f, n) => `<article class="fix ${m.fixTone(f.state)}" data-fix="${esc(f.id)}">
+    <header><b>${esc(m.FIX_LABEL[f.state] ?? f.state)}</b>${f.pr ? `<a href="${esc(f.pr.url)}" target="_blank" rel="noopener">#${f.pr.number}${f.pr.draft ? " · draft" : ""} · ${esc(String(f.pr.state).toLowerCase())}</a>` : ""}${m.fixTone(f.state) === "working" ? `<button type="button" data-decline="${esc(f.id)}">Decline</button>` : ""}</header>
+    ${f.reason ? `<p class="note">${esc(f.reason)}</p>` : ""}
+    ${n === 0 && f.diff ? `<p class="eligible">Eligible: three of three readings said real, the challenger upheld it, it was observed in telemetry, and it began strictly after the rollout of <code>${esc(String(f.deployed).slice(0, 12))}</code> (previously <code>${esc(String(f.previous).slice(0, 12))}</code>). A model selected this change; Overwatch derived it from Git and checked it.</p>
+      <pre class="diff">${diff(f.diff)}</pre>` : ""}
+    ${f.verification.length ? `<ul class="verification">${f.verification.map((v) => `<li class="${v.exitCode === 0 ? "ok" : "failed"}"><code>${esc(v.argv.join(" "))}</code><span>${v.exitCode === null ? "did not finish" : `exit ${v.exitCode}`} · ${v.elapsedMs} ms</span></li>`).join("")}</ul>` : ""}
+    ${f.state === "draft" ? `<p class="note">To decline, close the pull request; the problem stays open and this finding is not proposed again.</p>` : ""}
+  </article>`).join("")}</section>`;
 }
 
 function spark(values, w = 72, h = 18) {
@@ -358,14 +386,18 @@ function incidentView(i, d) {
       <button type="button" data-action="investigate"${off}>Investigate <kbd>i</kbd></button>
       <button type="button" data-action="open"${off}>Open in OpenCode <kbd>o</kbd></button>
       ${done ? `<button type="button" data-action="correct"${off}>Was this right? <kbd>y</kbd></button>` : ""}
+      ${done && d?.fixable ? `<button type="button" data-action="fix"${off}>Propose fix <kbd>f</kbd></button>` : ""}
     </div>
+    ${d?.comparison ? `<section class="panel"><h3>Staging against production</h3><p class="note warn">${esc(m.comparisonText(d.comparison))}</p></section>` : ""}
     ${verdictPanel(d)}
+    ${fixPanel(i, d)}
     ${claimsPanel(d)}
     ${corrections ? `<section class="panel"><h3>Your corrections (in ${esc(i.app)}'s playbook)</h3><ul class="corrections">${corrections}</ul></section>` : ""}
     ${turns ? `<section class="panel"><h3>Questions</h3><ul class="turns">${turns}</ul></section>` : ""}
     <section class="panel">
       <h3>Counts</h3>
       ${started ? `<p class="started">Started after deploy <code>${esc(started.revision.slice(0, 12))}</code> to ${esc(i.app)}/${esc(i.environment)}.</p>` : ""}
+      ${(() => { const l = ahead({ app: i.app, environment: i.environment }).left; return l ? `<p class="note warn">${esc(l.long)}</p>` : ""; })()}
       ${spark(i.spark, 560, 64)}
       <div class="axis"><span>24h ago</span><span>now</span></div>
       <p class="note${i.exact ? "" : " bound"}">${i.exact ? `Exact: ${i.count.toLocaleString("en-US")} occurrences, every reading fully measured while it was active.` : "A lower bound: part of the time was not fully read (a gap, a cap, or lines that rotated away)."} First seen ${m.ago(i.firstMs, now)}.</p>
@@ -391,6 +423,8 @@ function eventText(e) {
     case "corrected": return `Corrected: “${d.text}”`;
     case "opened": return "Opened in OpenCode";
     case "incident": return d.metric ? `Gauge ${d.state}` : "First counted";
+    case "fix": return d.declined ? "Fix declined" : `Fix: ${m.FIX_LABEL[d.state] ?? d.state}${d.reason ? ` — ${d.reason}` : ""}`;
+    case "comparison": return d.regression ? `Staging regression: ${d.regression}` : `Staging comparison: ${d.state}`;
     default: return e.kind;
   }
 }
@@ -406,6 +440,7 @@ function environmentView(subject) {
   return `<article class="environment ${h}">
     <header class="incident-head"><span class="glyph">${GLYPH[h] ?? GLYPH.unknown}</span><div><h2>${esc(e.app)} / ${esc(e.environment)}</h2><div class="meta"><span>${esc(m.HEALTH_LABEL[h])}</span>${e.excluded.length ? `<span>not measured here: ${esc(e.excluded.join(", "))}</span>` : ""}</div></div></header>
     <section class="panel"><h3>Sources</h3><ul class="sources">${sources.map((x) => `<li class="${x.failure ? "failing" : ""}" data-subject="${esc(x.subject)}"><b class="subject-link">${esc(x.id)}</b><span>${x.failure ? `${esc(causeTitle({ kind: x.failure }))}${x.suspended ? " · suspended, probing every five minutes" : ""}` : x.checkpointMs ? `read through ${m.ago(x.checkpointMs, s.atMs)}` : "not read yet"}</span>${x.fix ? `<code>${esc(x.fix)}</code>` : ""}</li>`).join("")}</ul></section>
+    ${outlookPanels(e)}
     ${metrics.length ? `<section class="panel"><h3>Gauges</h3><ul class="gauges">${metrics.map((x) => `<li class="${x.breach ? "breach" : ""}"><span>${esc(x.name)}</span><b>${esc(x.value)}</b>${x.breach ? "<em>over its limit</em>" : ""}</li>`).join("")}</ul></section>` : ""}
     <section class="panel"><h3>Coverage</h3><ol class="history">${coverage.map((c) => `<li class="cov cov-${esc(c.state)}"><span class="ev-kind">${esc(c.reading)}: ${esc(c.state)}${c.missed ? ` (${c.missed} missed)` : ""}</span><time>${m.ago(c.toMs, s.atMs)}</time></li>`).join("") || "<li>Nothing read yet</li>"}</ol></section>
   </article>`;
@@ -571,6 +606,28 @@ async function investigate() {
     await call(`items/${encodeURIComponent(id)}/investigate`, {}, { "Idempotency-Key": await requestKey(id) });
     toast("Investigation queued: independent readings, then a challenger if most say real.", "ok");
     loadDetail(id);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+/** F: ask for a fix proposal on the latest investigation; the answer, a proposal or the rule that stops it, appears in place. */
+async function proposeFix() {
+  const id = state.focus, job = (state.detail?.investigations ?? []).filter((x) => x.result).at(-1);
+  if (!isIncident(id) || down() || !job) return;
+  try {
+    await call(`items/${encodeURIComponent(id)}/fix`, { jobId: job.id }, { "Idempotency-Key": await requestKey(id) });
+    toast("Fix requested: every rule is checked before anything is proposed.", "ok");
+    loadDetail(id);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+async function declineFix(fixId) {
+  try {
+    await call(`fixes/${encodeURIComponent(fixId)}/decline`, {}, { "Idempotency-Key": await requestKey(state.focus) });
+    toast("Declined. The problem stays open; this finding is not proposed again.", "ok");
+    loadDetail(state.focus);
   } catch (e) {
     toast(e.message, "error");
   }
@@ -850,6 +907,7 @@ document.addEventListener("keydown", (e) => {
     case "brief": return briefSheet();
     case "investigate": return investigate();
     case "correct": return correctSheet();
+    case "fix": return proposeFix();
   }
 });
 
@@ -895,8 +953,10 @@ document.addEventListener("click", (e) => {
   if (action && !action.disabled) {
     const a = action.dataset.action;
     return a === "done" ? wayOut({ action: "done" }) : a === "worse" ? wayOut({ action: "later", when: "worse" }) : a === "undo" ? undo()
-      : a === "open" ? openInOpenCode() : a === "investigate" ? investigate() : a === "correct" ? correctSheet() : sheet(a);
+      : a === "open" ? openInOpenCode() : a === "investigate" ? investigate() : a === "correct" ? correctSheet() : a === "fix" ? proposeFix() : sheet(a);
   }
+  const decline = t.closest("[data-decline]");
+  if (decline) return declineFix(decline.dataset.decline);
 });
 
 document.addEventListener("submit", (e) => {

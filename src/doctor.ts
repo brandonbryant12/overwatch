@@ -99,15 +99,15 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
     throw new Error(`the model ${config.opencode.model} did not answer within two minutes`);
   });
   // Each role Overwatch runs: its own filing tool allowed, everything else denied. The investigator keeps the id "agent".
-  for (const [id, name, filing] of [["agent", "ow-investigator", "ow_finding"], ["agent:challenger", "ow-challenger", "ow_challenge"], ["agent:responder", "ow-responder", null]] as const) {
-    const tools = [...READ, ...(filing ? [filing] : [])];
+  const fixer = Object.values(config.apps).some((a) => a.fixes);
+  for (const [id, name, tools] of [["agent", "ow-investigator", [...READ, "ow_finding"]], ["agent:challenger", "ow-challenger", [...READ, "ow_challenge"]], ["agent:responder", "ow-responder", READ], ...(fixer ? [["agent:fixer", "ow-fixer", ["ow_telemetry", "ow_proposal"]] as const] : [])] as const) {
     await check(id, `Add the ${name} agent (deny all, allow ${tools.map((t) => `ow_${t}`).join(", ")}) to your OpenCode configuration; see docs/setup.md`, async () => {
       const agent = (await settled(() => need().agents(emptyDir), (l) => l.some((a) => a.id === name))).find((a) => a.id === name || a.name === name);
       if (!agent) throw new Error(`OpenCode has no ${name} agent`);
       // OpenCode puts its defaults first and the last matching rule wins: evaluate the rules as it does.
       const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
       const effect = (action: string) => rules.findLast((r) => glob(String(r.action ?? "")).test(action) && String(r.resource ?? "*") === "*")?.effect ?? "allow";
-      const others = ["bash", "edit", "read", "webfetch", "ow_other", ...["ow_finding", "ow_challenge"].filter((t) => t !== filing).map((t) => `ow_${t}`)];
+      const others = ["bash", "edit", "read", "webfetch", "ow_other", ...[...READ, "ow_finding", "ow_challenge", "ow_proposal"].filter((t) => !(tools as readonly string[]).includes(t)).map((t) => `ow_${t}`)];
       const missing = tools.filter((t) => effect(`ow_${t}`) !== "allow");
       if (missing.length) throw new Error(`${name} cannot use ${missing.map((t) => `ow_${t}`).join(", ")}`);
       for (const other of others) if (effect(other) !== "deny") throw new Error(`${name} does not deny ${other}`);

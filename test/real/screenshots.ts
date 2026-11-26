@@ -110,6 +110,15 @@ try {
       await key("?", true);
       await shot("desktop-dark-keys");
       await key("Escape");
+      // Milestone 4: a draft fix on its problem, time left on an environment, a staging regression item.
+      await evaluate("document.querySelector('[data-toggle=working]')?.click(); document.querySelector('[data-item-id=inc_d0c0db05]')?.click(); true");
+      await sleep(500);
+      await evaluate("document.querySelector('.fixes')?.scrollIntoView({ block: 'start' }); true");
+      await shot("desktop-dark-fix");
+      await evaluate("document.querySelector('[data-env=production]').click(); true");
+      await shot("desktop-dark-time-left");
+      await evaluate("document.querySelector('[data-item-id=inc_d0c5a6e0]')?.click(); true");
+      await shot("desktop-dark-staging-signal");
     }
   }
   await view(390, 844, "dark");
