@@ -96,8 +96,8 @@ export function seedDemo(store: Store, config: Config) {
   });
   // The owner's history, through the same rules as real work: an old issue put away with Done; the staging warning
   // put away with Later, then a finding on it brings it back; a question about the ledger lag queued for an agent.
-  act(store, config, "inc_d0c5ea12", { action: "done" });
-  act(store, config, "inc_d0c3f00d", { action: "later" });
+  act(store, config, "inc_d0c5ea12", { action: "done" }, null);
+  act(store, config, "inc_d0c3f00d", { action: "later" }, null);
   store.tx((w) => {
     const job = "job_d0c3f00d0000000000000001", run = "run_d0c3f00d0000000000000001", handle = "e_d0c3f00d000000000000000a";
     const asked = w.event("job", s(job), { kind: "investigation", subject: "inc_d0c3f00d", demo: true });

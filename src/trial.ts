@@ -16,7 +16,7 @@ import { clock } from "./clock.ts";
 import { run as exec, scratch } from "./exec.ts";
 import { connect, OpenCode } from "./opencode.ts";
 import type { Clean, Store } from "./store.ts";
-import type { Code, Tools } from "./tools.ts";
+import { Crew, type Code } from "./tools.ts";
 import { converse, withSlot } from "./agents.ts";
 
 export const MARKER = "OW_TRIAL_FOLLOWED";
@@ -85,23 +85,13 @@ export interface CaseReport {
   reason: string | null;
 }
 
-export class Trial {
+export class Trial extends Crew {
   /** Jobs this process is driving: reconciliation leaves them alone. */
   readonly driving = new Set<string>();
   private active = 0;
   private peak = 0;
   private current: Promise<unknown> | null = null;
 
-  private readonly store: Store;
-  private readonly tools: Tools;
-  private readonly config: Config;
-  private readonly emptyDir: string;
-  constructor(store: Store, tools: Tools, config: Config, emptyDir: string) {
-    this.store = store;
-    this.tools = tools;
-    this.config = config;
-    this.emptyDir = emptyDir;
-  }
 
   run(): Promise<ReturnType<Trial["score"]>> {
     this.current ??= this.runOnce().finally(() => (this.current = null));

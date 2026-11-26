@@ -18,7 +18,7 @@ import { afterFinding, announce, groupNow, HttpError, label, passed, type Plan }
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
-import type { Code, RunContext, Tools } from "./tools.ts";
+import { Crew, type Code, type RunContext, type Tools } from "./tools.ts";
 
 /** Sessions actively driven at once, across the trial, readings, challengers and answers. */
 export const slots = { active: 0, max: 2 };
@@ -188,19 +188,10 @@ export function nextWork(store: Store): WorkRow | undefined {
   );
 }
 
-export class Agents {
-  private readonly store: Store;
-  private readonly tools: Tools;
-  private readonly config: Config;
-  private readonly emptyDir: string;
+export class Agents extends Crew {
   private readonly running = new Set<string>();
-  private readonly log: (line: string) => void;
   constructor(store: Store, tools: Tools, config: Config, emptyDir: string, log: (line: string) => void) {
-    this.store = store;
-    this.tools = tools;
-    this.config = config;
-    this.emptyDir = emptyDir;
-    this.log = log;
+    super(store, tools, config, emptyDir, log);
     this.playbooks();
     for (const n of store.all<{ id: string; attempts: number; next_ms: number | null; delay_ms: number | null }>("SELECT * FROM notifications WHERE state = 'queued' AND next_ms IS NOT NULL"))
       passed(`${n.id}:${n.attempts}`, n.next_ms!, n.delay_ms ?? 0, false);

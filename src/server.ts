@@ -13,7 +13,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, ask, deadlines, detail, focus, HttpError, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
+import { act, ask, basisOf, deadlines, detail, focus, HttpError, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
 import { Agents } from "./agents.ts";
 import { brief } from "./brief.ts";
 import { connect } from "./opencode.ts";
@@ -28,6 +28,7 @@ import { compare, comparisons, forecasts } from "./outlook.ts";
 import { Fixes } from "./fixes.ts";
 import { Full, trace, type Store } from "./store.ts";
 import { Refusal, Tools } from "./tools.ts";
+import { parseJson } from "./parse.ts";
 import { emptyFolder, reconcile, Trial } from "./trial.ts";
 
 export interface Service {
@@ -36,6 +37,17 @@ export interface Service {
 }
 
 const HEARTBEAT_MS = 5_000;
+
+/** How a POST may change state; the router dispatches on exactly these three. */
+type Guard = { keyed: (m: string[]) => Plan<any>; code?: number } | { fenced: (m: string[], basis: number | null) => unknown } | { command: (m: string[]) => unknown };
+function backup(store: Store, body: Record<string, unknown>) {
+  if (typeof body.file !== "string") throw new HttpError(400, "file is required");
+  try {
+    return store.backup(body.file);
+  } catch (e) {
+    throw new HttpError(409, errorText(e));
+  }
+}
 
 export async function serve(store: Store, config: Config, options: { scheduler: boolean; collect: boolean; log: (line: string) => void; tick?: () => void }): Promise<Service> {
   const collector = new Collector(store, config, config.dataDir);
@@ -57,7 +69,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     inbox: () => inbox(store),
     get: (id) => itemOf(id),
     search: (text) => search(store, config, text),
-    act: (id, body) => ({ ...current(), action: act(store, config, id, body) }),
+    act: (id, body) => ({ ...current(), action: act(store, config, id, body, basisOf(body)) }),
   };
 
   /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
@@ -116,41 +128,48 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       raw += chunk;
       if (raw.length > 1_000_000) return error(413, "too_large", "request too large");
     }
-    let body: Record<string, unknown> = {};
-    if (raw) {
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        return error(400, "bad_request", "the body is not JSON");
-      }
-    }
+    const body = (raw ? parseJson(raw) : {}) as Record<string, unknown>;
+    if (body === undefined) return error(400, "bad_request", "the body is not JSON");
     if (req.method === "GET" && path === "/v2/status") return reply(200, current());
     if (req.method === "GET" && !path.startsWith("/v2/") && path !== "/mcp") return page(path, res);
     try {
-      // Every keyed owner write is declared here, and only here: the router takes the request key and wraps the
-      // handler's change in its receipt (keyed()), so a keyed route cannot write without one.
-      const KEYED: Array<[RegExp, number, (m: string[]) => Plan<any>]> = [
-        [/^\/v2\/ask$/, 200, () => ask(store, config, body)],
-        [/^\/v2\/open$/, 200, () => agents.open(String(body.subject ?? ""))],
-        [/^\/v2\/items\/([^/]+)\/investigate$/, 202, ([id]) => agents.investigate(id!)],
-        [/^\/v2\/items\/([^/]+)\/corrections$/, 200, ([id]) => agents.correct(id!, body)],
-        [/^\/v2\/items\/([^/]+)\/fix$/, 202, ([id]) => fixes.request(id!, body)],
-        [/^\/v2\/fixes\/([^/]+)\/decline$/, 200, ([id]) => fixes.decline(id!)],
-        [/^\/v2\/notifications\/([^/]+)\/retry$/, 200, ([id]) => agents.retry(id!)],
+      // Every POST is declared here, and only here, with its guard: `keyed` (the router takes the request key and wraps
+      // the change in its receipt), `fenced` (the router hands over the basisSeq the owner was shown; a decision made
+      // since refuses it) or `command` (changes no item: backup, doctor, trial, and the MCP transport, whose tools are
+      // bound to their session's run). Anything else is refused before it runs.
+      const WRITES: Array<[RegExp, Guard]> = [
+        [/^\/v2\/ask$/, { keyed: () => ask(store, config, body) }],
+        [/^\/v2\/open$/, { keyed: () => agents.open(String(body.subject ?? "")) }],
+        [/^\/v2\/items\/([^/]+)\/investigate$/, { keyed: ([id]) => agents.investigate(id!), code: 202 }],
+        [/^\/v2\/items\/([^/]+)\/corrections$/, { keyed: ([id]) => agents.correct(id!, body) }],
+        [/^\/v2\/items\/([^/]+)\/fix$/, { keyed: ([id]) => fixes.request(id!, body), code: 202 }],
+        [/^\/v2\/fixes\/([^/]+)\/decline$/, { keyed: ([id]) => fixes.decline(id!) }],
+        [/^\/v2\/notifications\/([^/]+)\/retry$/, { keyed: ([id]) => agents.retry(id!) }],
+        [/^\/v2\/items\/([^/]+)\/action$/, { fenced: ([id], basis) => ({ ...current(), action: act(store, config, id!, body, basis) }) }],
+        [/^\/v2\/backup$/, { command: () => backup(store, body) }],
+        [/^\/v2\/doctor$/, { command: () => doctor(config, store, empty) }],
+        [/^\/v2\/trial$/, { command: async () => {
+          const report = await trial.run().catch((e) => { throw new HttpError(503, errorText(e)); });
+          return body.fixes === true ? { ...report, fixGate: await fixes.calibrate(report.automation) } : report;
+        } }],
+        [/^\/mcp$/, { command: () => mcp(req, res, body, reply) }],
       ];
-      for (const [route, code, plan] of KEYED) {
-        const m = req.method === "POST" ? route.exec(path) : null;
-        if (m) return reply(code, await keyed(store, req.headers["idempotency-key"] as string | undefined, plan(m.slice(1).map(decodeURIComponent))));
+      for (const [route, guard] of WRITES) {
+        const m = req.method === "POST" ? route.exec(path)?.slice(1).map(decodeURIComponent) : null;
+        if (!m) continue;
+        if ("keyed" in guard) return reply(guard.code ?? 200, await keyed(store, req.headers["idempotency-key"] as string | undefined, guard.keyed(m)));
+        if ("fenced" in guard) return reply(200, guard.fenced(m, basisOf(body)));
+        if ("command" in guard) {
+          const out = await guard.command(m);
+          return out === undefined ? undefined : reply(200, out);
+        }
+        throw new Error(`POST ${path} is declared without a guard: it must be keyed, fenced or a command`);
       }
       if (req.method === "GET" && path === "/v2/inbox") return reply(200, inbox(store));
       if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? "", address.searchParams.get("cursor")));
       if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
-      const item = /^\/v2\/items\/([^/]+)(\/action)?$/.exec(path);
-      if (item && req.method === "GET" && !item[2]) return reply(200, itemOf(decodeURIComponent(item[1]!)));
-      if (item && req.method === "POST" && item[2]) {
-        const done = act(store, config, decodeURIComponent(item[1]!), body);
-        return reply(200, { ...current(), action: done });
-      }
+      const item = /^\/v2\/items\/([^/]+)$/.exec(path);
+      if (item && req.method === "GET") return reply(200, itemOf(decodeURIComponent(item[1]!)));
       const fix = /^\/v2\/fixes\/([^/]+)$/.exec(path);
       if (fix && req.method === "GET") return reply(200, fixes.view(decodeURIComponent(fix[1]!)));
       const jobRoute = /^\/v2\/jobs\/([^/]+)$/.exec(path);
@@ -174,24 +193,6 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       req.on("close", () => streams.delete(res));
       return;
     }
-    if (req.method === "POST" && path === "/v2/backup") {
-      if (typeof body.file !== "string") return error(400, "bad_request", "file is required");
-      try {
-        return reply(200, store.backup(body.file));
-      } catch (e) {
-        return error(409, "conflict", errorText(e));
-      }
-    }
-    if (req.method === "POST" && path === "/v2/doctor") return reply(200, await doctor(config, store, empty));
-    if (req.method === "POST" && path === "/v2/trial") {
-      try {
-        const report = await trial.run();
-        return reply(200, body.fixes === true ? { ...report, fixGate: await fixes.calibrate(report.automation) } : report);
-      } catch (e) {
-        return error(503, "unavailable", errorText(e));
-      }
-    }
-    if (req.method === "POST" && path === "/mcp") return mcp(req, res, body, reply);
     // No server-initiated stream: Streamable HTTP clients are told so with 405, and carry on.
     if (path === "/mcp") return reply(405, { error: { code: "method_not_allowed", message: "POST only" } }, { allow: "POST" });
     return error(404, "not_found", `no route ${req.method} ${path}`);
@@ -255,12 +256,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     control.on("error", () => undefined);
     createInterface({ input: control }).on("line", (line) => {
       void (async () => {
-        let message: Record<string, unknown>;
-        try {
-          message = JSON.parse(line);
-        } catch {
-          return;
-        }
+        const message = parseJson(line) as Record<string, unknown> | undefined;
+        if (!message) return;
         const answer = (result: Record<string, unknown>) => control?.write(JSON.stringify({ id: message.id, ...result }) + "\n");
         try {
           if (message.op === "clock") clock.set(Number(message.nowMs), Number(message.monoMs));

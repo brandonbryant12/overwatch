@@ -6,7 +6,7 @@
 import { LIMITS, type Source } from "./config.ts";
 import { secret } from "./exec.ts";
 import { sleep } from "./clock.ts";
-import { list, num, rec, str, time } from "./parse.ts";
+import { list, num, rec, str, time, type ProviderTime } from "./parse.ts";
 
 export class HttpFailure extends Error {
   readonly status: number;
@@ -53,7 +53,7 @@ export interface DatadogLog {
   /** null when the log has no stable ID: it cannot be counted once, so the reading is incomplete. */
   readonly id: string | null;
   /** null when the log has no readable time: it cannot be placed in a window. */
-  readonly at: number | null;
+  readonly at: ProviderTime | null;
   readonly message: string;
   readonly status: string;
 }
@@ -105,14 +105,14 @@ export async function monitors(source: Source): Promise<{ monitors: Monitor[]; c
  * The latest point of the configured metric inside the queried window, with the provider's unit. A point dated
  * outside the window proves nothing about it, so it is not a measurement.
  */
-export async function metric(source: Source, from: number, to: number): Promise<{ name: string; value: number; at: number; unit: string | null } | null> {
+export async function metric(source: Source, from: number, to: number): Promise<{ name: string; value: number; at: ProviderTime; unit: string | null } | null> {
   const q = `from=${Math.floor(from / 1000)}&to=${Math.floor(to / 1000)}&query=${encodeURIComponent(source.metric ?? "")}`;
   const reply = rec(await request(source, `/api/v1/query?${q}`));
   // The latest point that has both a time and a value; a null point is not measured, never zero.
   for (const series of list(reply.series)) {
     const u = rec(list(rec(series).unit)[0]);
     for (const point of list(rec(series).pointlist).reverse()) {
-      const at = num(list(point)[0]), value = num(list(point)[1]);
+      const at = time(list(point)[0]), value = num(list(point)[1]);
       if (at !== null && value !== null && at >= from && at <= to)
         return { name: `${str(rec(series).metric) ?? source.metric} (${source.metric})`, value, at, unit: str(u.name) ?? str(u.family) };
     }

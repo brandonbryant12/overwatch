@@ -219,7 +219,7 @@ export function timeLeft(f, nowMs) {
 /** A fix attempt's state in words: what it is, and the one rule or step that explains it. */
 export const FIX_LABEL = {
   queued: "Checking eligibility", proposing: "A model is selecting a change", verifying: "Verifying in isolation", publishing: "Publishing a draft",
-  draft: "Draft pull request open", awaiting_deploy: "Merged, waiting for a release", released_quiet: "Released and quiet: closed by rule",
+  draft: "Draft pull request open", awaiting_deploy: "Merged, waiting for a release", released_quiet: "Released and quiet: ready to close",
   closed_unmerged: "Closed without merging", blocked: "No proposal: blocked", ineligible: "No proposal: not eligible", refused: "No proposal: refused",
   verify_failed: "Verify failed", stale: "Void: no longer current", declined: "Declined by you",
 };
@@ -247,9 +247,9 @@ export function bytes(v) {
 export const FIX_NEXT = {
   queued: "Next: the rules are checked, then a model selects a change.", proposing: "Next: the fixer's selection.", verifying: "Next: the verify commands finish in isolation.",
   publishing: "Next: the host answers, one step at a time.", draft: "Next: the draft is merged or closed (checked once a minute).",
-  awaiting_deploy: "Next: a deployment that contains the merge, then three quiet intervals.", released_quiet: "Closed by rule; nothing further.",
+  awaiting_deploy: "Next: a deployment that contains the merge, then three quiet intervals.", released_quiet: "Next: close the item with Done; a release without the fix reopens the wait.",
   closed_unmerged: "The problem stays open; a new investigation can lead to a new proposal.", blocked: "Next: pass overwatch trial --fixes, then press f.",
-  ineligible: "Next: a new investigation or deployment; f checks again.", refused: "Nothing further for this finding.", verify_failed: "Next: a passing overwatch trial --fixes, then f.",
+  ineligible: "Next: a new investigation or deployment; f checks again.", refused: "Nothing further for this finding.", verify_failed: "Next: make the verify command pass from tracked files (docs/setup.md), pass overwatch trial --fixes, then press f for a new attempt.",
   stale: "Next: press f to try again on the current base.", declined: "Nothing further.", unresolved: "Next: press f once the host answers.",
 };
 /** A forecast or comparison without an answer, and what would give one. */

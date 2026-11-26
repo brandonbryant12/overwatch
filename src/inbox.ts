@@ -218,20 +218,25 @@ export function deadlines(store: Store) {
   }
 }
 
-/** POST /v2/items/:id/action. Returns the seq of the action, or null when nothing changed. */
-export function act(store: Store, config: Config, id: string, body: Record<string, unknown>): { seq: number | null } {
+const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
+/** The basisSeq a request carries: the item's decidedSeq the owner was shown, or null when it names none. */
+export function basisOf(body: Record<string, unknown>): number | null {
+  if (body.basisSeq === undefined || body.basisSeq === null) return null;
+  if (int(body.basisSeq) === null) throw new HttpError(400, "basisSeq is the decidedSeq that was shown");
+  return body.basisSeq as number;
+}
+
+/**
+ * POST /v2/items/:id/action, a fenced route. Returns the seq of the action, or null when nothing changed. A decision
+ * is bound to what the owner reviewed: given a basis (the decidedSeq they were shown), it is refused when the
+ * disposition has changed since, so an old sheet in another tab cannot replace a newer decision.
+ */
+export function act(store: Store, config: Config, id: string, body: Record<string, unknown>, basis: number | null): { seq: number | null } {
   const row = get(store, id);
   if (!row) throw new HttpError(404, `no item ${id}`);
   const action = body.action;
-  const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
   const way = parse<Way>(row.way);
-  // A decision is bound to what the owner reviewed: given basisSeq (the item's decidedSeq they were shown), it is
-  // refused when the disposition has changed since, so an old sheet in another tab cannot replace a newer decision.
-  if (action !== "seen" && body.basisSeq !== undefined && body.basisSeq !== null) {
-    const basis = int(body.basisSeq);
-    if (basis === null) throw new HttpError(400, "basisSeq is the decidedSeq that was shown");
-    if (basis !== row.decided_seq) throw new HttpError(409, "this item was decided again since you looked; look again");
-  }
+  if (action !== "seen" && basis !== null && basis !== row.decided_seq) throw new HttpError(409, "this item was decided again since you looked; look again");
   if (action === "seen") {
     const through = int(body.throughSeq);
     if (through === null || through < 0 || through > store.seq()) throw new HttpError(400, "throughSeq must be a seq from 0 to the current one");

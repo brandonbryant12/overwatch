@@ -12,7 +12,6 @@
  * Every window of event time is a half-open Span [from, to): a slice, its overlap, the 14-day floor and a saturated
  * interval. A record at a slice's end belongs to the next slice.
  */
-import { createHash } from "node:crypto";
 import { statfsSync } from "node:fs";
 import { DEFAULT_WORDS, LIMITS, type Config, type Source, type Words } from "./config.ts";
 import { clock } from "./clock.ts";
@@ -21,12 +20,11 @@ import * as datadog from "./datadog.ts";
 import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
 import { Full, type Clean, type Store, type Writer } from "./store.ts";
-import { sample, UNMEASURED, type Sample } from "./parse.ts";
+import { answered, sample, sha, time, UNMEASURED, type ProviderTime, type Sample } from "./parse.ts";
 import { afterChange, afterDeploy, announce, groupNow, hourly } from "./inbox.ts";
 import { queueInvestigation } from "./agents.ts";
 import { approvalKey } from "./trial.ts";
 
-const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /** A half-open interval of event time. */
@@ -67,8 +65,8 @@ type Severity = "error" | "warn" | "info";
  * Overwatch asked.
  */
 /** A reading's outcome. Anything not failed says when the provider observed it: no reading is fresh by default. */
-type Reading = { state: "failed"; missed: null } | { state: "ok" | "capped" | "gap"; missed: number | null; observedMs: number };
-const observe = (complete: boolean, observedMs: number): Reading => ({ state: complete ? "ok" : "gap", missed: null, observedMs });
+type Reading = { state: "failed"; missed: null } | { state: "ok" | "capped" | "gap"; missed: number | null; observedMs: ProviderTime };
+const observe = (complete: boolean, observedMs: ProviderTime): Reading => ({ state: complete ? "ok" : "gap", missed: null, observedMs });
 type Bucket = { title: string; severity: Severity; reading: string; inexact: boolean; seen: boolean };
 
 /** A container's identity: its current and previous instance. */
@@ -107,7 +105,7 @@ export class Slice {
   readonly marks: Array<{ key: string; count: number }> = [];
   readonly readings = new Map<string, Reading>();
   /** Gauge samples; null is a sample that could not be measured. */
-  readonly metrics: Array<{ name: string; reading: string; sample: Sample; at: number }> = [];
+  readonly metrics: Array<{ name: string; reading: string; sample: Sample; at: ProviderTime }> = [];
   /** Incidents whose stored total is now known to be a lower bound (lines counted before were lost). */
   readonly uncertain = new Set<string>();
   fresh = 0;
@@ -115,7 +113,7 @@ export class Slice {
   /** The provider's rollout time of `revision`, when the cluster says it. */
   rollout: number | null = null;
   /** A used-capacity sample (null value: not measured), by the provider's time. */
-  capacity: { at: number; value: number | null; unit: string | null } | null = null;
+  capacity: { at: ProviderTime; value: number | null; unit: string | null } | null = null;
   readonly source: Source;
   readonly span: Span;
   private readonly saturated: ReadonlyArray<Span>;
@@ -375,7 +373,7 @@ export class Collector {
    * time cannot be placed and is a gap. Returns the pod list taken after the read.
    */
   private async logs(t: Target, source: Source, slice: Slice, before: ReadonlyArray<Pod>): Promise<Pod[]> {
-    const order: Reading["state"][] = ["ok", "gap", "capped", "failed"], at = clock.now();
+    const order: Reading["state"][] = ["ok", "gap", "capped", "failed"], at = answered(clock.now());
     let state: Reading = { state: before.length > LIMITS.podsPerSource ? "capped" : "ok", missed: null, observedMs: at };
     const worse = (s: Reading["state"]) => {
       if (order.indexOf(s) > order.indexOf(state.state)) state = s === "failed" ? { state: s, missed: null } : { state: s, missed: null, observedMs: at };
@@ -393,8 +391,8 @@ export class Collector {
           const seen = new Set<string>();
           let lastAt = slice.span.from;
           const read = await streamLogs(t, pod.name, container.name, iso(slice.span.from), instance.previous, LIMITS.bytesPerPodCall, (stamp, text) => {
-            const at = Date.parse(stamp);
-            if (!Number.isFinite(at)) return void worse("gap");
+            const at = time(stamp);
+            if (at === null) return void worse("gap");
             if (at < slice.span.from) return;
             if (at >= slice.span.to) return false;
             lastAt = at;
@@ -456,7 +454,7 @@ export class Collector {
           const p = problem(`WARN ${e.reason}: ${e.message}`, source.words, "warn")!;
           slice.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
-        slice.readings.set("events", observe(true, now));
+        slice.readings.set("events", observe(true, answered(now)));
       }
     }
     if (source.readings.includes("workloads")) {
@@ -464,7 +462,7 @@ export class Collector {
       if (r.code !== 0) this.refusedReading(slice, "workloads", r.stderr);
       else {
         slice.revision = parseRevision(r.stdout);
-        slice.readings.set("workloads", observe(!!slice.revision, now));
+        slice.readings.set("workloads", observe(!!slice.revision, answered(now)));
         // A new revision: ask the cluster when it rolled out (get replicasets, read-only). Never first-seen time.
         const last = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
         if (slice.revision && last && last.revision !== slice.revision) {
@@ -472,7 +470,7 @@ export class Collector {
           if (rs.code === 0) slice.rollout = parseRollout(rs.stdout, slice.revision);
         }
       }
-      slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: now });
+      slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: answered(now) });
     }
     if (source.readings.includes("usage")) {
       const r = await kubectl(t, "top", ["pod", "-l", source.selector!, "--containers", "--no-headers"]);
@@ -483,9 +481,9 @@ export class Collector {
         const limited = pods.flatMap((p) => p.containers.filter((c) => c.memoryLimit).map((c) => ({ pod: p.name, container: c.name, limit: c.memoryLimit! })));
         const used = limited.map((c) => rows.find((row) => row.pod === c.pod && row.container === c.container)?.memory ?? null);
         if (limited.length && used.every((m) => m !== null)) worst = Math.max(...used.map((m, i) => (100 * m!) / limited[i]!.limit));
-        slice.readings.set("usage", observe(worst !== null, now));
+        slice.readings.set("usage", observe(worst !== null, answered(now)));
       }
-      slice.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: now });
+      slice.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: answered(now) });
     }
   }
 
@@ -505,7 +503,7 @@ export class Collector {
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
             if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message);
           });
-          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: end } : observe(recognised && !unplaced, end));
+          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
         }
         if (end === w.now && source.readings.includes("monitors")) {
           const answer = await datadog.monitors(source);
@@ -521,14 +519,14 @@ export class Collector {
             const severity = /^alert/i.test(m.state!) ? "error" : "warn";
             slice.counter(countKey, was ? transitions : transitions + 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
           }
-          slice.readings.set("monitors", observe(answer.complete, end));
+          slice.readings.set("monitors", observe(answer.complete, answered(end)));
         }
         if (end === w.now && source.readings.includes("metrics")) {
           const point = await datadog.metric(source, end - source.everyMs, end);
-          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? end });
+          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? answered(end) });
           // Fresh as of the point's own time: an old point returned again is not a new measurement.
-          slice.readings.set("metrics", observe(point !== null, point?.at ?? 0));
-          if (source.capacity) slice.capacity = { at: point?.at ?? end, value: point ? point.value : null, unit: point?.unit ?? null };
+          slice.readings.set("metrics", observe(point !== null, point?.at ?? answered(0)));
+          if (source.capacity) slice.capacity = { at: point?.at ?? answered(end), value: point ? point.value : null, unit: point?.unit ?? null };
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
@@ -727,7 +725,7 @@ export class Collector {
       const seq = w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
       // A failed pass is still an interval: every reading failed, every gauge unmeasured.
       const failed = new Map(source.readings.map((r) => [r, { state: "failed" as const, missed: null }]));
-      const gauges = this.store.all<{ name: string }>("SELECT name FROM metrics WHERE source = ?", source.id).map((g) => ({ name: g.name, reading: "", sample: UNMEASURED, at: now }));
+      const gauges = this.store.all<{ name: string }>("SELECT name FROM metrics WHERE source = ?", source.id).map((g) => ({ name: g.name, reading: "", sample: UNMEASURED, at: answered(now) }));
       this.interval(w, source, failed, gauges, new Set(), false, seq, now);
       w.run(
         `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)

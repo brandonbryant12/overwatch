@@ -17,6 +17,7 @@ import { parseConfig, type Source } from "../src/config.ts";
 import { Store, type Clean } from "../src/store.ts";
 import { Tools, Refusal, type Options } from "../src/tools.ts";
 import { clock } from "../src/clock.ts";
+import { time } from "../src/parse.ts";
 
 /** A bare repository with one file at `previous`, then `base`, and the two commits' IDs. */
 function repo(files: Record<string, string>, changed: Record<string, string | null>, executable: string[] = []) {
@@ -148,7 +149,7 @@ test("class: a forecast exists only for six fresh, evenly spaced, consistently r
       seen[0]!++;
       const t0 = 1_000_000_000_000;
       const hash = createHash("sha256").update(JSON.stringify(["m", "disk", "units", 1000])).digest("hex");
-      const rows = values.map((v, i) => ({ series: hash, at_ms: t0 + i * 60_000, value: v }));
+      const rows = values.map((v, i) => ({ series: hash, at_ms: time(t0 + i * 60_000)!, value: v }));
       const now = t0 + (values.length - 1) * 60_000 + lag;
       const f = forecast(source, rows, now);
       if (f.state !== "forecast") return assert.equal(f.etaMinutes, null);

@@ -4,13 +4,12 @@
  * Staging against production: after a staging release, two aligned fully measured intervals on both sides; a new
  * staging-only problem seen in both is a regression signal. Neither has any authority over a release.
  */
-import { createHash } from "node:crypto";
 import type { Config, Source } from "./config.ts";
 import { clock } from "./clock.ts";
 import { afterChange, announce, groupNow } from "./inbox.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
+import { sha, type ProviderTime } from "./parse.ts";
 
-const sha = (...p: unknown[]) => createHash("sha256").update(JSON.stringify(p)).digest("hex");
 const DAY_MS = 86_400_000;
 
 export interface Forecast {
@@ -34,7 +33,7 @@ export interface Forecast {
  * each step positive and at most two intervals, the newest at most one interval old; every increment within 25% of
  * what the median of the 15 pairwise slopes predicts. ETA = (limit − latest) / slope, rounded up to whole minutes.
  */
-export function forecast(source: Source, rows: ReadonlyArray<{ series: string; at_ms: number; value: number | null }>, now: number): Forecast {
+export function forecast(source: Source, rows: ReadonlyArray<{ series: string; at_ms: ProviderTime; value: number | null }>, now: number): Forecast {
   const cap = source.capacity!, every = source.everyMs;
   const series = sha(source.metric, cap.resource, cap.unit, cap.limit);
   const base = { source: source.id, resource: cap.resource, unit: cap.unit, limit: cap.limit, intervalMs: every };
@@ -80,7 +79,7 @@ export function forecast(source: Source, rows: ReadonlyArray<{ series: string; a
 
 export function forecasts(store: Store, config: Config): Forecast[] {
   return config.sources.filter((s) => s.capacity).map((s) =>
-    forecast(s, store.all<{ series: string; at_ms: number; value: number | null }>("SELECT series, at_ms, value FROM samples WHERE source = ? ORDER BY id", s.id), clock.now()));
+    forecast(s, store.all<{ series: string; at_ms: ProviderTime; value: number | null }>("SELECT series, at_ms, value FROM samples WHERE source = ? ORDER BY id", s.id), clock.now()));
 }
 
 interface Data { prodSeq?: number; baseline: string[]; marks: Record<string, number>; counts: Array<Record<string, Record<string, number>>> }

@@ -9,7 +9,7 @@
  * they cannot be cited.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { LIMITS } from "./config.ts";
+import { LIMITS, type Config } from "./config.ts";
 import { afterFinding } from "./inbox.ts";
 import { clock } from "./clock.ts";
 import { run as exec } from "./exec.ts";
@@ -388,4 +388,20 @@ function optionalInt(value: unknown, name: string): number | null {
   if (value === undefined || value === null) return null;
   if (!Number.isSafeInteger(value)) throw new Refusal(`${name} must be an integer`);
   return value as number;
+}
+
+/** What each model-driven worker (agents, fixes, the trial) holds: the database, the tools, the configuration, the empty folder its sessions run in, and a log. */
+export class Crew {
+  protected readonly store: Store;
+  protected readonly tools: Tools;
+  protected readonly config: Config;
+  protected readonly emptyDir: string;
+  protected readonly log: (line: string) => void;
+  constructor(store: Store, tools: Tools, config: Config, emptyDir: string, log: (line: string) => void = () => undefined) {
+    this.store = store;
+    this.tools = tools;
+    this.config = config;
+    this.emptyDir = emptyDir;
+    this.log = log;
+  }
 }

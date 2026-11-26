@@ -14,6 +14,7 @@ import { approvalKey } from "./trial.ts";
 import { inbox, rows as incidentRows } from "./inbox.ts";
 import type { Collector } from "./collect.ts";
 import type { Store } from "./store.ts";
+import type { ProviderTime } from "./parse.ts";
 
 export type Health = "quiet" | "attention" | "partial" | "stale" | "signed_out";
 
@@ -32,7 +33,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
   const now = clock.now(), mono = clock.mono();
   const rows = new Map(store.all<SourceRow>("SELECT * FROM sources").map((r) => [r.id, r]));
   const readings = new Map(
-    store.all<{ source: string; reading: string; state: string; ok_ms: number | null }>("SELECT source, reading, state, ok_ms FROM readings").map((r) => [`${r.source}|${r.reading}`, r]),
+    store.all<{ source: string; reading: string; state: string; ok_ms: ProviderTime | null }>("SELECT source, reading, state, ok_ms FROM readings").map((r) => [`${r.source}|${r.reading}`, r]),
   );
   const errors = new Set(store.all<{ place: string }>("SELECT DISTINCT app || '/' || environment AS place FROM incidents WHERE severity = 'error' AND active = 1").map((r) => r.place));
 

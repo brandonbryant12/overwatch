@@ -90,14 +90,14 @@ test("class: every write passes one admission; when the disk is short nothing is
           if (op === "ask") keyed(store, "rk_" + "a".repeat(24), ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }));
           else if (op === "deadline") {
             store.guard = null;
-            act(store, config, "inc_1", { action: "later", untilMs: clock.now() + 1 });
+            act(store, config, "inc_1", { action: "later", untilMs: clock.now() + 1 }, null);
             store.guard = () => {
               throw new Full("short");
             };
             clock.set(clock.now() + 2, clock.mono() + 2);
             return void deadlines(store);
           } else if (op === "raw") store.tx((w) => w.event("slice", null, {}));
-          else act(store, config, "inc_1", op === "seen" ? { action: "seen", throughSeq: store.seq() } : { action: op });
+          else act(store, config, "inc_1", op === "seen" ? { action: "seen", throughSeq: store.seq() } : { action: op }, null);
         };
         const at = store.seq();
         if (op === "deadline") {
@@ -208,9 +208,9 @@ test("class: a decision is bound to what was reviewed; interleaved tabs never re
           const basis = sheets[tab]!;
           sheets[tab] = null;
           if (basis === decided()) {
-            act(store, config, "inc_1", { action: way, basisSeq: basis });
+            act(store, config, "inc_1", { action: way }, basis);
             last = way;
-          } else assert.throws(() => act(store, config, "inc_1", { action: way, basisSeq: basis }), /decided again/);
+          } else assert.throws(() => act(store, config, "inc_1", { action: way }, basis), /decided again/);
         }
       }
       const kind = store.get<{ k: string | null }>("SELECT json_extract(way, '$.kind') AS k FROM incidents")!.k;
@@ -246,9 +246,23 @@ test("build: only src/exec.ts starts a program, and only adapters open a connect
   }
 });
 
+test("build: a provider time is made only in parse.ts; the one cast for a live read is named and used only by the collector", () => {
+  const src = new URL("../src/", import.meta.url).pathname;
+  for (const f of readdirSync(src).filter((n) => n.endsWith(".ts") && n !== "parse.ts")) {
+    const text = readFileSync(join(src, f), "utf8");
+    assert.doesNotMatch(text, /as (?:unknown as )?ProviderTime\b|providerTime: true/, `${f} makes a provider time outside parse.ts`);
+    if (f !== "collect.ts") assert.doesNotMatch(text, /\banswered\(/, `${f} casts the wall clock to a provider time`);
+  }
+});
+
 test("build: the request key is read only by the keyed router, and only keyed() can take a receipt", () => {
   const src = new URL("../src/", import.meta.url).pathname;
   const reads = readdirSync(src).filter((n) => n.endsWith(".ts")).flatMap((f) => (readFileSync(join(src, f), "utf8").match(/headers\["idempotency-key"\]/gi) ?? []).map(() => f));
   assert.deepEqual(reads, ["server.ts"], "a route reads the request key outside the keyed router");
   assert.doesNotMatch(readFileSync(join(src, "inbox.ts"), "utf8"), /export function receipt/);
+  // Every POST goes through the one route table, whose guard is keyed, fenced or a command; basisSeq is read in one place.
+  const server = readFileSync(join(src, "server.ts"), "utf8");
+  assert.equal(server.match(/method === "POST"/g)?.length, 1, "a POST route is handled outside the WRITES table");
+  const basis = readdirSync(src).filter((n) => n.endsWith(".ts")).flatMap((f) => (readFileSync(join(src, f), "utf8").match(/body\.basisSeq/g) ?? []).map(() => f));
+  assert.deepEqual([...new Set(basis)], ["inbox.ts"], "basisSeq is read outside basisOf");
 });

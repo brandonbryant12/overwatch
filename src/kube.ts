@@ -3,7 +3,7 @@
  * context and namespace, and only with the flags and value shapes listed here: an allowlist, so anything else is
  * refused before a process starts. Logs are read line by line with a byte cap; nothing builds a list of all it read.
  */
-import { count, list, rec, str, time } from "./parse.ts";
+import { count, list, rec, str, time, type ProviderTime } from "./parse.ts";
 import { run, stream, type Result, type StreamRead } from "./exec.ts";
 
 const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
@@ -148,7 +148,7 @@ export function parseRollout(stdout: string, revision: string): number | null {
     const one = JSON.stringify({ items: [item] });
     return parseRevision(one) === revision ? [time(rec(rec(item).metadata).creationTimestamp)] : [];
   });
-  const known = times.filter((t): t is number => t !== null);
+  const known = times.filter((t): t is ProviderTime => t !== null);
   return known.length ? Math.max(...known) : null;
 }
 

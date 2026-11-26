@@ -3,6 +3,13 @@
  * clearly of the kind asked for and null otherwise: null is "not measured", so a missing or malformed value can never
  * become a measured zero, false or epoch.
  */
+import { createHash } from "node:crypto";
+
+/** JSON text as a value, or undefined when it is not JSON. */
+export const parseJson = (text: string): unknown => { try { return JSON.parse(text); } catch { return undefined; } };
+/** A stable digest of values, for keys and identities. */
+export const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+
 export const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 export const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 export const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
@@ -30,10 +37,15 @@ export function count(v: unknown): number | null {
   return n !== null && Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-/** A time as epoch milliseconds, from an ISO string (or a number of milliseconds). */
-export function time(v: unknown): number | null {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  if (typeof v !== "string" || !v) return null;
-  const at = Date.parse(v);
-  return Number.isFinite(at) ? at : null;
+/**
+ * A time the provider reported, in epoch milliseconds. Made only here: from provider data by `time`, or by `answered`
+ * for a live read. A wall-clock number is not one, so it cannot be passed where a provider time belongs unseen.
+ */
+export type ProviderTime = number & { readonly providerTime: true };
+/** A provider's time from an ISO string (or a number of milliseconds). */
+export function time(v: unknown): ProviderTime | null {
+  const at = typeof v === "number" ? v : typeof v === "string" && v ? Date.parse(v) : NaN;
+  return Number.isFinite(at) ? (at as ProviderTime) : null;
 }
+/** The one cast: a live read (pods, events, usage, logs up to now, monitors) observed when the provider answered it. */
+export const answered = (ms: number) => ms as ProviderTime;

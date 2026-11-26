@@ -66,7 +66,7 @@ Pass when every watcher resumes without a manual restart, each stale, missing, f
 
 ```sh
 command -v terminal-notifier
-OWURL=$(node -e 'const s=require(process.argv[1]); console.log(s.url)' "$(node -e 'const os=require("node:os"),p=require("node:path"),c=require(process.argv[1]);console.log(p.resolve(c.dataDir.replace(/^~(?=\/|$)/,os.homedir()),"service.json"))' "$OWCFG")")
+OWURL=$(node -e 'const s=require(process.argv[1]); console.log(s.url)' "$(node -e 'const os=require("node:os"),p=require("node:path"),c=require(process.argv[1]);const d=c.dataDir?c.dataDir.replace(/^~(?=\/|$)/,os.homedir()):p.join(process.env.XDG_DATA_HOME||p.join(os.homedir(),".local","share"),"overwatch");console.log(p.resolve(d,"service.json"))' "$OWCFG")")
 curl -fsS "$OWURL/v2/notifications" > "$OWEVID/notices-before.json"
 open "$OWURL"
 ```

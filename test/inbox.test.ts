@@ -43,7 +43,7 @@ function rig() {
 
 test("Done's grace is one interval on the service's own admission; a wall clock set back cannot extend it", () => {
   const r = rig();
-  act(r.store, r.config, "inc_1", { action: "done" });
+  act(r.store, r.config, "inc_1", { action: "done" }, null);
   r.move(-3_600_000, 30_000);
   r.occur();
   assert.equal(r.way(), "done", "admitted inside the grace: counted, still put away");
@@ -55,7 +55,7 @@ test("Done's grace is one interval on the service's own admission; a wall clock 
 
 test("Later with a time comes back at the delay the owner chose, even with the wall clock set back", () => {
   const r = rig();
-  act(r.store, r.config, "inc_1", { action: "later", untilMs: clock.now() + 120_000 });
+  act(r.store, r.config, "inc_1", { action: "later", untilMs: clock.now() + 120_000 }, null);
   r.move(-86_400_000, 119_999);
   deadlines(r.store);
   assert.equal(r.way(), "later");
@@ -80,9 +80,9 @@ test("a request key answers the same way forever and refuses a different prompt;
 
 test("undo is fenced: only the current action can be undone, once", () => {
   const r = rig();
-  const { seq } = act(r.store, r.config, "inc_1", { action: "never", reason: "noise" });
-  act(r.store, r.config, "inc_1", { action: "undo", actionSeq: seq });
+  const { seq } = act(r.store, r.config, "inc_1", { action: "never", reason: "noise" }, null);
+  act(r.store, r.config, "inc_1", { action: "undo", actionSeq: seq }, null);
   assert.equal(r.way(), null);
-  assert.throws(() => act(r.store, r.config, "inc_1", { action: "undo", actionSeq: seq }), /no longer/);
-  assert.throws(() => act(r.store, r.config, "inc_1", { action: "later", untilMs: clock.now() + 1, when: "worse" }), /not both/);
+  assert.throws(() => act(r.store, r.config, "inc_1", { action: "undo", actionSeq: seq }, null), /no longer/);
+  assert.throws(() => act(r.store, r.config, "inc_1", { action: "later", untilMs: clock.now() + 1, when: "worse" }, null), /not both/);
 });

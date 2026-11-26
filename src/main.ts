@@ -76,6 +76,16 @@ async function own(c: Config): Promise<Store> {
   }
 }
 
+/** The database, owned by this command for one step and closed after it. */
+async function owned<T>(c: Config, step: (store: Store) => T): Promise<T> {
+  const store = await own(c);
+  try {
+    return step(store);
+  } finally {
+    store.close();
+  }
+}
+
 async function post(url: string, path: string, body: unknown, timeoutMs: number) {
   const r = await fetch(url + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
   const value = (await r.json()) as { error?: { code: string; message: string } };
@@ -128,18 +138,8 @@ async function main(): Promise<number> {
     case "status": {
       const c = config();
       const url = await live(c);
-      if (url) {
-        const s = (await (await fetch(`${url}/v2/status`, { signal: AbortSignal.timeout(5_000) })).json()) as ReturnType<typeof snapshot>;
-        out(s, humanStatus(s));
-        return 0;
-      }
-      const store = await own(c);
-      try {
-        const s = snapshot(store, c, null, false);
-        out(s, humanStatus(s));
-      } finally {
-        store.close();
-      }
+      const s = url ? ((await (await fetch(`${url}/v2/status`, { signal: AbortSignal.timeout(5_000) })).json()) as ReturnType<typeof snapshot>) : await owned(c, (store) => snapshot(store, c, null, false));
+      out(s, humanStatus(s));
       return 0;
     }
     case "backup": {
@@ -149,14 +149,7 @@ async function main(): Promise<number> {
       const file = resolve(to);
       if (existsSync(file)) throw new Exit(2, "invalid_arguments", `${file} exists; choose a new file`);
       const url = await live(c);
-      const result = url ? await post(url, "/v2/backup", { file }, 120_000) : await (async () => {
-        const store = await own(c);
-        try {
-          return store.backup(file);
-        } finally {
-          store.close();
-        }
-      })();
+      const result = url ? await post(url, "/v2/backup", { file }, 120_000) : await owned(c, (store) => store.backup(file));
       out(result, `Backed up to ${file}`);
       return 0;
     }
@@ -164,16 +157,14 @@ async function main(): Promise<number> {
       const c = config();
       const from = flag("--from");
       if (!from) throw new Exit(2, "invalid_arguments", "restore needs --from FILE");
-      const store = await own(c);
-      try {
-        const result = store.restore(resolve(from));
-        out(result, `Restored from ${result.file} at seq ${result.seq}`);
-      } catch (error) {
-        if (error instanceof Incompatible) throw new Exit(5, "invalid_backup", error.message);
-        throw error;
-      } finally {
-        store.close();
-      }
+      const result = await owned(c, (store) => {
+        try {
+          return store.restore(resolve(from));
+        } catch (error) {
+          throw error instanceof Incompatible ? new Exit(5, "invalid_backup", error.message) : error;
+        }
+      });
+      out(result, `Restored from ${result.file} at seq ${result.seq}`);
       return 0;
     }
     case "doctor": {

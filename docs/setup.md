@@ -203,8 +203,23 @@ a rootless container or `bwrap` on Linux, as `verify()` in `src/fixes.ts`.
   "environments": { … } } }
 ```
 
-Verify commands must pass with no network, from a fresh checkout without `node_modules` or other untracked files;
-choose commands that test the allowed files directly. Add the `ow-fixer` agent (step 3) and restart.
+Verify commands must pass with no network, from a fresh checkout that holds only tracked files. **A verify command
+that needs an installed, untracked dependency tree (`node_modules` you installed by hand) fails closed**: the item
+says `verify failed`, shows the command, its exit code and the first lines it printed, and names the missing module
+when it can. Two patterns work:
+
+1. **A standalone verifier.** A tracked script that uses only the language's standard library and checks the allowed
+   files directly, for example `"verify": [["node", "scripts/check-config.cjs"]]` reading `config/payments.json`.
+2. **An offline install inside the verifier's own temporary folder.** Track the lockfile and the package tarballs
+   (for example under `vendor/`, referenced as `file:` dependencies). A tracked runner copies `vendor/`,
+   `package.json` and `package-lock.json` into `fs.mkdtempSync(path.join(os.tmpdir(), "deps-"))`, runs
+   `npm ci --offline --ignore-scripts --no-audit --no-fund` there, runs the check with
+   `NODE_PATH=<that folder>/node_modules`, and removes the folder. `os.tmpdir()` is the sandbox's own scratch, which
+   is writable; nothing is fetched.
+
+Check a command before turning fixes on: from a fresh `git archive` of your base, with the network off, it must pass.
+After a failed verify, fix the command, pass `bin/overwatch trial --fixes` again, then press `f`: that starts a new
+attempt with its own proposal and its own verify. Add the `ow-fixer` agent (step 3) and restart.
 
 **Calibrate** the model for fixes, with the service running:
 

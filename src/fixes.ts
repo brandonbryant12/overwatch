@@ -13,7 +13,7 @@
  * each effect the host is read back for the exact object; anything else is unresolved, with a reason and a bounded
  * retry, and never assumed.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { FORBIDDEN, LIMITS, type Config, type Fixes as Policy } from "./config.ts";
@@ -23,11 +23,11 @@ import { HttpError, type Plan } from "./inbox.ts";
 import { Unavailable } from "./opencode.ts";
 import { clean, errorText, outbound } from "./redact.ts";
 import { json, type Clean, type Permit, type Store, type Writer } from "./store.ts";
-import type { Options, Proposal, Tools } from "./tools.ts";
+import { parseJson, sha, type ProviderTime } from "./parse.ts";
+import { Crew, type Options, type Proposal } from "./tools.ts";
 import { converse, withSlot } from "./agents.ts";
 import { approvalKey, fixGateKey } from "./trial.ts";
 
-const sha = (...p: unknown[]) => createHash("sha256").update(JSON.stringify(p)).digest("hex");
 const LIMIT = { files: 3, lines: 80, bytes: 16_384, commands: 4, commandMs: 60_000, totalMs: 180_000, output: 65_536, followMs: 60_000, retries: 5 };
 const ACTIVE = ["queued", "proposing", "verifying", "publishing"];
 
@@ -79,7 +79,7 @@ export function admission(store: Store, config: Config, incident: string, jobId:
   const before = store.all<{ data: string }>("SELECT data FROM events WHERE kind = 'slice' AND subject = ? AND seq < ? ORDER BY seq DESC LIMIT 50", inc.source, deploy.seq)
     .some((e) => { const d = JSON.parse(e.data) as { ordinary?: boolean; to: number; readings: Record<string, { state: string }> }; return d.ordinary && d.readings[inc.reading]?.state === "ok" && d.to <= deploy.after_ms!; });
   if (!before) return stop("ineligible", "no full, measured, ordinary interval before the rollout shows it absent");
-  const fresh = store.get<{ ok_ms: number | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = ?", inc.source, inc.reading)?.ok_ms ?? null;
+  const fresh = store.get<{ ok_ms: ProviderTime | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = ?", inc.source, inc.reading)?.ok_ms ?? null;
   const every = config.watchers.find((w) => w.app === inc.app && w.environment === inc.environment)?.everyMs ?? 600_000;
   if (fresh === null || clock.now() - fresh > LIMITS.freshIntervals * every) return stop("ineligible", "its telemetry is not fresh");
   return { state: "queued" as const, reason: null, inc, policy, previous: deploy.previous, deployed: deploy.revision };
@@ -92,7 +92,17 @@ function gatesStand(store: Store, config: Config, app: string): string | null {
   return null;
 }
 
-const attemptId = (incident: string, jobId: string, deployed: string | null, policy: Policy | undefined) => `fx_${sha(incident, jobId, deployed, policy ?? null).slice(0, 24)}`;
+const attemptId = (incident: string, jobId: string, deployed: string | null, policy: Policy | undefined, again = 0) => `fx_${sha(incident, jobId, deployed, policy ?? null, ...(again ? [again] : [])).slice(0, 24)}`;
+
+/** A failed verify in the owner's terms: the command, its exit, the first lines it printed, and what the isolated checkout lacked when that is recognisable. */
+function failedBecause(f: Verification) {
+  const all = f.summary.split("\n").map((l) => l.trim()).filter(Boolean), error = all.find((l) => /error/i.test(l));
+  const lines = [...new Set([...all.slice(0, 3), ...(error ? [error] : [])])].join(" / ").slice(0, 400);
+  const module = /Cannot find (?:module|package) '([^']+)'|MODULE_NOT_FOUND/.exec(f.summary);
+  const hint = module ? ` The isolated checkout has only tracked files, and ${module[1] ? `'${module[1]}'` : "a module"} is not among them: use a standalone verifier, or prepare dependencies offline from a tracked lockfile (docs/setup.md).`
+    : /ENOTFOUND|EAI_AGAIN|getaddrinfo/.test(f.summary) ? " Verification has no network: use a standalone verifier, or prepare dependencies offline (docs/setup.md)." : "";
+  return `${f.argv.join(" ") || "verification"} ${f.exitCode === null ? "did not finish" : `exited ${f.exitCode}`}${lines ? `: ${lines}` : ""}.${hint}`;
+}
 
 /** A newer decision replaced the one this worker read: it stops without writing. */
 class Superseded extends Error {}
@@ -107,21 +117,9 @@ class Stop extends Error {
 /** The host's answer was missing or not the exact object: tried again a bounded number of times, never assumed. */
 class Unresolved extends Error {}
 
-export class Fixes {
+export class Fixes extends Crew {
   private busy = false;
   private readonly followed = new Set<string>();
-  private readonly store: Store;
-  private readonly tools: Tools;
-  private readonly config: Config;
-  private readonly emptyDir: string;
-  private readonly log: (line: string) => void;
-  constructor(store: Store, tools: Tools, config: Config, emptyDir: string, log: (line: string) => void) {
-    this.store = store;
-    this.tools = tools;
-    this.config = config;
-    this.emptyDir = emptyDir;
-    this.log = log;
-  }
 
   /** POST /v2/items/:id/fix: one attempt per (problem, investigation, deployment, policy); a durable decision either way. */
   request(incident: string, body: Record<string, unknown>): Plan<{ attemptId: string }> {
@@ -132,7 +130,9 @@ export class Fixes {
 
   private admit(w: Writer, incident: string, jobId: string, origin: string): string {
     const a = admission(this.store, this.config, incident, jobId);
-    const id = attemptId(incident, jobId, a.deployed, a.policy);
+    let id = attemptId(incident, jobId, a.deployed, a.policy);
+    // After a failed verify the owner's f is a new attempt, with its own proposal and verify; the failed one stays.
+    for (let n = 1; origin === "manual" && this.store.get<Row>("SELECT state FROM fixes WHERE id = ?", id)?.state === "verify_failed"; n++) id = attemptId(incident, jobId, a.deployed, a.policy, n);
     const prior = this.store.get<Row>("SELECT * FROM fixes WHERE id = ?", id);
     // Automatic and owner requests coalesce. An owner may ask again after a decision that did not reach a model's
     // proposal (blocked, ineligible), after a void candidate (stale) or an unresolved host step; nothing else revives.
@@ -296,7 +296,7 @@ export class Fixes {
         if (failed) {
           // A real verify failure revokes the fix gate until a new complete passing trial.
           return this.store.tx((w) => {
-            this.set(w, row, "verify_failed", `${failed.argv.join(" ") || "verification"} ${failed.exitCode === null ? `did not finish: ${failed.summary.split("\n")[0]}` : `exited ${failed.exitCode}`}`, {}, { verification: results });
+            this.set(w, row, "verify_failed", failedBecause(failed), {}, { verification: results });
             w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'off')", fixGateKey(this.config, row.app) as Clean);
           });
         }
@@ -355,12 +355,8 @@ export class Fixes {
   private async find(row: Row, branch: string, policy: Policy, head: string | null) {
     const r = await this.host(row, "draft lookup", ["pr", "list", "--head", branch, "--state", "all", "--json", "number,url,state,isDraft,baseRefName,headRefName,headRefOid,headRepository,body"]);
     if (r.code !== 0) throw new Unresolved(`the host could not list drafts for ${branch}: ${clean(r.stderr.trim(), 200) || `exit ${r.code}`}`);
-    let rows: Array<{ number: number; url: string; state: string; isDraft: boolean; baseRefName: string; headRefName: string; headRefOid?: string; headRepository?: { name?: string }; body?: string }>;
-    try {
-      rows = JSON.parse(r.stdout || "[]");
-    } catch {
-      throw new Unresolved("the host's draft list could not be read");
-    }
+    const rows = parseJson(r.stdout || "[]") as Array<{ number: number; url: string; state: string; isDraft: boolean; baseRefName: string; headRefName: string; headRefOid?: string; headRepository?: { name?: string }; body?: string }> | undefined;
+    if (!Array.isArray(rows)) throw new Unresolved("the host's draft list could not be read");
     // The draft is this attempt's only if all agree: head branch and commit (the host's own, or else the branch head read
     // back from the remote in this step), head repository, base, marker, draft and open.
     const name = (await this.repository(row.app)).name.split("/").at(-1);
@@ -386,10 +382,7 @@ export class Fixes {
       // Protection is read positively, now, before every push: rules for this branch name, never a past verdict.
       const repo = await this.repository(row.app);
       const r = await this.host(row, "protection check", ["api", `repos/${repo.slug}/rules/branches/${branch}`]);
-      let rules: unknown = null;
-      try {
-        rules = r.code === 0 ? JSON.parse(r.stdout) : null;
-      } catch {}
+      const rules = r.code === 0 ? parseJson(r.stdout) : null;
       const said = Array.isArray(rules) ? rules.length > 0 : typeof (rules as { protected?: unknown })?.protected === "boolean" ? (rules as { protected: boolean }).protected : null;
       if (said === true) throw new Stop("refused", `the branch ${branch} is protected on the host`);
       if (said === null) throw new Unresolved(`branch protection for ${branch} is unknown: ${clean(r.stderr.trim(), 200) || "the host gave no rule set"}`);
@@ -469,11 +462,11 @@ export class Fixes {
     if (row.state === "draft") {
       if (d.checkedMs !== undefined && this.followed.has(row.id) && clock.now() - d.checkedMs < LIMIT.followMs) return;
       this.followed.add(row.id);
-      const call = ["pr", "view", String(d.pr.number), "--json", "state,mergeCommit,isDraft,url,headRefName,headRefOid", "--repo", (await this.repository(row.app)).name];
+      const call = ["pr", "view", String(d.pr.number), "--json", "state,mergeCommit,isDraft,url,headRefName,headRefOid,headRepository", "--repo", (await this.repository(row.app)).name];
       const r = await effect(this.store.permit("host", row.id, { step: "follow" }, call), "gh", call, { cwd: this.config.apps[row.app]!.checkout, timeoutMs: 30_000 });
-      const pr = r.code === 0 ? (JSON.parse(r.stdout) as { state: string; mergeCommit: { oid: string } | null; isDraft: boolean; headRefName?: string; headRefOid?: string }) : null;
-      // Followed only while it is still this attempt's draft: same head branch and, when the host says it, same commit.
-      if (!pr || pr.headRefName !== `ow/fix/${row.id}` || (pr.headRefOid && pr.headRefOid !== row.head)) return;
+      const pr = r.code === 0 ? (JSON.parse(r.stdout) as { state: string; mergeCommit: { oid: string } | null; isDraft: boolean; headRefName?: string; headRefOid?: string; headRepository?: { name?: string } }) : null;
+      // Followed only while it is still this attempt's draft: same head branch and, when the host says them, same commit and repository.
+      if (!pr || pr.headRefName !== `ow/fix/${row.id}` || (pr.headRefOid && pr.headRefOid !== row.head) || (pr.headRepository?.name && pr.headRepository.name !== (await this.repository(row.app)).name.split("/").at(-1))) return;
       const at = { checkedMs: clock.now(), pr: { ...d.pr, state: pr.state, draft: pr.isDraft } };
       if (pr.state === "MERGED" && pr.mergeCommit?.oid) return void this.update(row, "awaiting_deploy", "merged; waiting for a release that contains it", {}, { ...at, merge: pr.mergeCommit.oid });
       if (pr.state === "CLOSED") return void this.update(row, "closed_unmerged", "closed without merging; the problem stays open", {}, { ...at, host: `the closed draft #${d.pr.number} and its branch ow/fix/${row.id}` });
@@ -578,12 +571,8 @@ const accepted = (p: { body: string; refused: string | null }): Proposal => {
 };
 const scalar = (v: unknown) => v === null || ["string", "number", "boolean"].includes(typeof v);
 function jsonOf(text: string): Record<string, unknown> | null {
-  try {
-    const v = JSON.parse(text) as unknown;
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
+  const v = parseJson(text);
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
 }
 /** The file with one top-level key set back, in the file's own layout, or null when the layout is not one JSON writes. */
 function rewrite(text: string, value: Record<string, unknown>, key: string, old: unknown): string | null {
