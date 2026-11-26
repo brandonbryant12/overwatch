@@ -290,7 +290,7 @@ function overview() {
 const WAY_LABEL = { done: "Done", later: "Later", never: "Never" };
 
 const VERDICT = { real: "Real", not_real: "Not real", unsure: "Unsure" };
-const piecesHtml = (pieces) => (pieces ?? []).map((p) => `<figure class="evidence"><figcaption><span class="handle">${esc(p.handle)}</span><span>${esc(p.source)}</span></figcaption><pre>${esc(p.text)}</pre></figure>`).join("");
+const piecesHtml = (pieces) => (pieces ?? []).map((p) => `<figure class="evidence"><figcaption><button type="button" class="handle" data-handle="${esc(p.handle)}" title="${esc(p.handle)} · click to copy">${esc(m.shortHandle(p.handle))}</button><span>${esc(p.source)}</span></figcaption><pre>${esc(p.text)}</pre></figure>`).join("");
 
 /** The latest investigation: the verdict, how the readings voted, what the challenger did; disagreement shows. */
 function verdictPanel(d) {
@@ -303,7 +303,7 @@ function verdictPanel(d) {
     return `<li class="reading ${esc(x.verdict ?? "missing")}"><span class="slot">${x.slot}</span><b>${esc(x.verdict ? VERDICT[x.verdict] : "No filing")}</b><span>${esc(f?.body?.cause ?? x.reason ?? "")}</span></li>`;
   }).join("");
   return `<section class="verdict ${v.tone}" data-verdict="${esc(r.verdict)}" data-tone="${v.tone}">
-    <header><span class="verdict-label">${esc(v.label)}</span>${v.observed ? `<span class="pill observed">observed in telemetry</span>` : ""}<span class="votes">${esc(v.votes)}${v.challenge ? ` · ${esc(v.challenge)}` : ""}</span></header>
+    <header><span class="verdict-label">${esc(v.label)}</span><span class="verdict-label votes">${esc(v.votes)}</span>${v.challenge ? `<span class="challenge-word">${esc(v.challenge)}</span>` : ""}${v.evidence ? `<span class="pill ${v.observed ? "observed" : "unobserved"}">${esc(v.evidence)}</span>` : ""}</header>
     ${v.tone === "undecided" ? `<p class="note">The readings could not settle it. It stays with you; look at what each one saw.</p>` : v.tone === "disagreed" ? `<p class="note">Not unanimous: the dissent is below, as filed.</p>` : ""}
     <ol class="readings">${readings}</ol>
     ${r.challenge ? `<div class="challenge"><b>Challenger: ${esc(r.challenge.outcome ?? "did not file")}</b><p>${esc(r.challenge.reason ?? "")}</p>${piecesHtml(r.challenge.pieces)}</div>` : ""}
@@ -334,7 +334,7 @@ function incidentView(i, d) {
   const back = i.returned && !i.way ? `<div class="back-note"><b>${esc(m.RETURN_LABEL[i.returned.code] ?? "Back")}</b>${esc(i.returned.reason)}</div>` : "";
   const history = (d?.history ?? []).slice(-12).reverse().map((e) => `<li class="ev ev-${esc(e.kind)}"><span class="ev-kind">${esc(eventText(e))}</span><time>${m.ago(e.atMs, now)}</time></li>`).join("");
   const turns = (d?.turns ?? []).map((t) => `<li class="turn ${esc(t.state)}"><p class="question">${esc(t.text)}</p>${
-    t.state === "answered" ? `<div class="answer">${esc(t.answer)}</div>` : t.state === "failed" ? `<p class="note bound">No answer: ${esc(t.reason ?? "")}</p>` : `<p class="request-state"><span class="orbit" aria-hidden="true"></span>${t.state === "running" ? "an agent is answering" : "queued, waiting for an agent"}</p>`}</li>`).join("");
+    t.state === "answered" ? `<div class="answer">${esc(t.answer)}</div><p class="note basis">${esc(m.answerBasis(t))}</p>` : t.state === "failed" ? `<p class="note bound">No answer: ${esc(t.reason ?? "")}</p>` : `<p class="request-state"><span class="orbit" aria-hidden="true"></span>${t.state === "running" ? "an agent is answering" : "queued, waiting for an agent"}</p>`}</li>`).join("");
   const started = [...(state.snap.deploys ?? [])].reverse().find((x) => x.app === i.app && x.environment === i.environment && x.seq < i.firstSeq);
   const sources = state.snap.sources.filter((x) => x.app === i.app && x.environment === i.environment);
   const corrections = (d?.corrections ?? []).map((c) => `<li><time>${esc(c.date)}</time>${esc(c.text)}</li>`).join("");
@@ -588,14 +588,17 @@ function briefSheet() {
       <div class="sheet-actions"><button type="button" data-close>Close <kbd>Esc</kbd></button><button type="button" class="primary" data-brief-copy>Copy</button></div>
     </div>`;
   const select = $("[data-brief-audience]");
+  // Choosing an audience asks for its brief; the answer replaces the text only if the owner has not typed since:
+  // an edit made while the request waits is never overwritten by a late template.
+  let placed = "";
   const load = async () => {
     const text = $("[data-brief-text]");
-    text.value = "Loading…";
+    text.value = placed = "Loading…";
     try {
       const b = await call("brief?audience=" + encodeURIComponent(select.value));
-      if (state.overlay === "brief" && select.value === b.audience) text.value = b.text;
+      if (state.overlay === "brief" && select.value === b.audience && text.value === placed) text.value = placed = b.text;
     } catch (e) {
-      text.value = "";
+      if (text.value === placed) text.value = placed = "";
       toast(e.message, "error");
     }
   };
@@ -853,6 +856,9 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("click", (e) => {
   const t = e.target instanceof Element ? e.target : null;
   if (!t) return;
+  const handle = t.closest("[data-handle]");
+  if (handle)
+    return navigator.clipboard.writeText(handle.dataset.handle).then(() => toast(`Copied ${handle.dataset.handle}`, "ok"), (err) => toast(`Copy failed: ${err.message}`, "error"));
   if (t.closest("[data-back]")) {
     state.focus = null;
     render();

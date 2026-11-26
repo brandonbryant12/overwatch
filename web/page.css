@@ -263,7 +263,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .verdict { margin-top: 22px; padding: 16px 18px; border-radius: var(--radius-lg); border: 1px solid var(--border-strong); background: var(--bg-deck); }
 .verdict header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
 .verdict-label { font-size: var(--text-lg); font-weight: 680; letter-spacing: -0.02em; }
-.verdict .votes { color: var(--ink-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+/* The vote count carries the same weight as the verdict word: a 2-of-3 "Real" must not read like a unanimous one. */
+.verdict .votes { color: var(--ink-primary); font-variant-numeric: tabular-nums; }
+.verdict .challenge-word { color: var(--ink-secondary); font-size: var(--text-sm); }
 .verdict.agreed { border-left: 4px solid var(--state-ok); }
 .verdict.agreed[data-verdict="real"] { border-left-color: var(--state-error); }
 .verdict.agreed[data-verdict="real"] .verdict-label { color: var(--state-error); }
@@ -276,6 +278,10 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .verdict.working div { display: grid; }
 .verdict.working span:not(.orbit) { color: var(--ink-secondary); font-size: var(--text-sm); }
 .pill.observed { border-color: var(--cyan); color: var(--cyan); font-size: var(--text-sm); }
+.pill.unobserved { border-style: dashed; border-color: var(--state-warn-border); color: var(--state-warn); font-size: var(--text-sm); }
+.turn .basis { color: var(--ink-muted); font-size: var(--text-sm); margin-top: 4px; }
+button.handle { all: unset; cursor: copy; font-family: var(--font-mono, ui-monospace, monospace); }
+button.handle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 .readings { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
 .reading { display: grid; grid-template-columns: 22px 90px 1fr; gap: 10px; align-items: baseline; font-size: var(--text-sm); }
 .reading .slot { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--border-strong); color: var(--ink-muted); font-variant-numeric: tabular-nums; }

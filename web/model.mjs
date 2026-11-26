@@ -187,5 +187,20 @@ export function verdictView(result) {
   if (c.unsure) parts.push(`${c.unsure} unsure`);
   if (c.missing) parts.push(`${c.missing} did not file`);
   const challenge = result.challenge ? (result.challenge.outcome ? `challenger ${result.challenge.outcome}` : "challenger did not file") : null;
-  return { label, tone, votes: parts.join(" · "), challenge, observed: Boolean(result.observed) };
+  // Negative facts are stated in words: a real verdict telemetry did not confirm, and how many distinct observations
+  // the agreeing readings cited (agreement on one line is one observation).
+  const n = result.observations ?? 0;
+  const evidence = result.verdict !== "real" ? null
+    : result.observed ? `observed in telemetry · ${n} distinct observation${n === 1 ? "" : "s"} cited`
+    : "no telemetry confirmation: code only, not observed";
+  return { label, tone, votes: parts.join(" · "), challenge, observed: Boolean(result.observed), evidence };
 }
+
+/** What stands behind an answer: the responder reads evidence but cites none. */
+export function answerBasis(turn) {
+  const n = turn.reads ?? 0;
+  return n ? `Read ${n} piece${n === 1 ? "" : "s"} of evidence; no evidence cited in the answer` : "No evidence read or cited: unverified";
+}
+
+/** An evidence handle, short for reading; the page keeps the full handle on hover and copy. */
+export const shortHandle = (h) => (typeof h === "string" && h.length > 10 ? `${h.slice(0, 8)}…` : String(h ?? ""));
