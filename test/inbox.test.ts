@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { parseConfig } from "../src/config.ts";
 import { Store, type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
-import { act, afterChange, ask, deadlines, detail, inbox, search } from "../src/inbox.ts";
+import { act, afterChange, ask, deadlines, detail, inbox, keyed, search } from "../src/inbox.ts";
 
 function rig() {
   const dataDir = mkdtempSync(join(tmpdir(), "ow-inbox-test-"));
@@ -68,13 +68,13 @@ test("Later with a time comes back at the delay the owner chose, even with the w
 test("a request key answers the same way forever and refuses a different prompt; continue needs an open job", () => {
   const r = rig();
   const key = "rk_" + "a".repeat(24);
-  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "continue" }, "rk_" + "b".repeat(24)), /no conversation/);
-  const first = ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key);
-  assert.deepEqual(ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key), first);
-  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "other", mode: "auto" }, key), /different request/);
+  assert.throws(() => keyed(r.store, "rk_" + "b".repeat(24), ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "continue" })), /no conversation/);
+  const first = keyed(r.store, key, ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }));
+  assert.deepEqual(keyed(r.store, key, ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" })), first);
+  assert.throws(() => keyed(r.store, key, ask(r.store, r.config, { subject: "inc_1", text: "other", mode: "auto" })), /different request/);
   assert.deepEqual(inbox(r.store).groups.working, ["inc_1"]);
   assert.deepEqual(search(r.store, r.config, "WHY?").items.map((i) => i.id), ["inc_1"]);
-  assert.throws(() => ask(r.store, r.config, { subject: "env:shop/nowhere", text: "x", mode: "auto" }, "rk_" + "c".repeat(24)), /unknown subject/);
+  assert.throws(() => keyed(r.store, "rk_" + "c".repeat(24), ask(r.store, r.config, { subject: "env:shop/nowhere", text: "x", mode: "auto" })), /unknown subject/);
 });
 
 test("undo is fenced: only the current action can be undone, once", () => {

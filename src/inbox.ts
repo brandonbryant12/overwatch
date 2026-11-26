@@ -359,15 +359,14 @@ export function focus(store: Store, config: Config, subject: string) {
 }
 
 /** POST /v2/ask: the redacted intent and its job are durable before the reply; a key answers the same way forever. */
-export function ask(store: Store, config: Config, body: Record<string, unknown>, key: string | undefined) {
-  if (!key || !/^rk_[0-9a-f]{24}$/.test(key)) throw new HttpError(400, "an Idempotency-Key from GET /v2/focus is required");
+export function ask(store: Store, config: Config, body: Record<string, unknown>): Plan<{ jobId: string; target: { subject: string; mode: string; jobId: string } }> {
   const { subject, text, mode } = body;
   if (typeof subject !== "string" || label(store, config, subject) === null) throw new HttpError(400, "unknown subject");
   if (typeof text !== "string" || !text.trim() || text.length > 4000) throw new HttpError(400, "text is required (at most 4,000 characters)");
   if (mode !== "auto" && mode !== "new" && mode !== "continue") throw new HttpError(400, "mode is auto, new or continue");
   const result = (r: { subject: string; job_id: string; mode: string }) => ({ jobId: r.job_id, target: { subject: r.subject, mode: r.mode, jobId: r.job_id } });
   const cleaned = clean(text.trim(), 4000), digest = createHash("sha256").update(JSON.stringify([subject, text, mode])).digest("hex");
-  return receipt(store, key, "ask", subject, { text, mode }, (w) => {
+  return { op: "ask", subject, body: { text, mode }, change: (w, key) => {
     // Decided inside the receipt: a replay answers as the first request did, whatever happened since.
     const open = target(store, subject, config).jobId;
     if (mode === "continue" && !open) throw new HttpError(409, "there is no conversation on this subject that can continue");
@@ -384,7 +383,7 @@ export function ask(store: Store, config: Config, body: Record<string, unknown>,
     // The answer is a work item at the front of the queue: the owner does not wait behind automatic work.
     w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, ask_key, seq) VALUES (?, ?, 'answer', NULL, 0, 'queued', ?, ?)", `wk_${randomBytes(12).toString("hex")}` as Clean, jobId as Clean, key as Clean, seq);
     return result({ subject, job_id: jobId, mode: effective });
-  });
+  } };
 }
 
 /**
@@ -449,7 +448,17 @@ export function announce(w: Writer, store: Store, subject: string, before: strin
  * crash leaves both or neither. The same key with the same subject and body answers the same way forever; any other
  * subject or body is 409.
  */
-export function receipt<T>(store: Store, key: string | undefined, op: string, subject: string, body: unknown, change: (w: Writer) => T): T {
+/**
+ * A keyed owner write, declared by its handler and executed only by the router (keyed()): what it is, about which
+ * subject, with which body, the change, and optionally what to do after the receipt (an outbound step).
+ */
+export interface Plan<T> { op: string; subject: string; body: unknown; change: (w: Writer, key: string) => T; after?: (result: T, key: string) => T | Promise<T> }
+export function keyed<T>(store: Store, key: string | undefined, plan: Plan<T>): T | Promise<T> {
+  const result = receipt(store, key, plan.op, plan.subject, plan.body, (w) => plan.change(w, key!));
+  return plan.after ? plan.after(result, key!) : result;
+}
+
+function receipt<T>(store: Store, key: string | undefined, op: string, subject: string, body: unknown, change: (w: Writer) => T): T {
   if (!key || !/^rk_[0-9a-f]{24}$/.test(key)) throw new HttpError(400, "an Idempotency-Key from GET /v2/focus is required");
   const digest = createHash("sha256").update(JSON.stringify([op, subject, body])).digest("hex");
   return store.tx((w) => {

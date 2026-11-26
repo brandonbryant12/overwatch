@@ -13,7 +13,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, ask, deadlines, detail, focus, HttpError, inbox, rebuild, search } from "./inbox.ts";
+import { act, ask, deadlines, detail, focus, HttpError, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
 import { Agents } from "./agents.ts";
 import { brief } from "./brief.ts";
 import { connect } from "./opencode.ts";
@@ -51,7 +51,6 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     const d = detail(store, config, id);
     return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: fixes.forItem(id), comparison: comparisons(store, config).find((c) => c.incident === id) ?? null };
   };
-  const key = (req: IncomingMessage) => req.headers["idempotency-key"] as string | undefined;
   // The owner's tools in an ordinary OpenCode session call exactly what the page calls.
   tools.owner = {
     exists: async (sessionId) => Boolean(await connect(config.opencode)?.exists(sessionId)),
@@ -128,6 +127,21 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     if (req.method === "GET" && path === "/v2/status") return reply(200, current());
     if (req.method === "GET" && !path.startsWith("/v2/") && path !== "/mcp") return page(path, res);
     try {
+      // Every keyed owner write is declared here, and only here: the router takes the request key and wraps the
+      // handler's change in its receipt (keyed()), so a keyed route cannot write without one.
+      const KEYED: Array<[RegExp, number, (m: string[]) => Plan<any>]> = [
+        [/^\/v2\/ask$/, 200, () => ask(store, config, body)],
+        [/^\/v2\/open$/, 200, () => agents.open(String(body.subject ?? ""))],
+        [/^\/v2\/items\/([^/]+)\/investigate$/, 202, ([id]) => agents.investigate(id!)],
+        [/^\/v2\/items\/([^/]+)\/corrections$/, 200, ([id]) => agents.correct(id!, body)],
+        [/^\/v2\/items\/([^/]+)\/fix$/, 202, ([id]) => fixes.request(id!, body)],
+        [/^\/v2\/fixes\/([^/]+)\/decline$/, 200, ([id]) => fixes.decline(id!)],
+        [/^\/v2\/notifications\/([^/]+)\/retry$/, 200, ([id]) => agents.retry(id!)],
+      ];
+      for (const [route, code, plan] of KEYED) {
+        const m = req.method === "POST" ? route.exec(path) : null;
+        if (m) return reply(code, await keyed(store, req.headers["idempotency-key"] as string | undefined, plan(m.slice(1).map(decodeURIComponent))));
+      }
       if (req.method === "GET" && path === "/v2/inbox") return reply(200, inbox(store));
       if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? "", address.searchParams.get("cursor")));
       if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
@@ -137,21 +151,12 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
         const done = act(store, config, decodeURIComponent(item[1]!), body);
         return reply(200, { ...current(), action: done });
       }
-      if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, key(req)));
-      const own = /^\/v2\/items\/([^/]+)\/(investigate|corrections|fix)$/.exec(path);
-      if (own && req.method === "POST" && own[2] === "fix") return reply(202, fixes.request(decodeURIComponent(own[1]!), body, key(req)));
-      const fix = /^\/v2\/fixes\/([^/]+)(\/decline)?$/.exec(path);
-      if (fix && req.method === "GET" && !fix[2]) return reply(200, fixes.view(decodeURIComponent(fix[1]!)));
-      if (fix && req.method === "POST" && fix[2]) return reply(200, fixes.decline(decodeURIComponent(fix[1]!), key(req)));
-      if (own && req.method === "POST" && own[2] === "investigate") return reply(202, agents.investigate(decodeURIComponent(own[1]!), key(req)));
-      if (own && req.method === "POST") return reply(200, agents.correct(decodeURIComponent(own[1]!), body, key(req)));
+      const fix = /^\/v2\/fixes\/([^/]+)$/.exec(path);
+      if (fix && req.method === "GET") return reply(200, fixes.view(decodeURIComponent(fix[1]!)));
       const jobRoute = /^\/v2\/jobs\/([^/]+)$/.exec(path);
       if (jobRoute && req.method === "GET") return reply(200, agents.job(decodeURIComponent(jobRoute[1]!)));
-      if (req.method === "POST" && path === "/v2/open") return reply(200, await agents.open(String(body.subject ?? ""), key(req)));
       if (req.method === "GET" && path === "/v2/notifications") return reply(200, agents.notifications());
       if (req.method === "GET" && path === "/v2/outlook") return reply(200, { forecasts: forecasts(store, config), comparisons: comparisons(store, config) });
-      const retry = /^\/v2\/notifications\/([^/]+)\/retry$/.exec(path);
-      if (retry && req.method === "POST") return reply(200, agents.retry(decodeURIComponent(retry[1]!), key(req)));
       if (req.method === "GET" && path === "/v2/brief") {
         const q = address.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
         return reply(200, brief(store, config, q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")));

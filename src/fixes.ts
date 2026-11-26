@@ -20,7 +20,7 @@ import { delimiter, dirname, join, posix, resolve } from "node:path";
 import { FORBIDDEN, LIMITS, type Config, type Fixes as Policy } from "./config.ts";
 import { clock } from "./clock.ts";
 import { effect, run as exec } from "./exec.ts";
-import { HttpError, doneByRule, receipt } from "./inbox.ts";
+import { HttpError, doneByRule, type Plan } from "./inbox.ts";
 import { Unavailable } from "./opencode.ts";
 import { clean, errorText, outbound } from "./redact.ts";
 import { json, type Clean, type Permit, type Store, type Writer } from "./store.ts";
@@ -125,10 +125,10 @@ export class Fixes {
   }
 
   /** POST /v2/items/:id/fix: one attempt per (problem, investigation, deployment, policy); a durable decision either way. */
-  request(incident: string, body: Record<string, unknown>, key: string | undefined) {
+  request(incident: string, body: Record<string, unknown>): Plan<{ attemptId: string }> {
     const jobId = typeof body.jobId === "string" ? body.jobId : "";
     admission(this.store, this.config, incident, jobId); // 404 and 409 before a receipt is taken
-    return receipt(this.store, key, "fix", incident, { jobId }, (w) => ({ attemptId: this.admit(w, incident, jobId, "manual") }));
+    return { op: "fix", subject: incident, body: { jobId }, change: (w) => ({ attemptId: this.admit(w, incident, jobId, "manual") }) };
   }
 
   private admit(w: Writer, incident: string, jobId: string, origin: string): string {
@@ -147,14 +147,14 @@ export class Fixes {
   }
 
   /** POST /v2/fixes/:id/decline: the owner's stop. It wins over any worker, and says what already exists on the host. */
-  decline(id: string, key: string | undefined) {
+  decline(id: string): Plan<{ id: string; state: string }> {
     this.row(id);
-    return receipt(this.store, key, "decline", id, {}, (w) => {
+    return { op: "decline", subject: id, body: {}, change: (w) => {
       const row = this.row(id), d = JSON.parse(row.data) as Data;
       if (!["released_quiet", "closed_unmerged", "declined"].includes(row.state))
         this.set(w, row, "declined", `declined by you; nothing more is published or followed.${d.host ? ` On the host: ${d.host}` : ""}`);
       return { id, state: this.row(id).state };
-    });
+    } };
   }
 
   private row(id: string): Row {

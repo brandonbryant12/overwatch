@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Collector, endpoint, IDENTITY } from "../src/collect.ts";
 import { parseConfig, type Source } from "../src/config.ts";
-import { HttpError, receipt } from "../src/inbox.ts";
+import { HttpError, keyed } from "../src/inbox.ts";
 import { Store, type Clean, type Writer } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
 import { snapshot } from "../src/snapshot.ts";
@@ -140,11 +140,11 @@ test("class: a receipt commits with its change or not at all, and a key binds on
       clock.set(Date.UTC(2026, 10, 1), 1e6);
       const first = new Map<number, { subject: number; body: number; result: unknown }>();
       for (const c of calls) {
-        const run = () => receipt(store, keys[c.key], "probe", `s${c.subject}`, { b: c.body }, (w) => {
+        const run = () => keyed(store, keys[c.key], { op: "probe", subject: `s${c.subject}`, body: { b: c.body }, change: (w: Writer) => {
           const seq = w.event("probe", null, { b: c.body });
           if (c.fails) throw new Error("the change failed");
           return { seq };
-        });
+        } });
         const prior = first.get(c.key);
         if (prior && (prior.subject !== c.subject || prior.body !== c.body)) assert.throws(run, (e) => e instanceof HttpError && e.status === 409);
         else if (prior) assert.deepEqual(run(), prior.result);

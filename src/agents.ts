@@ -14,7 +14,7 @@ import { delimiter, join } from "node:path";
 import { LIMITS, type Config } from "./config.ts";
 import { bounded, clock, Expired, sleep } from "./clock.ts";
 import { effect, run as exec } from "./exec.ts";
-import { afterFinding, announce, groupNow, HttpError, label, passed, receipt } from "./inbox.ts";
+import { afterFinding, announce, groupNow, HttpError, label, passed, type Plan } from "./inbox.ts";
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
@@ -439,12 +439,12 @@ export class Agents {
   }
 
   /** POST /v2/items/:id/investigate: explicit, so it works with automatic investigation off; an open one coalesces. */
-  investigate(subject: string, key: string | undefined) {
+  investigate(subject: string): Plan<{ jobId: string; subject: string }> {
     if (!this.store.get("SELECT 1 FROM incidents WHERE id = ?", subject)) throw new HttpError(404, `no item ${subject}`);
-    return receipt(this.store, key, "investigate", subject, {}, (w) => {
+    return { op: "investigate", subject, body: {}, change: (w) => {
       const open = this.store.get<{ id: string }>("SELECT id FROM jobs WHERE kind = 'investigation' AND subject = ? AND state IN ('queued', 'running') ORDER BY created_seq DESC LIMIT 1", subject);
       return { jobId: open?.id ?? queueInvestigation(w, this.store, this.config, subject, "manual"), subject };
-    });
+    } };
   }
 
   /** GET /v2/jobs/:id */
@@ -461,10 +461,12 @@ export class Agents {
    * the session and its seed message before anything is sent; a retry or a concurrent duplicate carries out the
    * same intent (create if the peer lacks it, seed if it lacks the message) and returns the same result.
    */
-  async open(subject: string, key: string | undefined) {
+  open(subject: string): Plan<{ subject: string; sessionId: string; url: string | null; message?: string }> {
     const what = label(this.store, this.config, subject);
     if (what === null) throw new HttpError(404, "no such subject");
-    const intent = receipt(this.store, key, "open", subject, {}, () => ({ subject, sessionId: id("ses"), url: null as string | null, message: id("msg") }));
+    return { op: "open", subject, body: {}, change: () => ({ subject, sessionId: id("ses"), url: null as string | null, message: id("msg") }), after: (intent, key) => this.handoff(subject, what, intent as { subject: string; sessionId: string; url: string | null; message: string }, key) };
+  }
+  private async handoff(subject: string, what: string, intent: { subject: string; sessionId: string; url: string | null; message: string }, key: string) {
     if (intent.url) return { subject, sessionId: intent.sessionId, url: intent.url };
     const oc = connect(this.config.opencode);
     if (!oc) throw new HttpError(503, "OpenCode is not configured and has not registered itself; start it, then try again");
@@ -486,21 +488,19 @@ export class Agents {
   }
 
   /** POST /v2/items/:id/corrections: one dated line in the app's playbook, from a completed investigation. */
-  correct(subject: string, body: Record<string, unknown>, key: string | undefined) {
+  correct(subject: string, body: Record<string, unknown>): Plan<{ app: string; seq: number; jobId: unknown; text: string }> {
     const { jobId, text } = body;
     const job = typeof jobId === "string" ? this.store.get<JobRow>("SELECT * FROM jobs WHERE id = ? AND kind = 'investigation' AND subject = ? AND state = 'completed'", jobId, subject) : undefined;
     if (!this.store.get("SELECT 1 FROM incidents WHERE id = ?", subject)) throw new HttpError(404, `no item ${subject}`);
     if (!job) throw new HttpError(400, "jobId must name a completed investigation of this problem");
     if (typeof text !== "string" || !text.trim() || text.length > 1000) throw new HttpError(400, "text is required (at most 1,000 characters)");
-    const result = receipt(this.store, key, "correct", subject, { jobId, text }, (w) => {
+    return { op: "correct", subject, body: { jobId, text }, change: (w) => {
       const app = this.store.get<{ app: string }>("SELECT app FROM incidents WHERE id = ?", subject)!.app;
       const seq = w.next(), date = new Date(clock.now()).toISOString().slice(0, 10), line = clean(text.trim(), 1000);
       if (w.event("corrected", subject as Clean, { date, seq, app, subject, jobId, text: line }) !== seq) throw new Error("the event log moved during a correction");
       w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (?, ?, ?, ?, ?, ?)", seq, app as Clean, subject as Clean, jobId as Clean, line as Clean, date as Clean);
       return { app, seq, jobId, text: line };
-    });
-    this.playbooks();
-    return result;
+    }, after: (r) => (this.playbooks(), r) };
   }
 
   /** The playbook files, rebuilt from the database (which is authoritative) and replaced whole. */
@@ -522,15 +522,13 @@ export class Agents {
 
   /** GET /v2/notifications */
   /** POST /v2/notifications/:id/retry: the owner sends a parked notice again, in the same group. */
-  retry(id: string, key: string | undefined) {
+  retry(id: string): Plan<{ id: string; requeued: boolean }> {
     if (!this.store.get("SELECT 1 FROM notifications WHERE id = ?", id)) throw new HttpError(404, `no notification ${id}`);
-    const r = receipt(this.store, key, "retry", id, {}, (w) => {
+    return { op: "retry", subject: id, body: {}, change: (w) => {
       const changed = w.run("UPDATE notifications SET state = 'queued', attempts = 0, next_ms = NULL, delay_ms = NULL, reason = NULL WHERE id = ? AND state = 'parked'", id as Clean).changes;
       if (changed) w.event("notification_queued", null, { intent: id, retry: true }, "owner");
       return { id, requeued: changed > 0 };
-    });
-    void this.deliver();
-    return r;
+    }, after: (r) => (void this.deliver(), r) };
   }
 
   notifications() {

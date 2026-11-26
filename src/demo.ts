@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { parseConfig, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
-import { act, afterFinding, ask, hourly } from "./inbox.ts";
+import { act, afterFinding, ask, hourly, keyed } from "./inbox.ts";
 import { adjudicate } from "./agents.ts";
 
 export function demoConfig(port: number): Config {
@@ -111,7 +111,7 @@ export function seedDemo(store: Store, config: Config) {
     const filed = w.event("finding", s("inc_d0c3f00d"), { id: "f_d0c3f00d0000000000000001", verdict: "not_real", demo: true });
     afterFinding(w, store, "inc_d0c3f00d", filed, "not_real");
   });
-  ask(store, config, { subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c1ed9e0000000000000001");
+  keyed(store, "rk_d0c1ed9e0000000000000001", ask(store, config, { subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }));
   investigated(store, TIMEOUT);
   investigated(store, POOL);
   // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, open as a draft.
@@ -123,7 +123,7 @@ export function seedDemo(store: Store, config: Config) {
     w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, previous, deployed, base, candidate, head, diff, data, seq) VALUES ('fx_d0c0db05', 'inc_d0c0db05', ?, 'shop', 'production', 'automatic', 'draft', '9f8e7d6c5b4a', 'a1b2c3d4e5f6', 'c4d5e6f7a8b9', 'e8f9a0b1c2d3', 'e8f9a0b1c2d3', ?, ?, ?)", job as Clean, diff as Clean, json(data), seq);
   });
   // An answered question on the staging warning, as an agent would have answered it.
-  ask(store, config, { subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c3f00d0000000000000002");
+  keyed(store, "rk_d0c3f00d0000000000000002", ask(store, config, { subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }));
   store.tx((w) => {
     const answer = "No. The warm-up has taken 2.0–2.2 s at every start for a month, before and after a1b2c3d; the warning is logged at 2 s.";
     w.run("UPDATE asks SET state = 'answered', session_id = 'ses_d0c3f00d000000000002', answer = ? WHERE key = 'rk_d0c3f00d0000000000000002'", s(answer));

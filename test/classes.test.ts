@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { endpoint, IDENTITY, quietStep } from "../src/collect.ts";
 import { LIMITS, parseConfig, type Source } from "../src/config.ts";
-import { act, ask, deadlines } from "../src/inbox.ts";
+import { act, ask, deadlines, keyed } from "../src/inbox.ts";
 import { num, sample } from "../src/parse.ts";
 import { Full, references, Store, TABLES, json, type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
@@ -86,7 +86,7 @@ test("class: every write passes one admission; when the disk is short nothing is
       const before = store.seq();
       for (const op of ops) {
         const run = () => {
-          if (op === "ask") ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }, "rk_" + "a".repeat(24));
+          if (op === "ask") keyed(store, "rk_" + "a".repeat(24), ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }));
           else if (op === "deadline") {
             store.guard = null;
             act(store, config, "inc_1", { action: "later", untilMs: clock.now() + 1 });
@@ -159,7 +159,7 @@ test("class: a restored copy that breaks any declared reference is refused whole
     // Every reference the schema implies, read from the schema itself: a new table's references are covered without a list.
     fc.property(fc.constantFrom(...REFS.filter(([t, c]) => t !== "citations" && t !== "notifications" && !(t === "work" && c === "run_id"))), (ref) => {
       const { d, store, config } = withIncident();
-      ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }, "rk_" + "b".repeat(24));
+      keyed(store, "rk_" + "b".repeat(24), ask(store, config, { subject: "inc_1", text: "why?", mode: "auto" }));
       store.tx((w) => {
         const seq = w.event("job", null, {});
         w.run("INSERT INTO jobs (id, kind, subject, title, state, reason, created_seq) VALUES ('job_x', 'investigation', 'inc_1', 't', 'completed', NULL, ?)", seq);
@@ -243,4 +243,11 @@ test("build: only src/exec.ts starts a program, and only adapters open a connect
     if (f !== "exec.ts") assert.doesNotMatch(text, /node:child_process|\bspawn\(|\bexecFile\(/, `${f} starts a program outside exec.ts`);
     if (!["opencode.ts", "datadog.ts", "doctor.ts", "main.ts"].includes(f)) assert.doesNotMatch(text, /\bfetch\(/, `${f} opens a connection outside the adapters`);
   }
+});
+
+test("build: the request key is read only by the keyed router, and only keyed() can take a receipt", () => {
+  const src = new URL("../src/", import.meta.url).pathname;
+  const reads = readdirSync(src).filter((n) => n.endsWith(".ts")).flatMap((f) => (readFileSync(join(src, f), "utf8").match(/headers\["idempotency-key"\]/gi) ?? []).map(() => f));
+  assert.deepEqual(reads, ["server.ts"], "a route reads the request key outside the keyed router");
+  assert.doesNotMatch(readFileSync(join(src, "inbox.ts"), "utf8"), /export function receipt/);
 });
