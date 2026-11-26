@@ -139,7 +139,7 @@ export class Agents {
    */
   start(waitMs: number): Promise<void> {
     this.recover();
-    return Promise.race([this.deliver(), sleep(waitMs)]);
+    return Promise.race([this.deliver(true), sleep(waitMs)]);
   }
 
   private recover() {
@@ -155,7 +155,9 @@ export class Agents {
         w.run("UPDATE work SET state = 'queued' WHERE id = ?", work.id as Clean);
         if (work.ask_key) w.run("UPDATE asks SET state = 'queued' WHERE key = ?", work.ask_key as Clean);
       }
-      w.run("UPDATE notifications SET state = 'queued', next_ms = NULL WHERE state = 'sending' OR (state = 'parked' AND reason LIKE 'terminal-notifier is not%')");
+      w.run("UPDATE notifications SET state = 'queued', next_ms = NULL WHERE state = 'sending'");
+      // A notice parked for a missing helper goes again only once the helper is there: nothing to write otherwise.
+      if (helperPath()) w.run("UPDATE notifications SET state = 'queued', next_ms = NULL, reason = NULL WHERE state = 'parked' AND reason LIKE 'terminal-notifier is not%'");
     });
     this.recovered = true;
   }
@@ -508,13 +510,15 @@ export class Agents {
 
   private delivering = false;
   /** Due notifications through terminal-notifier: exit 0 delivers; otherwise again after 60 s, then 300 s, then parked. */
-  private async deliver() {
+  private async deliver(unscheduledOnly = false) {
     if (this.delivering) return;
     this.delivering = true;
     try {
       await sleep(0); // background work: it starts after the pass that found it, never inside that pass's writes
       if (this.store.get("SELECT 1 FROM notifications WHERE state = 'parked' AND reason LIKE 'terminal-notifier is not%'") && helperPath()) this.store.tx((w) => w.run("UPDATE notifications SET state = 'queued', next_ms = NULL, reason = NULL WHERE state = 'parked' AND reason LIKE 'terminal-notifier is not%'"));
       for (const n of this.store.all<{ id: string; title: string; body: string; attempts: number; next_ms: number | null; delay_ms: number | null }>("SELECT * FROM notifications WHERE state = 'queued' ORDER BY cause_seq")) {
+        // At start, only what is due now: a scheduled retry waits for its time on the service's clock.
+        if (n.next_ms !== null && unscheduledOnly) continue;
         if (n.next_ms !== null && !passed(`${n.id}:${n.attempts}`, n.next_ms, n.delay_ms ?? 0, false)) continue;
         const helper = helperPath();
         const attempt = n.attempts + 1;
