@@ -25,6 +25,7 @@ import { secret } from "./exec.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
 import { compare, comparisons, forecasts } from "./outlook.ts";
+import { Fixes } from "./fixes.ts";
 import { Full, trace, type Store } from "./store.ts";
 import { Refusal, Tools } from "./tools.ts";
 import { emptyFolder, reconcile, Trial } from "./trial.ts";
@@ -44,12 +45,15 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const token = config.mcpToken ? await secret(config.mcpToken) : null;
   const current = () => snapshot(store, config, collector, true);
   const agents = new Agents(store, tools, config, empty, options.log);
+  const fixes = new Fixes(store, tools, config, empty, options.log);
+  // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
+  const itemOf = (id: string) => ({ ...detail(store, config, id), fixes: fixes.forItem(id), comparison: comparisons(store, config).find((c) => c.incident === id) ?? null });
   const key = (req: IncomingMessage) => req.headers["idempotency-key"] as string | undefined;
   // The owner's tools in an ordinary OpenCode session call exactly what the page calls.
   tools.owner = {
     exists: async (sessionId) => Boolean(await connect(config.opencode)?.exists(sessionId)),
     inbox: () => inbox(store),
-    get: (id) => detail(store, config, id),
+    get: (id) => itemOf(id),
     search: (text) => search(store, config, text),
     act: (id, body) => ({ ...current(), action: act(store, config, id, body) }),
   };
@@ -64,6 +68,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       store.expire(clock.now());
       deadlines(store);
       if (options.collect) agents.tick(); // the demo contacts nothing
+      if (options.collect) fixes.tick();
       options.tick?.();
     } catch (e) {
       if (!(e instanceof Full)) throw e; // paused for disk: deadlines wait for room like every write
@@ -124,13 +129,17 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? "", address.searchParams.get("cursor")));
       if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
       const item = /^\/v2\/items\/([^/]+)(\/action)?$/.exec(path);
-      if (item && req.method === "GET" && !item[2]) return reply(200, detail(store, config, decodeURIComponent(item[1]!)));
+      if (item && req.method === "GET" && !item[2]) return reply(200, itemOf(decodeURIComponent(item[1]!)));
       if (item && req.method === "POST" && item[2]) {
         const done = act(store, config, decodeURIComponent(item[1]!), body);
         return reply(200, { ...current(), action: done });
       }
       if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, key(req)));
-      const own = /^\/v2\/items\/([^/]+)\/(investigate|corrections)$/.exec(path);
+      const own = /^\/v2\/items\/([^/]+)\/(investigate|corrections|fix)$/.exec(path);
+      if (own && req.method === "POST" && own[2] === "fix") return reply(202, fixes.request(decodeURIComponent(own[1]!), body, key(req)));
+      const fix = /^\/v2\/fixes\/([^/]+)(\/decline)?$/.exec(path);
+      if (fix && req.method === "GET" && !fix[2]) return reply(200, fixes.view(decodeURIComponent(fix[1]!)));
+      if (fix && req.method === "POST" && fix[2]) return reply(200, fixes.decline(decodeURIComponent(fix[1]!), key(req)));
       if (own && req.method === "POST" && own[2] === "investigate") return reply(202, agents.investigate(decodeURIComponent(own[1]!), key(req)));
       if (own && req.method === "POST") return reply(200, agents.correct(decodeURIComponent(own[1]!), body, key(req)));
       const jobRoute = /^\/v2\/jobs\/([^/]+)$/.exec(path);
@@ -168,7 +177,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     if (req.method === "POST" && path === "/v2/doctor") return reply(200, await doctor(config, store, empty));
     if (req.method === "POST" && path === "/v2/trial") {
       try {
-        return reply(200, await trial.run());
+        const report = await trial.run();
+        return reply(200, body.fixes === true ? { ...report, fixGate: await fixes.calibrate(report.automation) } : report);
       } catch (e) {
         return error(503, "unavailable", errorText(e));
       }

@@ -29,9 +29,16 @@ export interface RunContext {
   readonly repo: string | null;
   /** The run's end on the service's monotonic clock: the same value the driver waits on. */
   readonly deadline: number;
-  /** What the run may do: an investigator files a finding, a challenger a challenge, a responder only reads. */
-  readonly role?: "investigator" | "challenger" | "responder";
+  /** What the run may do: an investigator files a finding, a challenger a challenge, a responder only reads, a fixer selects. */
+  readonly role?: "investigator" | "challenger" | "responder" | "fixer";
+  /** A fixer's choices, computed by code: the commits it may revert and the JSON keys it may restore. */
+  readonly options?: Options;
 }
+export interface Options {
+  readonly commits: ReadonlyArray<{ sha: string; subject: string }>;
+  readonly keys: ReadonlyArray<{ path: string; key: string }>;
+}
+export type Proposal = { kind: "revert"; commit: string } | { kind: "setting"; path: string; key: string } | { kind: "abstain" };
 
 /**
  * The owner's own operations, for ordinary OpenCode sessions: the same functions the page calls. `exists` asks the
@@ -92,6 +99,11 @@ export class Tools {
       { name: "ow_code_read", description: "Read lines of a file at the pinned commit.", inputSchema: closed({ path: str, from: int, to: int }, ["path", "from", "to"]) },
       { name: "ow_history", description: "Commits at the pinned commit.", inputSchema: closed({ path: str, ref: str }) },
       { name: "ow_challenge", description: "File the challenge: upheld, disproved or unsure, with a reason and evidence handles you were given.", inputSchema: closed({ outcome: { type: "string", enum: ["upheld", "disproved", "unsure"] }, reason: str, evidence: { type: "array", items: str } }, ["outcome", "reason", "evidence"]) },
+      {
+        name: "ow_proposal",
+        description: "Select exactly one change from the options you were given: {kind:\"revert\", commit} (commit may be left out when there is one), {kind:\"setting\", path, key}, or {kind:\"abstain\"}. You never write the change itself.",
+        inputSchema: { type: "object", properties: { kind: { type: "string", enum: ["revert", "setting", "abstain"] }, commit: str, path: str, key: str }, required: ["kind"], additionalProperties: false },
+      },
       { name: "ow_inbox", description: "The owner's inbox: four groups of problem IDs, as the page shows them.", inputSchema: closed({}) },
       { name: "ow_get", description: "One problem in full: counts, way out, history, findings, investigations, questions.", inputSchema: closed({ id: str }, ["id"]) },
       { name: "ow_search", description: "Literal, case-insensitive search over problems, evidence, findings and questions.", inputSchema: closed({ text: str }, ["text"]) },
@@ -145,6 +157,7 @@ export class Tools {
     const role = context.role ?? "investigator";
     if (name === "ow_finding" && role !== "investigator") throw new Refusal("this session cannot file a finding");
     if (name === "ow_challenge" && role !== "challenger") throw new Refusal("only a challenger files a challenge");
+    if (role === "fixer" ? name !== "ow_telemetry" && name !== "ow_proposal" : name === "ow_proposal") throw new Refusal(role === "fixer" ? "a fixer reads telemetry and files one proposal" : "only a fixer files a proposal");
     switch (name) {
       case "ow_telemetry":
         return this.telemetry(run, context, input);
@@ -156,6 +169,8 @@ export class Tools {
         return this.finding(run, code, input);
       case "ow_challenge":
         return this.challenge(run, code, input);
+      case "ow_proposal":
+        return this.proposal(run, context.options ?? { commits: [], keys: [] }, input);
       default:
         throw new Refusal(`unknown tool ${name}`);
     }
@@ -292,6 +307,36 @@ export class Tools {
     const pieces = this.cite(run, input.evidence);
     const verdict = outcome === "upheld" ? "real" : outcome === "disproved" ? "not_real" : "unsure";
     return this.file(run, code, verdict, [{ statement: clean(input.reason, 2000), pieces }], { challenge: outcome, reason: input.reason });
+  }
+
+  /**
+   * A fixer's one filing: a selection from what code offered, never bytes, a path or a commit of its own. Anything
+   * else is refused and the refusal is the filing: the attempt ends there.
+   */
+  private proposal(run: RunRow, options: Options, input: Record<string, unknown>) {
+    const kind = input.kind;
+    const allowed = kind === "revert" ? ["kind", "commit"] : kind === "setting" ? ["kind", "path", "key"] : ["kind"];
+    let refused: string | null = null, body: Proposal | null = null;
+    const extra = Object.keys(input).find((k) => !allowed.includes(k));
+    if (kind !== "revert" && kind !== "setting" && kind !== "abstain") refused = "kind must be revert, setting or abstain";
+    else if (extra) refused = `a proposal of kind ${kind} has no field ${clean(extra, 40)}: you select a change, you never write one`;
+    else if (kind === "revert") {
+      const commit = input.commit ?? (options.commits.length === 1 ? options.commits[0]!.sha : undefined);
+      if (typeof commit !== "string" || !options.commits.some((c) => c.sha === commit)) refused = `commit must be one of: ${options.commits.map((c) => c.sha).join(", ") || "none offered"}`;
+      else body = { kind, commit };
+    } else if (kind === "setting") {
+      if (!options.keys.some((k) => k.path === input.path && k.key === input.key)) refused = `path and key must be one of: ${options.keys.map((k) => `${k.path} ${k.key}`).join(", ") || "none offered"}`;
+      else body = { kind, path: String(input.path), key: String(input.key) };
+    } else body = { kind: "abstain" };
+    const stored = this.store.tx((w) => {
+      if (w.run("UPDATE runs SET state = 'terminal' WHERE id = ? AND state = 'active'", run.id as Clean).changes === 0) return false;
+      w.run("INSERT INTO proposals (run_id, body, refused) VALUES (?, ?, ?)", run.id as Clean, json(body ?? { kind: "refused", input: JSON.stringify(input).slice(0, 500) }), refused as Clean | null);
+      w.event("proposal", run.id as Clean, { kind: body?.kind ?? null, refused });
+      return true;
+    });
+    if (!stored) throw new Refusal("this proposal session has already filed");
+    if (refused) throw new Refusal(`refused: ${refused}. The attempt has ended.`);
+    return { accepted: body };
   }
 
   private file(run: RunRow, code: Code, verdict: string, claims: ReadonlyArray<{ statement: string; pieces: Piece[] }>, body: Record<string, unknown>) {

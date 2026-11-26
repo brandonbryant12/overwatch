@@ -8,10 +8,10 @@ export interface Result {
 }
 
 /** Runs a program to completion, without a shell, and never throws: a missing program is exit code 127. */
-export function run(command: string, args: ReadonlyArray<string>, options: { cwd?: string; timeoutMs?: number; maxBytes?: number } = {}): Promise<Result> {
+export function run(command: string, args: ReadonlyArray<string>, options: { cwd?: string; timeoutMs?: number; maxBytes?: number; env?: NodeJS.ProcessEnv } = {}): Promise<Result> {
   return new Promise((resolve) => {
     let stdout = "", stderr = "", bytes = 0;
-    const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"], ...(options.env ? { env: { ...process.env, ...options.env } } : {}) });
     const timer = setTimeout(() => child.kill("SIGKILL"), options.timeoutMs ?? 60_000);
     child.stdout.on("data", (chunk: Buffer) => {
       bytes += chunk.length;

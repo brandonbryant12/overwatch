@@ -54,7 +54,7 @@ test("an env: secret is refused before anything is written, and a launchctl refu
   const env = rig("env:OW_MCP_TOKEN");
   const r = env.run("install");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /keychain.*mcpToken/);
+  assert.match(r.stderr, /mcpToken.*security add-generic-password -s overwatch -a NAME -w.*keychain:overwatch\/NAME/s);
   assert.equal(existsSync(env.plist), false);
   assert.deepEqual(env.calls(), []);
   const refused = rig(undefined, "bootstrap|kickstart");

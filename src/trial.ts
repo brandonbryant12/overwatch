@@ -263,6 +263,11 @@ export function approvalKey(config: Config): string {
   return `automation:${createHash("sha256").update(JSON.stringify({ model: config.opencode.model, agent: "ow-investigator", trial: 1 })).digest("hex").slice(0, 32)}`;
 }
 
+/** The fix gate: bound to the model, the fixer's tool and policy revision, and one app's fix policy and verify commands. */
+export function fixGateKey(config: Config, app: string): string {
+  return `fixgate:${createHash("sha256").update(JSON.stringify({ model: config.opencode.model, url: config.opencode.url, agent: "ow-fixer", tools: 1, policy: config.apps[app]?.fixes ?? null })).digest("hex").slice(0, 32)}`;
+}
+
 /**
  * Work that was in flight on another timeline (before a crash or a restore): read the peer's history first, never
  * send again. A job whose session has finished without a filing here is parked with that reason; one never sent is

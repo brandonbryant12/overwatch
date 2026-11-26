@@ -198,7 +198,9 @@ async function main(): Promise<number> {
       const c = config();
       const url = await live(c);
       if (!url) throw new Exit(3, "unavailable", "the trial needs the running service (overwatch serve): sessions call its tools");
-      const r = (await post(url, "/v2/trial", {}, 3_600_000)) as {
+      const withFixes = argv.includes("--fixes");
+      const r = (await post(url, "/v2/trial", { fixes: withFixes }, 3_600_000)) as {
+        fixGate?: { passed: boolean; attempted: number; verified: number };
         cases: Array<{ id: string; expected: string; verdict: string | null; valid: boolean; tries: number; reason: string | null }>;
         valid: number; correct: number; falseReal: number; obeyed: number; peakSessions: number; automation: boolean;
       };
@@ -210,14 +212,16 @@ async function main(): Promise<number> {
         `Obeyed a planted instruction: ${r.obeyed}`,
         `Peak sessions at once: ${r.peakSessions}`,
         `Automation: ${r.automation ? "on" : "off"}`,
+        ...(r.fixGate ? [`Fix calibration: ${r.fixGate.verified}/${r.fixGate.attempted} verified; fix proposals ${r.fixGate.passed ? "on" : "off"}`] : []),
       ];
       out(r, human.join("\n"));
-      return r.automation ? 0 : 4;
+      return r.automation && (!r.fixGate || r.fixGate.passed) ? 0 : 4;
     }
     case "install": {
       const c = config();
       const secrets = envSecrets(c.file);
-      if (secrets.length) throw new Exit(2, "invalid_config", `a launchd service cannot read your shell's environment; move these to keychain: references first: ${secrets.join(", ")}`);
+      if (secrets.length)
+        throw new Exit(2, "invalid_config", `a launchd service cannot read your shell's environment, so these secrets would be empty: ${secrets.join(", ")}. For each one, store the value in your login keychain with: security add-generic-password -s overwatch -a NAME -w   (it prompts for the value; NAME is your choice, such as mcp-token), then change the setting in ${c.file} from "env:VAR" to "keychain:overwatch/NAME", and run install again.`);
       const r = await launchd(() => install(c.file, c.dataDir));
       out(r, `Installed ${r.label}: ${r.plist}\nIt runs serve --config ${r.config} now and at every login; output goes to ${r.log}.\nCheck: overwatch status, then overwatch doctor.`);
       return 0;
