@@ -59,6 +59,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   });
   let lastBeat = clock.mono();
   const beat = setInterval(() => {
+    if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
     if (clock.mono() - lastBeat < HEARTBEAT_MS) return;
     lastBeat = clock.mono();
     for (const res of streams) send(res, "heartbeat", { seq: store.seq(), atMs: clock.now() });

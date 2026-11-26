@@ -36,6 +36,9 @@ export interface Piece {
 
 export class Refusal extends Error {}
 
+/** Pieces one telemetry call returns at most. */
+const PAGE = 50;
+
 interface RunRow {
   id: string;
   session_id: string;
@@ -153,7 +156,9 @@ export class Tools {
     if (input.query !== undefined && typeof input.query !== "string") throw new Refusal("query must be text");
     const query = input.query as string | undefined;
     const lines = context.telemetry[source]!.filter((l) => (since === null || l.at >= since) && (until === null || l.at <= until) && (!query || l.text.includes(query)));
-    return this.deliver(run, source, lines.map((l) => `${new Date(l.at).toISOString()} ${l.text}`));
+    // One page per call, oldest first: narrow with since, until or query to read further.
+    const page = this.deliver(run, source, lines.slice(0, PAGE).map((l) => `${new Date(l.at).toISOString()} ${l.text}`));
+    return { pieces: page.pieces, truncated: page.truncated || lines.length > PAGE };
   }
 
   private async code(run: RunRow, context: RunContext, code: Code, name: string, input: Record<string, unknown>) {

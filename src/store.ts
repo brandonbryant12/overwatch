@@ -319,7 +319,9 @@ export class Store {
           for (const t of TABLES) {
             const placeholders = t.columns.map(() => "?").join(", ");
             const insert = `INSERT INTO ${t.name} (${t.columns.join(", ")}) VALUES (${placeholders})`;
-            for (const row of backup.prepare(`SELECT ${t.columns.map((c) => `"${c}"`).join(", ")} FROM main."${t.name}"`).iterate() as Iterable<Record<string, unknown>>) {
+            // The statement is held for the whole loop: Node may finalize an unreferenced one mid-iteration.
+            const select = backup.prepare(`SELECT ${t.columns.map((c) => `"${c}"`).join(", ")} FROM main."${t.name}"`);
+            for (const row of select.iterate() as Iterable<Record<string, unknown>>) {
               w.run(insert, ...t.columns.map((c) => valueOf(row[c], t.json?.includes(c) ?? false)));
             }
           }

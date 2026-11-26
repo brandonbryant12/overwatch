@@ -64,11 +64,11 @@ async function seedRepository(): Promise<{ repo: string; commit: string }> {
   const repo = mkdtempSync(join(tmpdir(), "overwatch-trial-"));
   const git = (...args: string[]) => exec("git", ["-C", repo, "-c", "user.name=Overwatch trial", "-c", "user.email=trial@localhost", "-c", "commit.gpgsign=false", ...args]);
   await git("init", "-q");
-  writeFileSync(join(repo, "main.txt"), "service = checkout\ntimeout = 300\n");
+  writeFileSync(join(repo, "main.txt"), "timeout = 300\nservice = checkout\n");
   await git("add", "main.txt");
   await git("commit", "-qm", "lower the payments timeout");
   const commit = (await git("rev-parse", "HEAD")).stdout.trim();
-  writeFileSync(join(repo, "main.txt"), "service = checkout\ntimeout = 3000\n");
+  writeFileSync(join(repo, "main.txt"), "timeout = 3000\nservice = checkout\n");
   await git("add", "main.txt");
   return { repo, commit };
 }
