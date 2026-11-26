@@ -85,3 +85,16 @@ test("class: a cell is never shown as measured once any expected reading is olde
     }),
   );
 });
+
+test("class: an investigation looks agreed only when every planned reading filed the same standing verdict", () => {
+  const v = fc.constantFrom("real", "not_real", "unsure");
+  fc.assert(
+    fc.property(v, fc.integer({ min: 1, max: 3 }), fc.nat(3), fc.nat(3), fc.nat(3), fc.option(fc.constantFrom("upheld", "disproved", "unsure", null), { nil: undefined }), (verdict, planned, real, notReal, unsure, outcome) => {
+      const missing = Math.max(0, planned - real - notReal - unsure);
+      const result = { verdict, planned, counts: { real, not_real: notReal, unsure, missing }, challenge: outcome === undefined ? null : { outcome }, observed: false };
+      const view = m.verdictView(result);
+      if (verdict === "unsure") assert.equal(view.tone, "undecided");
+      if (view.tone === "agreed") assert.ok(Math.max(real, notReal, unsure) === planned && missing === 0 && outcome !== "disproved");
+    }),
+  );
+});

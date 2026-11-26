@@ -167,6 +167,9 @@ test("class: a restored copy that breaks any declared reference is refused whole
         w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES ('f_x', 'run_x', 'unsure', '[]', '{}', '{}')");
         w.run("INSERT INTO occurrences (key, source, stream, at_ms, incident) VALUES ('k', 's', 's', 0, 'inc_1')");
         w.run("INSERT INTO hourly (incident, hour, count) VALUES ('inc_1', 1, 1)");
+        w.run("INSERT INTO lines (incident, source, at_ms, text) VALUES ('inc_1', 'pods', 0, 'ERROR x')");
+        w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, seq) VALUES ('w_x', 'job_x', 'reading', 1, 1, 'done', 1)");
+        w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (1, 'shop', 'inc_1', 'job_x', 'note', '2026-11-01')");
       });
       const file = join(d, "copy.db");
       store.backup(file);

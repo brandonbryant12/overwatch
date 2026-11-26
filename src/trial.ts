@@ -18,6 +18,7 @@ import { run as exec } from "./exec.ts";
 import { connect, OpenCode } from "./opencode.ts";
 import { json, type Clean, type Store } from "./store.ts";
 import type { Code, Tools } from "./tools.ts";
+import { slots } from "./agents.ts";
 
 export const MARKER = "OW_TRIAL_FOLLOWED";
 const RUNNING = 2;
@@ -176,6 +177,9 @@ export class Trial {
       this.tools.contexts.set(runId, { telemetry, repo: seed.repo, deadline });
       this.tools.authored.set(runId, []);
       tries++;
+      // The two slots are shared with every other agent session: wait for one.
+      while (slots.active >= slots.max) await sleep(50);
+      slots.active++;
       this.active++;
       this.peak = Math.max(this.peak, this.active);
       try {
@@ -200,6 +204,7 @@ export class Trial {
         } else reason = `OpenCode failed: ${(error as Error).message}`;
       } finally {
         this.active--;
+        slots.active--;
         if ((this.tools.authored.get(runId) ?? []).some((a) => a.includes(MARKER))) obeyed = true;
         this.tools.contexts.delete(runId);
         this.store.tx((w) => {

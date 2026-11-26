@@ -14,6 +14,9 @@ import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act, ask, deadlines, detail, focus, HttpError, inbox, rebuild, search } from "./inbox.ts";
+import { Agents } from "./agents.ts";
+import { brief } from "./brief.ts";
+import { connect } from "./opencode.ts";
 import type { Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { Collector } from "./collect.ts";
@@ -39,8 +42,18 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const trial = new Trial(store, tools, config, empty);
   const token = config.mcpToken ? await secret(config.mcpToken) : null;
   const current = () => snapshot(store, config, collector, true);
+  const agents = new Agents(store, tools, config, empty, options.log);
+  const key = (req: IncomingMessage) => req.headers["idempotency-key"] as string | undefined;
+  // The owner's tools in an ordinary OpenCode session call exactly what the page calls.
+  tools.owner = {
+    exists: async (sessionId) => Boolean(await connect(config.opencode)?.exists(sessionId)),
+    inbox: () => inbox(store),
+    get: (id) => detail(store, config, id),
+    search: (text) => search(store, config, text),
+    act: (id, body) => ({ ...current(), action: act(store, config, id, body) }),
+  };
 
-  /** One scheduler pass: reconcile work from another timeline, then collect what is due. */
+  /** One scheduler pass: reconcile work from another timeline, collect what is due, then give agents their work. */
   rebuild(store);
   const pass = async () => {
     await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
@@ -48,6 +61,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     try {
       store.expire(clock.now());
       deadlines(store);
+      if (options.collect) agents.tick(); // the demo contacts nothing
       options.tick?.();
     } catch (e) {
       if (!(e instanceof Full)) throw e; // paused for disk: deadlines wait for room like every write
@@ -113,9 +127,20 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
         const done = act(store, config, decodeURIComponent(item[1]!), body);
         return reply(200, { ...current(), action: done });
       }
-      if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, req.headers["idempotency-key"] as string | undefined));
+      if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, key(req)));
+      const own = /^\/v2\/items\/([^/]+)\/(investigate|corrections)$/.exec(path);
+      if (own && req.method === "POST" && own[2] === "investigate") return reply(202, agents.investigate(decodeURIComponent(own[1]!), key(req)));
+      if (own && req.method === "POST") return reply(200, agents.correct(decodeURIComponent(own[1]!), body, key(req)));
+      const jobRoute = /^\/v2\/jobs\/([^/]+)$/.exec(path);
+      if (jobRoute && req.method === "GET") return reply(200, agents.job(decodeURIComponent(jobRoute[1]!)));
+      if (req.method === "POST" && path === "/v2/open") return reply(200, await agents.open(String(body.subject ?? ""), key(req)));
+      if (req.method === "GET" && path === "/v2/notifications") return reply(200, agents.notifications());
+      if (req.method === "GET" && path === "/v2/brief") {
+        const q = address.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
+        return reply(200, brief(store, config, q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")));
+      }
     } catch (e) {
-      if (e instanceof HttpError) return error(e.status, e.status === 404 ? "not_found" : e.status === 409 ? "conflict" : "bad_request", errorText(e));
+      if (e instanceof HttpError) return error(e.status, ({ 404: "not_found", 409: "conflict", 503: "unavailable" } as Record<number, string>)[e.status] ?? "bad_request", errorText(e));
       if (e instanceof Full) return error(503, "paused", "collection is paused for disk space; see pausedFix in status");
       throw e;
     }
@@ -174,8 +199,9 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
         const value = await tools.call(params._meta?.["ai.opencode/sessionID"], String(params.name ?? ""), params.arguments ?? {});
         return ok({ content: [{ type: "text", text: JSON.stringify(value) }] });
       } catch (e) {
-        const message = e instanceof Refusal ? errorText(e, 30_000) : "the tool failed";
-        if (!(e instanceof Refusal)) options.log(`tool ${params.name}: ${errorText(e)}`);
+        const known = e instanceof Refusal || e instanceof HttpError;
+        const message = known ? errorText(e, 30_000) : "the tool failed";
+        if (!known) options.log(`tool ${params.name}: ${errorText(e)}`);
         return ok({ content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true });
       }
     }

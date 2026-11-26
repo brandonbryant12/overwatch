@@ -90,15 +90,19 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   {
     name: "jobs",
     ddl: `CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, title TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('queued','running','completed','parked')), reason TEXT, created_seq INTEGER NOT NULL)`,
-    columns: ["id", "kind", "subject", "title", "state", "reason", "created_seq"],
+      state TEXT NOT NULL CHECK (state IN ('queued','running','completed','parked')), reason TEXT, created_seq INTEGER NOT NULL,
+      inputs TEXT CHECK (inputs IS NULL OR json_valid(inputs)), result TEXT CHECK (result IS NULL OR json_valid(result)), attribution TEXT,
+      closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0,1)))`,
+    columns: ["id", "kind", "subject", "title", "state", "reason", "created_seq", "inputs", "result", "attribution", "closed"],
+    json: ["inputs", "result"],
   },
   {
     name: "runs",
     ddl: `CREATE TABLE runs (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL CHECK (attempt >= 1),
       session_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK (state IN ('active','terminal')), calls INTEGER NOT NULL DEFAULT 0 CHECK (calls >= 0),
-      code TEXT NOT NULL CHECK (json_valid(code)), started_ms INTEGER NOT NULL, UNIQUE (job_id, attempt))`,
-    columns: ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms"],
+      code TEXT NOT NULL CHECK (json_valid(code)), started_ms INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'reader', slot INTEGER, work_id TEXT,
+      UNIQUE (job_id, attempt))`,
+    columns: ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms", "role", "slot", "work_id"],
     json: ["code"],
   },
   {
@@ -120,8 +124,42 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
   {
     name: "asks",
     ddl: `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')),
-      text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL)`,
-    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq"],
+      text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT)`,
+    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason"],
+  },
+  {
+    // Agent work, one item per reading, challenge or answer: the queue the two slots take from, owner questions first.
+    name: "work",
+    ddl: `CREATE TABLE work (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), kind TEXT NOT NULL CHECK (kind IN ('reading','challenge','answer')),
+      slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0,
+      ask_key TEXT, run_id TEXT, reason TEXT, seq INTEGER NOT NULL)`,
+    columns: ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"],
+  },
+  {
+    // Idempotent owner requests (investigate, open, correct): the key binds to the operation and its payload.
+    name: "requests",
+    ddl: `CREATE TABLE requests (key TEXT PRIMARY KEY, op TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL CHECK (json_valid(result)))`,
+    columns: ["key", "op", "digest", "result"],
+    json: ["result"],
+  },
+  {
+    name: "corrections",
+    ddl: `CREATE TABLE corrections (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), text TEXT NOT NULL, date TEXT NOT NULL)`,
+    columns: ["seq", "app", "subject", "job_id", "text", "date"],
+  },
+  {
+    name: "notifications",
+    ddl: `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL, cause_seq INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER,
+      reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`,
+    columns: ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"],
+  },
+  {
+    // The latest lines of each problem (cleaned), what an investigation reads as telemetry.
+    name: "lines",
+    ddl: `CREATE TABLE lines (incident TEXT NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, text TEXT NOT NULL)`,
+    columns: ["incident", "source", "at_ms", "text"],
   },
   {
     name: "findings",
@@ -146,10 +184,12 @@ CREATE INDEX IF NOT EXISTS occurrences_stream ON occurrences (stream, at_ms);
 CREATE INDEX IF NOT EXISTS coverage_recent ON coverage (source, reading, id);
 CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment);
 CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour);
-CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);`;
+CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);
+CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms);
+CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq);`;
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
-const ADDED_TABLES = new Set(["hourly", "asks", "citations"]);
+const ADDED_TABLES = new Set(["hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
 
 /** Rules kept by the database itself; created with the schema and on open of an older file. */
 const TRIGGERS = `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
@@ -186,6 +226,17 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["incidents", "returned", "returned TEXT CHECK (returned IS NULL OR json_valid(returned))"],
   ["incidents", "seen_seq", "seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0)"],
   ["incidents", "first_seq", "first_seq INTEGER NOT NULL DEFAULT 0"],
+  ["jobs", "inputs", "inputs TEXT CHECK (inputs IS NULL OR json_valid(inputs))"],
+  ["jobs", "result", "result TEXT CHECK (result IS NULL OR json_valid(result))"],
+  ["jobs", "attribution", "attribution TEXT"],
+  ["jobs", "closed", "closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0,1))"],
+  ["runs", "role", "role TEXT NOT NULL DEFAULT 'reader'"],
+  ["runs", "slot", "slot INTEGER"],
+  ["runs", "work_id", "work_id TEXT"],
+  ["asks", "state", "state TEXT NOT NULL DEFAULT 'queued'"],
+  ["asks", "session_id", "session_id TEXT"],
+  ["asks", "answer", "answer TEXT"],
+  ["asks", "reason", "reason TEXT"],
   ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
 ];
 
@@ -203,6 +254,9 @@ export const REFERENCES: ReadonlyArray<[table: string, column: string, parent: s
   ["occurrences", "incident", "incidents", "id"],
   ["hourly", "incident", "incidents", "id"],
   ["asks", "job_id", "jobs", "id"],
+  ["work", "job_id", "jobs", "id"],
+  ["corrections", "job_id", "jobs", "id"],
+  ["lines", "incident", "incidents", "id"],
 ];
 
 /**
@@ -544,6 +598,7 @@ export class Store {
       `DELETE FROM messages WHERE run_id IN (${old(14, false)})`,
       `DELETE FROM coverage WHERE to_ms < ${now - 30 * day}`,
       `DELETE FROM hourly WHERE hour < ${Math.floor((now - 30 * day) / 3_600_000)}`,
+      `DELETE FROM lines WHERE at_ms < ${now - 30 * day}`,
     ];
     const any = due.some((sql) => this.get(sql.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1") !== undefined);
     if (!any) return 0;

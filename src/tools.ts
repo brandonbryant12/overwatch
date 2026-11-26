@@ -28,7 +28,22 @@ export interface RunContext {
   readonly repo: string | null;
   /** The run's end on the service's monotonic clock: the same value the driver waits on. */
   readonly deadline: number;
+  /** What the run may do: an investigator files a finding, a challenger a challenge, a responder only reads. */
+  readonly role?: "investigator" | "challenger" | "responder";
 }
+
+/**
+ * The owner's own operations, for ordinary OpenCode sessions: the same functions the page calls. `exists` asks the
+ * OpenCode peer whether a session is there; a session Overwatch runs (any role, even retired) is never an owner.
+ */
+export interface Owner {
+  exists(sessionId: string): Promise<boolean>;
+  inbox(): unknown;
+  get(id: string): unknown;
+  search(text: string): unknown;
+  act(id: string, body: Record<string, unknown>): unknown;
+}
+const OWNER_TOOLS = ["ow_inbox", "ow_get", "ow_search", "ow_act"];
 
 export interface Piece {
   readonly handle: string;
@@ -58,6 +73,7 @@ export class Tools {
   readonly authored = new Map<string, string[]>();
 
   private readonly store: Store;
+  owner: Owner | null = null;
   constructor(store: Store) {
     this.store = store;
   }
@@ -74,6 +90,15 @@ export class Tools {
       { name: "ow_code_search", description: "Search the pinned commit for literal text.", inputSchema: closed({ pattern: str, path: str }, ["pattern"]) },
       { name: "ow_code_read", description: "Read lines of a file at the pinned commit.", inputSchema: closed({ path: str, from: int, to: int }, ["path", "from", "to"]) },
       { name: "ow_history", description: "Commits at the pinned commit.", inputSchema: closed({ path: str, ref: str }) },
+      { name: "ow_challenge", description: "File the challenge: upheld, disproved or unsure, with a reason and evidence handles you were given.", inputSchema: closed({ outcome: { type: "string", enum: ["upheld", "disproved", "unsure"] }, reason: str, evidence: { type: "array", items: str } }, ["outcome", "reason", "evidence"]) },
+      { name: "ow_inbox", description: "The owner's inbox: four groups of problem IDs, as the page shows them.", inputSchema: closed({}) },
+      { name: "ow_get", description: "One problem in full: counts, way out, history, findings, investigations, questions.", inputSchema: closed({ id: str }, ["id"]) },
+      { name: "ow_search", description: "Literal, case-insensitive search over problems, evidence, findings and questions.", inputSchema: closed({ text: str }, ["text"]) },
+      {
+        name: "ow_act",
+        description: "Put a problem away (done, later, never), undo the current way out (with its actionSeq), or mark it seen. Confirm with the owner first.",
+        inputSchema: closed({ id: str, action: { type: "string", enum: ["done", "later", "never", "undo", "seen"] }, until: int, when: str, reason: str, actionSeq: int, throughSeq: int }, ["id", "action"]),
+      },
       {
         name: "ow_finding",
         description: "File the finding. Each claim cites evidence handles you were given.",
@@ -96,9 +121,14 @@ export class Tools {
     ];
   }
 
+  private ownerCall(sessionId: string, name: string, input: Record<string, unknown>) {
+    return ownerCall.call(this, this.store, sessionId, name, input);
+  }
+
   /** One tool call. Counts toward the run's budget whether it succeeds or not. */
   async call(sessionId: unknown, name: string, args: unknown): Promise<unknown> {
     if (typeof sessionId !== "string" || !sessionId) throw new Refusal("the call carries no OpenCode session id");
+    if (OWNER_TOOLS.includes(name)) return this.ownerCall(sessionId, name, object(args, name));
     const run = this.store.get<RunRow>("SELECT id, session_id, state, calls, code FROM runs WHERE session_id = ?", sessionId);
     const context = run ? this.contexts.get(run.id) : undefined;
     if (!run || run.state !== "active" || !context) throw new Refusal("this session has no active Overwatch investigation");
@@ -111,6 +141,9 @@ export class Tools {
     });
     const input = object(args, name);
     const code = JSON.parse(run.code) as Code;
+    const role = context.role ?? "investigator";
+    if (name === "ow_finding" && role !== "investigator") throw new Refusal("this session cannot file a finding");
+    if (name === "ow_challenge" && role !== "challenger") throw new Refusal("only a challenger files a challenge");
     switch (name) {
       case "ow_telemetry":
         return this.telemetry(run, context, input);
@@ -120,6 +153,8 @@ export class Tools {
         return { ...(await this.code(run, context, code, name, input)), code };
       case "ow_finding":
         return this.finding(run, code, input);
+      case "ow_challenge":
+        return this.challenge(run, code, input);
       default:
         throw new Refusal(`unknown tool ${name}`);
     }
@@ -217,23 +252,47 @@ export class Tools {
     for (const key of ["cause", "next_check", "impact", "status"]) if (typeof input[key] !== "string") throw new Refusal(`${key} must be text`);
     for (const key of ["ruled_out", "not_checked", "affected"]) if (!Array.isArray(input[key]) || (input[key] as unknown[]).some((v) => typeof v !== "string")) throw new Refusal(`${key} must be a list of text`);
     if (input.since !== null && !Number.isSafeInteger(input.since)) throw new Refusal("since must be a time in epoch milliseconds or null");
-    const valid = this.store.all<Piece>("SELECT handle, source, text FROM evidence WHERE run_id = ? ORDER BY rowid", run.id);
-    const byHandle = new Map(valid.map((p) => [p.handle, p]));
-    const refuse = (why: string) => new Refusal(`${why}. Handles you may cite: ${valid.map((p) => p.handle).join(", ") || "none yet; call ow_telemetry first"}`);
+    const refuse = this.refuser(run);
     if (!Array.isArray(input.claims) || input.claims.length === 0) throw refuse("claims must list at least one claim");
     const claims = input.claims.map((c) => {
       const claim = object(c, "a claim");
       if (Object.keys(claim).some((k) => k !== "statement" && k !== "evidence")) throw refuse("a claim has only a statement and evidence handles");
       if (typeof claim.statement !== "string" || !Array.isArray(claim.evidence) || claim.evidence.length === 0) throw refuse("each claim needs a statement and at least one evidence handle");
-      const pieces = claim.evidence.map((h) => {
-        const piece = typeof h === "string" ? byHandle.get(h) : undefined;
-        if (!piece) throw refuse("a cited handle was not delivered to this investigation");
-        return { handle: piece.handle, source: piece.source, text: piece.text };
-      });
-      return { statement: clean(claim.statement, 2000), pieces };
+      return { statement: clean(claim.statement, 2000), pieces: this.cite(run, claim.evidence) };
     });
-    const id = `f_${randomBytes(12).toString("hex")}`;
     const body = Object.fromEntries(FINDING_KEYS.filter((k) => k !== "claims" && k !== "verdict").map((k) => [k, input[k]]));
+    return this.file(run, code, String(input.verdict), claims, body);
+  }
+
+  private refuser(run: RunRow) {
+    const valid = this.store.all<Piece>("SELECT handle FROM evidence WHERE run_id = ? ORDER BY rowid", run.id);
+    return (why: string) => new Refusal(`${why}. Handles you may cite: ${valid.map((p) => p.handle).join(", ") || "none yet; call ow_telemetry first"}`);
+  }
+
+  /** The stored pieces for handles delivered to this run; any other handle refuses the whole filing. */
+  private cite(run: RunRow, handles: ReadonlyArray<unknown>): Piece[] {
+    return handles.map((h) => {
+      const piece = typeof h === "string" ? this.store.get<Piece>("SELECT handle, source, text FROM evidence WHERE run_id = ? AND handle = ?", run.id, h) : undefined;
+      if (!piece) throw this.refuser(run)("a cited handle was not delivered to this session");
+      return { handle: piece.handle, source: piece.source, text: piece.text };
+    });
+  }
+
+  /** A challenger's one filing: an outcome, a reason and its own evidence, stored as a finding of its run. */
+  private challenge(run: RunRow, code: Code, input: Record<string, unknown>) {
+    only(input, ["outcome", "reason", "evidence"]);
+    const outcome = input.outcome;
+    if (outcome !== "upheld" && outcome !== "disproved" && outcome !== "unsure") throw new Refusal("outcome must be upheld, disproved or unsure");
+    if (typeof input.reason !== "string" || !input.reason.trim()) throw new Refusal("reason must be text");
+    if (!Array.isArray(input.evidence) || input.evidence.length === 0) throw this.refuser(run)("evidence must list at least one handle");
+    const pieces = this.cite(run, input.evidence);
+    const verdict = outcome === "upheld" ? "real" : outcome === "disproved" ? "not_real" : "unsure";
+    return this.file(run, code, verdict, [{ statement: clean(input.reason, 2000), pieces }], { challenge: outcome, reason: input.reason });
+  }
+
+  private file(run: RunRow, code: Code, verdict: string, claims: ReadonlyArray<{ statement: string; pieces: Piece[] }>, body: Record<string, unknown>) {
+    const id = `f_${randomBytes(12).toString("hex")}`;
+    const input = { verdict };
     // One valid filing closes the attempt, atomically with the finding.
     const closed = this.store.tx((w) => {
       const done = w.run("UPDATE runs SET state = 'terminal' WHERE id = ? AND state = 'active'", run.id as Clean).changes;
@@ -242,13 +301,30 @@ export class Tools {
       // The finding is an event about what was investigated; on real work it may bring that problem back.
       const job = this.store.get<{ subject: string; kind: string }>("SELECT j.subject, j.kind FROM runs r JOIN jobs j ON j.id = r.job_id WHERE r.id = ?", run.id)!;
       const seq = w.event("finding", (job.kind === "trial" ? run.id : job.subject) as Clean, { id, run: run.id, verdict: input.verdict });
-      if (job.kind !== "trial") afterFinding(w, this.store, job.subject, seq, String(input.verdict));
+      // An investigation's readings are votes: only its single adjudication can bring the problem back.
+      if (job.kind !== "trial" && job.kind !== "investigation") afterFinding(w, this.store, job.subject, seq, String(input.verdict));
       return true;
     });
     if (!closed) throw new Refusal("this investigation has already been closed");
     const stored = this.store.get<{ claims: string }>("SELECT claims FROM findings WHERE id = ?", id)!;
     return { id, verdict: input.verdict, claims: JSON.parse(stored.claims), code };
   }
+}
+
+/** The owner tools, for a session OpenCode confirms and Overwatch does not run. */
+async function ownerCall(this: Tools, store: Store, sessionId: string, name: string, input: Record<string, unknown>) {
+  if (store.get("SELECT 1 FROM runs WHERE session_id = ?", sessionId)) throw new Refusal("this session is run by Overwatch; owner tools are for the owner's own sessions");
+  if (!this.owner || !(await this.owner.exists(sessionId))) throw new Refusal("OpenCode does not know this session");
+  const text = (v: unknown, what: string) => {
+    if (typeof v !== "string" || !v) throw new Refusal(`${what} is required`);
+    return v;
+  };
+  if (name === "ow_inbox") return only(input, []), this.owner.inbox();
+  if (name === "ow_get") return only(input, ["id"]), this.owner.get(text(input.id, "id"));
+  if (name === "ow_search") return only(input, ["text"]), this.owner.search(text(input.text, "text"));
+  only(input, ["id", "action", "until", "when", "reason", "actionSeq", "throughSeq"]);
+  const { id, until, ...rest } = input;
+  return this.owner.act(text(id, "id"), { ...rest, ...(until === undefined ? {} : { untilMs: until }) });
 }
 
 function object(value: unknown, what: string): Record<string, unknown> {

@@ -26,6 +26,7 @@ export const LIMITS = {
   databaseBudgetBytes: 1024 ** 3,
   reclaimBytes: 16 * 1024 ** 2,
   quietIntervals: 3,
+  linesPerProblem: 200,
   pieceBytes: 16_384,
   piecesPerSession: 400,
   toolCallsPerRun: 8,

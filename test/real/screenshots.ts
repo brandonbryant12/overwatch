@@ -81,6 +81,13 @@ try {
     await key("j");
     await shot(`desktop-${theme}-focused`);
     if (theme === "dark") {
+      await key("y");
+      await shot("desktop-dark-was-this-right");
+      await key("Escape");
+      await key("b");
+      await sleep(400);
+      await shot("desktop-dark-brief");
+      await key("Escape");
       await key("j");
       await shot("desktop-dark-returned");
       await evaluate("document.querySelector('[data-toggle=working]').click(); document.querySelector('[data-toggle=quiet]').click(); true");

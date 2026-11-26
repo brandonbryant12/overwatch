@@ -22,7 +22,9 @@ import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
 import { Full, type Clean, type Store, type Writer } from "./store.ts";
 import { sample, UNMEASURED, type Sample } from "./parse.ts";
-import { afterChange, afterDeploy, hourly } from "./inbox.ts";
+import { afterChange, afterDeploy, groupNow, hourly } from "./inbox.ts";
+import { announce, queueInvestigation } from "./agents.ts";
+import { approvalKey } from "./trial.ts";
 
 const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -91,7 +93,7 @@ export function hysteresis(rule: { over: number; samples: number }, state: Hyste
  * passed over before it is charged, so a replay can never use up the room a fresh record needs.
  */
 export class Slice {
-  readonly admitted: Array<{ key: string; stream: string; at: number; bucket: string }> = [];
+  readonly admitted: Array<{ key: string; stream: string; at: number; bucket: string; text: string }> = [];
   readonly buckets = new Map<string, Bucket>();
   readonly baselines: Array<{ key: string; count: number; bucket: string }> = [];
   readonly readings = new Map<string, Reading>();
@@ -131,7 +133,7 @@ export class Slice {
   }
 
   /** One occurrence. Past the limit it is not admitted, and its problem's count becomes a lower bound. */
-  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: Severity, reading = "logs") {
+  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: Severity, reading = "logs", text = title) {
     if (!within(this.span, at) || this.saturated.some((s) => within(s, at))) return;
     if (this.keys.has(key) || this.known(key)) return;
     this.keys.add(key);
@@ -140,7 +142,7 @@ export class Slice {
       this.buckets.get(bucket)!.inexact = true;
       return;
     }
-    this.admitted.push({ key, stream, at, bucket });
+    this.admitted.push({ key, stream, at, bucket, text: text.slice(0, 4000) });
   }
 
   /**
@@ -349,7 +351,7 @@ export class Collector {
     const worse = (s: Reading["state"]) => {
       if (order.indexOf(s) > order.indexOf(state.state)) state = { state: s, missed: null };
     };
-    type Line = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn" };
+    type Line = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn"; text: string };
     const reads: Array<{ uid: string; container: string; identity: string; lines: Line[] }> = [];
     for (const pod of before.slice(0, LIMITS.podsPerSource)) {
       for (const container of pod.containers) {
@@ -374,7 +376,7 @@ export class Collector {
             ordinals.set(stamp + digest, ordinal + 1);
             const key = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
             seen.add(key);
-            lines.push({ key, stream, at, ...p });
+            lines.push({ key, stream, at, ...p, text });
           });
           if (read.code !== 0) {
             if (instance.previous && /previous terminated container|not found/i.test(read.stderr)) worse("gap");
@@ -404,7 +406,7 @@ export class Collector {
         for (const x of r.lines) slice.unsure(x.fingerprint, x.title, x.severity, "logs");
         continue;
       }
-      for (const x of r.lines) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity);
+      for (const x of r.lines) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity, "logs", x.text);
     }
     if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice };
     slice.readings.set("logs", state);
@@ -466,7 +468,7 @@ export class Collector {
             if (log.at === null || log.id === null) return void (unplaced = true); // cannot be placed or counted once
             const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
-            if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity);
+            if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message);
           });
           slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice } : { state: unplaced ? "gap" : "ok", missed: null });
         }
@@ -516,6 +518,7 @@ export class Collector {
         w.event("coverage_gap", source.id as Clean, { from: gap.from, to: gap.to, reason: "older than the 14-day catch-up limit" });
       }
       const counts = new Map<string, number>();
+      const recent = new Map<string, Slice["admitted"]>();
       for (const record of slice.admitted) {
         const inserted = w.run(
           "INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms, incident) VALUES (?, ?, ?, ?, ?)",
@@ -524,6 +527,7 @@ export class Collector {
         if (!inserted) continue;
         counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
         hourly(w, incidentId(source, record.bucket), record.at);
+        recent.set(record.bucket, [...(recent.get(record.bucket) ?? []).slice(-(LIMITS.linesPerProblem - 1)), record]);
       }
       for (const b of slice.baselines) {
         const before = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", b.key)?.count ?? 0;
@@ -536,6 +540,12 @@ export class Collector {
           b.key as Clean, source.id as Clean, b.count, now,
         );
       }
+      // The latest lines of each problem, for investigations: cleaned by the writer, at most linesPerProblem kept.
+      for (const [bucket, records] of recent) {
+        const id = incidentId(source, bucket);
+        for (const r of records) w.run("INSERT INTO lines (incident, source, at_ms, text) VALUES (?, ?, ?, ?)", id as Clean, source.name as Clean, r.at, r.text as Clean);
+        w.run("DELETE FROM lines WHERE incident = ? AND rowid NOT IN (SELECT rowid FROM lines WHERE incident = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?)", id as Clean, id as Clean, LIMITS.linesPerProblem);
+      }
       const touched = new Set<string>();
       for (const [bucket, info] of slice.buckets) {
         const added = counts.get(bucket) ?? 0;
@@ -544,8 +554,12 @@ export class Collector {
         const id = incidentId(source, bucket);
         const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
         if (added === 0 && !info.inexact && !before) continue;
+        const group = before ? groupNow(this.store, id) : null;
         incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen, info.seen);
         afterChange(w, this.store, id, before, added, seq);
+        // A problem's first admission is investigated automatically once the model has passed its trial.
+        if (!before && added > 0 && this.store.meta(approvalKey(this.config)) === "on") queueInvestigation(w, this.store, this.config, id, "automatic");
+        announce(w, this.store, id, group, seq);
       }
       for (const id of slice.uncertain) w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
       // Time a reading did not fully cover: the totals of problems active then are lower bounds from now on.

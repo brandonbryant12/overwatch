@@ -96,6 +96,9 @@ export class OpenCode {
       .reverse();
   }
 
+  /** Whether the peer knows this session. */
+  exists = (session: string) => this.call(`/api/session/${encodeURIComponent(session)}`).then(() => true, () => false);
+
   interrupt = (session: string) => this.call(`/api/session/${encodeURIComponent(session)}/interrupt`, { method: "POST", body: {} }).catch(() => undefined);
 
   /** After our message `id`: whether the session has gone idle, and what the model said. */

@@ -83,7 +83,7 @@ export function rebuild(store: Store) {
     if (at !== null && way.delayMs !== null) live.set(`${row.id}:${way.seq}`, clock.mono() + Math.min(Math.max(0, at - now), way.delayMs));
   }
 }
-function passed(key: string, wallAt: number, delay: number, strict: boolean): boolean {
+export function passed(key: string, wallAt: number, delay: number, strict: boolean): boolean {
   const now = clock.now();
   if (strict ? now > wallAt : now >= wallAt) return true;
   if (!live.has(key)) live.set(key, clock.mono() + Math.min(Math.max(0, wallAt - now), delay));
@@ -91,15 +91,31 @@ function passed(key: string, wallAt: number, delay: number, strict: boolean): bo
 }
 
 /** Subjects that have an open request from the owner (queued or running). */
-function openJobs(store: Store): Set<string> {
-  return new Set(store.all<{ subject: string }>("SELECT DISTINCT subject FROM jobs WHERE kind = 'ask' AND state IN ('queued', 'running')").map((r) => r.subject));
+/** Subjects with outstanding work (a question or an investigation queued or running), and those left undecided. */
+function openJobs(store: Store): Set<string> & { undecided: Set<string> } {
+  const open = new Set(store.all<{ subject: string }>("SELECT DISTINCT subject FROM jobs WHERE kind IN ('ask', 'investigation') AND state IN ('queued', 'running')").map((r) => r.subject));
+  const undecided = new Set(
+    store.all<{ subject: string }>(
+      `SELECT j.subject FROM jobs j WHERE j.kind = 'investigation' AND j.state = 'completed' AND json_extract(j.result, '$.verdict') = 'unsure'
+       AND j.created_seq = (SELECT max(created_seq) FROM jobs k WHERE k.subject = j.subject AND k.kind = 'investigation' AND k.state = 'completed')`,
+    ).map((r) => r.subject),
+  );
+  return Object.assign(open, { undecided });
+}
+
+/** An incident's group now, for deciding whether a change moved it into Needs you. */
+export function groupNow(store: Store, id: string): Group | null {
+  const row = store.get<Row>("SELECT id, way, active, severity, environment FROM incidents WHERE id = ?", id);
+  return row ? groupOf(row, openJobs(store)) : null;
 }
 
 /** A row's group, or null once the owner has put it away. Running work wins over an undecided error. */
-function groupOf(row: Pick<Row, "way" | "active" | "severity" | "environment" | "id">, open: ReadonlySet<string>): Group | null {
+function groupOf(row: Pick<Row, "way" | "active" | "severity" | "environment" | "id">, open: ReadonlySet<string> & { undecided?: ReadonlySet<string> }): Group | null {
   if (row.way) return null;
   if (open.has(row.id)) return "working";
   if (row.active && row.severity === "error" && production(row.environment)) return "needsYou";
+  // An investigation that could not decide a production problem leaves it for the owner.
+  if (open.undecided?.has(row.id) && production(row.environment)) return "needsYou";
   return row.active ? "new" : "quiet";
 }
 
@@ -274,17 +290,43 @@ export function detail(store: Store, config: Config, id: string) {
   const requests = store
     .all<{ job_id: string; text: string; mode: string; seq: number; state: string }>("SELECT a.job_id, a.text, a.mode, a.seq, j.state FROM asks a JOIN jobs j ON j.id = a.job_id WHERE a.subject = ? ORDER BY a.seq", id)
     .map((r) => ({ jobId: r.job_id, text: r.text, mode: r.mode, seq: r.seq, state: r.state }));
-  return { incident: row, history, findings, requests, promptTarget: target(store, id), label: label(store, config, id) };
+  const investigations = store
+    .all<{ id: string; state: string; result: string | null; created_seq: number; reason: string | null }>("SELECT id, state, result, created_seq, reason FROM jobs WHERE kind = 'investigation' AND subject = ? ORDER BY created_seq", id)
+    .map((j) => ({ jobId: j.id, state: j.state, reason: j.reason, seq: j.created_seq, result: j.result ? JSON.parse(j.result) : null }));
+  const corrections = store
+    .all<{ seq: number; app: string; job_id: string; text: string; date: string }>("SELECT * FROM corrections WHERE subject = ? ORDER BY seq", id)
+    .map((c) => ({ seq: c.seq, app: c.app, jobId: c.job_id, text: c.text, date: c.date }));
+  return { incident: row, history, findings, requests, investigations, turns: turns(store, "subject", id), corrections, promptTarget: target(store, id), label: label(store, config, id) };
 }
 
-/** Where a prompt about a subject goes: its latest open job, or a new one. */
-function target(store: Store, subject: string) {
-  const open = store.get<{ id: string }>("SELECT id FROM jobs WHERE kind = 'ask' AND subject = ? AND state IN ('queued', 'running') ORDER BY created_seq DESC LIMIT 1", subject);
-  return { subject, mode: open ? "continue" : "new", jobId: open?.id ?? null };
+/** Questions and their answers, in the order they were asked. */
+export function turns(store: Store, by: "subject" | "job_id", value: string) {
+  return store
+    .all<{ key: string; seq: number; text: string; state: string; session_id: string | null; answer: string | null; reason: string | null; job_id: string }>(`SELECT * FROM asks WHERE ${by} = ? ORDER BY seq`, value)
+    .map((a) => ({ askSeq: a.seq, jobId: a.job_id, text: a.text, sessionId: a.session_id, state: a.state, answer: a.answer, reason: a.reason }));
+}
+
+/** The deployed revision a subject is about (its app and environment), or null. */
+function attribution(store: Store, config: Config, subject: string): string | null {
+  const place = subject.startsWith("env:") ? subject.slice(4).split("/")
+    : subject.startsWith("src:") ? subject.slice(4).split("/").slice(0, 2)
+    : Object.values(store.get<{ app: string; environment: string }>("SELECT app, environment FROM incidents WHERE id = ?", subject) ?? {});
+  return store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", String(place[0] ?? ""), String(place[1] ?? ""))?.revision ?? null;
+}
+
+/**
+ * Where a prompt about a subject goes: the latest conversation on exactly this subject that is still eligible (not
+ * superseded by New, not parked, and the deployed revision unchanged since it began), or a new one.
+ */
+function target(store: Store, subject: string, config?: Config) {
+  const open = store.get<{ id: string; attribution: string | null }>(
+    "SELECT id, attribution FROM jobs WHERE kind = 'ask' AND subject = ? AND closed = 0 AND state <> 'parked' ORDER BY created_seq DESC LIMIT 1", subject);
+  const eligible = open && (!config || (open.attribution ?? null) === attribution(store, config, subject)) ? open : undefined;
+  return { subject, mode: eligible ? "continue" : "new", jobId: eligible?.id ?? null };
 }
 
 /** A subject's label: an incident's title, an environment's or a source's name. Null when there is no such subject. */
-function label(store: Store, config: Config, subject: string): string | null {
+export function label(store: Store, config: Config, subject: string): string | null {
   if (subject.startsWith("env:")) return config.watchers.some((w) => `env:${w.app}/${w.environment}` === subject) ? subject.slice(4).replace("/", " / ") : null;
   if (subject.startsWith("src:")) return config.sources.some((s) => `src:${s.id}` === subject) ? subject.slice(4).replaceAll("/", " / ") : null;
   return store.get<{ title: string }>("SELECT title FROM incidents WHERE id = ?", subject)?.title ?? null;
@@ -294,7 +336,7 @@ function label(store: Store, config: Config, subject: string): string | null {
 export function focus(store: Store, config: Config, subject: string) {
   const name = label(store, config, subject);
   if (name === null) throw new HttpError(404, "no such subject");
-  return { subject, label: name, promptTarget: target(store, subject), requestKey: `rk_${randomBytes(12).toString("hex")}` };
+  return { subject, label: name, promptTarget: target(store, subject, config), requestKey: `rk_${randomBytes(12).toString("hex")}` };
 }
 
 /** POST /v2/ask: the redacted intent and its job are durable before the reply; a key answers the same way forever. */
@@ -311,15 +353,22 @@ export function ask(store: Store, config: Config, body: Record<string, unknown>,
     if (used.digest !== digest) throw new HttpError(409, "this request key was used for a different prompt");
     return result(used);
   }
-  const open = target(store, subject).jobId;
-  if (mode === "continue" && !open) throw new HttpError(409, "there is no open job to continue");
+  const open = target(store, subject, config).jobId;
+  if (mode === "continue" && !open) throw new HttpError(409, "there is no conversation on this subject that can continue");
   const effective = mode === "new" || !open ? "new" : "continue";
   const cleaned = clean(text.trim(), 4000);
   return store.tx((w) => {
     const jobId = effective === "new" ? `job_${randomBytes(12).toString("hex")}` : open!;
     const seq = w.event("asked", subject as Clean, { subject, jobId, mode: effective, text: cleaned });
-    if (effective === "new") w.run("INSERT INTO jobs (id, kind, subject, title, state, reason, created_seq) VALUES (?, 'ask', ?, ?, 'queued', NULL, ?)", jobId as Clean, subject as Clean, clean(cleaned, 200), seq);
+    if (effective === "new") {
+      // An explicit New supersedes the older conversations on this subject for later sends.
+      w.run("UPDATE jobs SET closed = 1 WHERE kind = 'ask' AND subject = ? AND closed = 0", subject as Clean);
+      w.run("INSERT INTO jobs (id, kind, subject, title, state, reason, created_seq, attribution) VALUES (?, 'ask', ?, ?, 'queued', NULL, ?, ?)",
+        jobId as Clean, subject as Clean, clean(cleaned, 200), seq, attribution(store, config, subject) as Clean | null);
+    } else w.run("UPDATE jobs SET state = 'queued' WHERE id = ?", jobId as Clean);
     w.run("INSERT INTO asks (key, subject, job_id, mode, text, digest, seq) VALUES (?, ?, ?, ?, ?, ?, ?)", key as Clean, subject as Clean, jobId as Clean, effective as Clean, cleaned, digest as Clean, seq);
+    // The answer is a work item at the front of the queue: the owner does not wait behind automatic work.
+    w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, ask_key, seq) VALUES (?, ?, 'answer', NULL, 0, 'queued', ?, ?)", `wk_${randomBytes(12).toString("hex")}` as Clean, jobId as Clean, key as Clean, seq);
     return result({ subject, job_id: jobId, mode: effective });
   });
 }

@@ -78,7 +78,7 @@ export function command(key, { typing = false, overlay = false, shift = false, m
   if (overlay) return null;
   const map = {
     j: "next", ArrowDown: "next", k: "previous", ArrowUp: "previous", d: "done", l: "later", w: "worse", n: "never", u: "undo",
-    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "expand",
+    r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct",
   };
   if (shift && key === "?") return "help";
   return map[key] ?? null;
@@ -172,3 +172,20 @@ export function ago(ms, nowMs) {
 
 /** A row's count as words: exact, or a lower bound. */
 export const countText = (count, exact) => `${count.toLocaleString("en-US")}${exact ? "" : "+"}×`;
+
+/**
+ * How an investigation's result reads at a glance. "agreed" only when every planned reading filed the same verdict
+ * and the verdict stands; any dissent, missing reading or undecided result looks different.
+ */
+export function verdictView(result) {
+  const c = result.counts ?? {};
+  const label = { real: "Real", not_real: "Not real", unsure: "Undecided" }[result.verdict] ?? result.verdict;
+  const unanimous = Math.max(c.real ?? 0, c.not_real ?? 0, c.unsure ?? 0) === result.planned && !(c.missing > 0);
+  const tone = result.verdict === "unsure" ? "undecided" : unanimous && result.challenge?.outcome !== "disproved" ? "agreed" : "disagreed";
+  const parts = [`${c.real ?? 0} of ${result.planned} said real`];
+  if (c.not_real) parts.push(`${c.not_real} not real`);
+  if (c.unsure) parts.push(`${c.unsure} unsure`);
+  if (c.missing) parts.push(`${c.missing} did not file`);
+  const challenge = result.challenge ? (result.challenge.outcome ? `challenger ${result.challenge.outcome}` : "challenger did not file") : null;
+  return { label, tone, votes: parts.join(" · "), challenge, observed: Boolean(result.observed) };
+}

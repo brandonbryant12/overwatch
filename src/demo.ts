@@ -10,6 +10,7 @@ import { parseConfig, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
 import { act, afterFinding, ask, hourly } from "./inbox.ts";
+import { adjudicate } from "./agents.ts";
 
 export function demoConfig(port: number): Config {
   const dataDir = mkdtempSync(join(tmpdir(), "overwatch-demo-"));
@@ -88,6 +89,52 @@ export function seedDemo(store: Store, config: Config) {
     afterFinding(w, store, "inc_d0c3f00d", filed, "not_real");
   });
   ask(store, config, { subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c1ed9e0000000000000001");
+  investigated(store);
+  // An answered question on the staging warning, as an agent would have answered it.
+  ask(store, config, { subject: "inc_d0c3f00d", text: "Has the warm-up time changed since the a1b2c3d deploy?", mode: "auto" }, "rk_d0c3f00d0000000000000002");
+  store.tx((w) => {
+    const answer = "No. The warm-up has taken 2.0–2.2 s at every start for a month, before and after a1b2c3d; the warning is logged at 2 s.";
+    w.run("UPDATE asks SET state = 'answered', session_id = 'ses_d0c3f00d000000000002', answer = ? WHERE key = 'rk_d0c3f00d0000000000000002'", s(answer));
+    w.run("UPDATE work SET state = 'done' WHERE ask_key = 'rk_d0c3f00d0000000000000002'");
+    w.run("UPDATE jobs SET state = 'completed' WHERE id = (SELECT job_id FROM asks WHERE key = 'rk_d0c3f00d0000000000000002')");
+    w.event("answered", s("inc_d0c3f00d"), { askSeq: 0, sessionId: "ses_d0c3f00d000000000002", answer, demo: true });
+  });
+}
+
+/** The production timeout, investigated: three readings (two real, one dissent) and a challenger that upheld. */
+function investigated(store: Store) {
+  const s = (v: string) => v as Clean;
+  const subject = "inc_d0c4ab11", job = "job_d0c4ab110000000000000001", code = { expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true };
+  const lines = ["ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 1)", "ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 2)"];
+  const diff = "config/payments.yaml @ a1b2c3d\n- timeout_ms: 3000\n+ timeout_ms: 300";
+  const votes: Array<[string, string, string, string]> = [
+    ["real", "The a1b2c3d deploy cut the payments timeout from 3000 ms to 300 ms", "Every timeout follows the deploy and stops at exactly 300 ms", "telemetry"],
+    ["real", "The timeout value changed in a1b2c3d", "The deployed config sets timeout_ms to 300, down from 3000", "code"],
+    ["not_real", "The provider was slow for a few minutes", "Timeouts could be the provider's own slowness", "telemetry"],
+  ];
+  store.tx((w) => {
+    const seq = w.event("investigation_queued", s(subject), { job, origin: "automatic", demo: true });
+    w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq, inputs) VALUES (?, 'investigation', ?, 'ERROR checkout: payments timeout after 300ms', 'completed', ?, ?)", s(job), s(subject), seq, json({ planned: 3, demo: true }));
+    const readings = votes.map(([verdict, cause, statement, kind], n) => {
+      const run = `run_d0c4ab11000000000000000${n + 1}`, session = `ses_d0c4ab11000000000000000${n + 1}`, finding = `f_d0c4ab11000000000000000${n + 1}`;
+      w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role, slot) VALUES (?, ?, ?, ?, 'terminal', 3, ?, ?, 'investigator', ?)", s(run), s(job), n + 1, s(session), json(code), clock.now(), n + 1);
+      const pieces = (kind === "code" ? [diff] : lines).map((text, k) => {
+        const handle = `e_d0c4ab11${n}${k}0000000000000000`;
+        w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, ?, ?, ?)", s(handle), s(run), s(session), s(kind === "code" ? "code" : "pods"), s(text), k + 1);
+        return { handle, source: kind === "code" ? "code" : "pods", text };
+      });
+      const body = { cause, ruled_out: verdict === "real" ? ["provider outage (status page green)", "database latency"] : [], not_checked: ["the provider's own logs"], next_check: "Restore timeout_ms to 3000 and watch the rate", impact: "checkout payments fail", affected: ["shop/production"], since: null, status: "investigated" };
+      w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES (?, ?, ?, ?, ?, ?)", s(finding), s(run), s(verdict), json([{ statement, pieces }]), json(code), json(body));
+      w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, run_id, seq) VALUES (?, ?, 'reading', ?, 1, 'done', ?, ?)", s(`wk_d0c4ab11${n}`), s(job), n + 1, s(run), seq);
+      return { slot: n + 1, sessionId: session, verdict: verdict as "real" | "not_real", findingId: finding, reason: null, telemetry: kind !== "code" };
+    });
+    const challenge = { outcome: "upheld" as const, reason: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.", pieces: [{ handle: "e_d0c4ab11c00000000000000000", source: "pods", text: lines[0]! }] };
+    const decided = adjudicate(3, readings, challenge);
+    const at = w.next();
+    const result = { verdict: decided.verdict, observed: decided.observed, planned: 3, counts: decided.counts, readings: readings.map(({ telemetry: _, ...r }) => r), challenge, seq: at };
+    w.event("adjudicated", s(subject), { job, result });
+    w.run("UPDATE jobs SET result = ? WHERE id = ?", json(result), s(job));
+  });
 }
 
 /** The demo's picture stays as seeded for as long as it runs: its readings are renewed each minute (QA stays signed out). */

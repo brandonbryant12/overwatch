@@ -23,6 +23,7 @@ const root = mkdtempSync(join(tmpdir(), "ow-real-opencode-"));
 for (const d of ["home", "config/opencode/skills/overwatch", "data", "cache", "state", "tmp", "checkout"]) mkdirSync(join(root, d), { recursive: true });
 const expected: Record<string, string> = { regression: "real", noise: "not_real", predates: "not_real", missing: "unsure", planted: "not_real" };
 const log: string[] = [];
+const prompts: string[] = [];
 
 // ---- the scripted model: an investigator reads telemetry once, then files with the first handle and the right verdict.
 type Msg = { role: string; content?: unknown; tool_calls?: unknown };
@@ -36,6 +37,20 @@ const provider = createServer(async (req, res) => {
   const all = body.messages.map(text).join("\n");
   const id = Object.keys(expected).find((k) => all.includes(`Overwatch trial ${k}`));
   log.push(`model request: case=${id ?? "none"} tools=${tools.join(",")}`);
+  const results0 = body.messages.filter((m) => m.role === "tool").map(text);
+  const handle0 = /"handle":"(e_[0-9a-f]+)"/.exec(results0.find((r) => r.includes('"pieces"')) ?? "")?.[1];
+  // Milestone 3 roles: readers (slots 1 and 2 say real, 3 not real), the challenger, the responder.
+  const reading = /Reading (\d)\/(\d)/.exec(all);
+  if (!id && (reading || all.includes("Challenge\n"))) {
+    prompts.push(all);
+    if (results0.some((r) => r.includes('"verdict"'))) return reply(res, { text: "Filed." });
+    if (!handle0) return reply(res, { call: { name: tool("ow_telemetry"), arguments: JSON.stringify({ source: Object.keys(JSON.parse(results0[0] ?? "{}")).length ? "pods" : "pods" }) } });
+    if (!reading) return reply(res, { call: { name: tool("ow_challenge"), arguments: JSON.stringify({ outcome: "upheld", reason: "The timeout lines follow the deploy", evidence: [handle0] }) } });
+    const verdict = reading[1] === "3" ? "not_real" : "real";
+    const filing = { verdict, cause: `scripted reader ${reading[1]}`, claims: [{ statement: `payments time out (reader ${reading[1]})`, evidence: [handle0] }], ruled_out: ["noise"], not_checked: ["database"], next_check: "none", impact: "checkout", affected: [], since: null, status: "investigated" };
+    return reply(res, { call: { name: tool("ow_finding"), arguments: JSON.stringify(filing) } });
+  }
+  if (!id && all.includes("Owner's question")) return reply(res, { text: "Scripted answer: the payments timeouts began after the last deploy." });
   if (!id) return reply(res, { text: "ready" });
   const results = body.messages.filter((m) => m.role === "tool").map(text);
   const telemetry = results.find((r) => r.includes('"pieces"'));
@@ -82,7 +97,17 @@ const ocPassword = randomBytes(16).toString("hex");
 // Only stubs and the binary under test are on PATH: no real kubectl, gh or launchctl is ever run.
 const stubs = join(root, "bin");
 mkdirSync(stubs);
-for (const name of ["kubectl", "gh", "launchctl", "security"]) writeFileSync(join(stubs, name), "#!/bin/sh\necho stub >&2\nexit 1\n", { mode: 0o755 });
+for (const name of ["gh", "launchctl", "security"]) writeFileSync(join(stubs, name), "#!/bin/sh\necho stub >&2\nexit 1\n", { mode: 0o755 });
+// A kubectl that serves one pod with two payments timeouts (no cluster is touched).
+writeFileSync(join(stubs, "kubectl"), `#!${process.execPath}
+const a = process.argv.slice(2), verb = a[a.indexOf("-n") + 2], now = Date.now();
+const pod = { metadata: { name: "shop-0", uid: "u0" }, spec: { containers: [{ name: "api" }] }, status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }], containerStatuses: [{ name: "api", containerID: "c0", restartCount: 0 }] } };
+if (verb === "get" && a.includes("pods")) console.log(JSON.stringify({ items: [pod] }));
+else if (verb === "logs") for (const s of [5000, 3000]) console.log(new Date(now - s).toISOString() + " ERROR checkout: payments timeout after 300ms");
+else if (verb === "get") console.log(JSON.stringify({ items: [] }));
+else if (verb === "top") process.exit(0);
+else { console.error("stub"); process.exit(1); }
+`, { mode: 0o755 });
 symlinkSync(binary, join(stubs, "opencode"));
 const PATH = [stubs, dirname(process.execPath), "/usr/bin", "/bin"].join(":");
 const env = { ...process.env, PATH, OPENCODE_PASSWORD: ocPassword, OW_MCP_TOKEN: token, HOME: join(root, "home"), TMPDIR: join(root, "tmp") };
@@ -94,7 +119,9 @@ const ready = JSON.parse(String((await once(service.stdout!, "data"))[0]).split(
 writeFileSync(join(root, "config/opencode/opencode.json"), JSON.stringify({
   model: "scripted/glm",
   providers: { scripted: { package: "@opencode/ai/providers/openai-compatible", settings: { baseURL: `http://127.0.0.1:${providerPort}/v1`, apiKey: "scripted" }, models: { glm: { name: "Scripted", limit: { context: 64000, output: 4000 } } } } },
-  agents: { "ow-investigator": { mode: "primary", permissions: [{ action: "*", resource: "*", effect: "deny" }, ...["ow_telemetry", "ow_code_read", "ow_code_search", "ow_history", "ow_finding"].map((n) => ({ action: `ow_${n}`, resource: "*", effect: "allow" }))] } },
+  agents: Object.fromEntries(([["ow-investigator", "ow_finding"], ["ow-challenger", "ow_challenge"], ["ow-responder", null]] as const).map(([name, filing]) => [name, {
+    mode: "primary", permissions: [{ action: "*", resource: "*", effect: "deny" }, ...["ow_telemetry", "ow_code_read", "ow_code_search", "ow_history", ...(filing ? [filing] : [])].map((n) => ({ action: `ow_${n}`, resource: "*", effect: "allow" }))],
+  }])),
   mcp: { servers: { ow: { type: "remote", url: `${ready.url}/mcp`, headers: { Authorization: `Bearer ${token}` }, oauth: false, codemode: false } } },
 }));
 writeFileSync(join(root, "config/opencode/skills/overwatch/SKILL.md"), "---\nname: overwatch\ndescription: Read the Overwatch inbox.\n---\nUse the Overwatch tools.\n");
@@ -130,6 +157,30 @@ try {
       const body = await (await fetch(`http://127.0.0.1:${ocPort}${path}${query}`, { headers: auth })).text();
       if (process.env.OW_REAL_RAW) console.log(path, query ? "(location)" : "", path === "/api/agent" ? JSON.stringify(JSON.parse(body).data.find((a: { id: string }) => a.id === "ow-investigator")?.permissions) : body.slice(0, 300));
     }
+  // ---- milestone 3 through the real binary: an investigation, an owner question, a correction, a second investigation.
+  const control = service.stdio[3] as import("node:stream").Duplex;
+  let pending = "";
+  const replies: string[] = [];
+  control.setEncoding("utf8").on("data", (d: string) => { pending += d; let i; while ((i = pending.indexOf("\n")) >= 0) { replies.push(pending.slice(0, i)); pending = pending.slice(i + 1); } });
+  const poll = async () => { const n = replies.length; control.write(JSON.stringify({ id: Date.now(), op: "poll" }) + "\n"); while (replies.length === n) await new Promise((r) => setTimeout(r, 20)); };
+  const api = async (path: string, body?: unknown, key?: string) => (await fetch(`${ready.url}/v2/${path}`, { method: body === undefined ? "GET" : "POST", headers: { "content-type": "application/json", ...(key ? { "idempotency-key": key } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<any>;
+  const keyFor = async (subject: string) => (await api("focus?subject=" + encodeURIComponent(subject))).requestKey as string;
+  const wait = async (read: () => Promise<any>, ms = 180_000) => { const end = Date.now() + ms; for (;;) { await poll(); const v = await read(); if (v) return v; if (Date.now() > end) throw new Error("timed out"); await new Promise((r) => setTimeout(r, 200)); } };
+  await poll();
+  const incident = (await api("status")).incidents.find((i: { title: string }) => i.title.includes("payments"));
+  console.log("incident", incident?.id, incident?.count);
+  const first = await api(`items/${incident.id}/investigate`, {}, await keyFor(incident.id));
+  const done1 = await wait(async () => { const j = await api("jobs/" + first.jobId); return ["completed", "parked"].includes(j.state) && j; });
+  console.log("investigation 1", JSON.stringify({ state: done1.state, verdict: done1.result?.verdict, counts: done1.result?.counts, challenge: done1.result?.challenge?.outcome, observed: done1.result?.observed }));
+  const asked = await api("ask", { subject: incident.id, text: "When did the timeouts start?", mode: "auto" }, await keyFor(incident.id));
+  const answered = await wait(async () => { const j = await api("jobs/" + asked.jobId); return j.turns?.at(-1)?.state === "answered" || j.turns?.at(-1)?.state === "failed" ? j : null; });
+  console.log("question", JSON.stringify(answered.turns.at(-1)));
+  const guidance = "Check the payments provider status page first";
+  console.log("correction", JSON.stringify(await api(`items/${incident.id}/corrections`, { jobId: first.jobId, text: guidance }, await keyFor(incident.id))));
+  const before = prompts.length;
+  const second = await api(`items/${incident.id}/investigate`, {}, await keyFor(incident.id));
+  const done2 = await wait(async () => { const j = await api("jobs/" + second.jobId); return ["completed", "parked"].includes(j.state) && j; });
+  console.log("investigation 2", JSON.stringify({ state: done2.state, verdict: done2.result?.verdict, guidanceInReaderPrompts: prompts.slice(before).filter((p) => /Reading \d/.test(p)).every((p) => p.includes(guidance)) }));
   const doctor = await cli("doctor");
   console.log("doctor exit", doctor.code);
   for (const c of (JSON.parse(doctor.out || "{}").checks ?? []) as Array<{ id: string; ok: boolean; detail: string }>) console.log(`  ${c.ok ? "ok  " : "FAIL"} ${c.id}: ${c.detail}`);

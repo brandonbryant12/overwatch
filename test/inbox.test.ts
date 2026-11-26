@@ -68,7 +68,7 @@ test("Later with a time comes back at the delay the owner chose, even with the w
 test("a request key answers the same way forever and refuses a different prompt; continue needs an open job", () => {
   const r = rig();
   const key = "rk_" + "a".repeat(24);
-  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "continue" }, "rk_" + "b".repeat(24)), /no open job/);
+  assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "continue" }, "rk_" + "b".repeat(24)), /no conversation/);
   const first = ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key);
   assert.deepEqual(ask(r.store, r.config, { subject: "inc_1", text: "why?", mode: "auto" }, key), first);
   assert.throws(() => ask(r.store, r.config, { subject: "inc_1", text: "other", mode: "auto" }, key), /different prompt/);

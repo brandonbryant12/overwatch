@@ -289,6 +289,42 @@ function overview() {
 
 const WAY_LABEL = { done: "Done", later: "Later", never: "Never" };
 
+const VERDICT = { real: "Real", not_real: "Not real", unsure: "Unsure" };
+const piecesHtml = (pieces) => (pieces ?? []).map((p) => `<figure class="evidence"><figcaption><span class="handle">${esc(p.handle)}</span><span>${esc(p.source)}</span></figcaption><pre>${esc(p.text)}</pre></figure>`).join("");
+
+/** The latest investigation: the verdict, how the readings voted, what the challenger did; disagreement shows. */
+function verdictPanel(d) {
+  const inv = (d?.investigations ?? []).at(-1);
+  if (!inv || (!inv.result && inv.state !== "queued" && inv.state !== "running")) return "";
+  if (!inv.result) return `<section class="verdict working"><span class="orbit" aria-hidden="true"></span><div><b>Investigating</b><span>${inv.state === "queued" ? "queued for the next free agent" : "independent readings under way"}</span></div></section>`;
+  const v = m.verdictView(inv.result), r = inv.result;
+  const readings = r.readings.map((x) => {
+    const f = (d.findings ?? []).find((g) => g.id === x.findingId);
+    return `<li class="reading ${esc(x.verdict ?? "missing")}"><span class="slot">${x.slot}</span><b>${esc(x.verdict ? VERDICT[x.verdict] : "No filing")}</b><span>${esc(f?.body?.cause ?? x.reason ?? "")}</span></li>`;
+  }).join("");
+  return `<section class="verdict ${v.tone}" data-verdict="${esc(r.verdict)}" data-tone="${v.tone}">
+    <header><span class="verdict-label">${esc(v.label)}</span>${v.observed ? `<span class="pill observed">observed in telemetry</span>` : ""}<span class="votes">${esc(v.votes)}${v.challenge ? ` · ${esc(v.challenge)}` : ""}</span></header>
+    ${v.tone === "undecided" ? `<p class="note">The readings could not settle it. It stays with you; look at what each one saw.</p>` : v.tone === "disagreed" ? `<p class="note">Not unanimous: the dissent is below, as filed.</p>` : ""}
+    <ol class="readings">${readings}</ol>
+    ${r.challenge ? `<div class="challenge"><b>Challenger: ${esc(r.challenge.outcome ?? "did not file")}</b><p>${esc(r.challenge.reason ?? "")}</p>${piecesHtml(r.challenge.pieces)}</div>` : ""}
+  </section>`;
+}
+
+/** The claims behind the verdict, each with the evidence it cites, readable in place; what was ruled out and not checked. */
+function claimsPanel(d) {
+  const inv = (d?.investigations ?? []).filter((x) => x.result).at(-1)?.result;
+  // Without an adjudicated investigation, every finding filed on it is shown as filed.
+  const ids = inv ? new Set(inv.readings.filter((x) => x.verdict === inv.verdict || inv.verdict === "unsure").map((x) => x.findingId).filter(Boolean)) : null;
+  const findings = (d?.findings ?? []).filter((f) => (!ids || ids.has(f.id)) && !f.body?.challenge);
+  if (!findings.length) return "";
+  const list = (title, items) => (items?.length ? `<div class="aside"><h4>${title}</h4><ul>${items.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : "");
+  return `<section class="panel"><h3>${!inv ? "Findings" : inv.verdict === "unsure" ? "What each reading claimed" : "Why"}</h3>${findings.map((f) => `<article class="finding ${esc(f.verdict)}">
+      <header><b>${esc(VERDICT[f.verdict] ?? f.verdict)}</b><span>${esc(f.body?.cause ?? "")}</span></header>
+      ${(f.claims ?? []).map((c) => `<p class="claim">${esc(c.statement)}</p>${piecesHtml(c.pieces)}`).join("")}
+      <div class="asides">${list("Ruled out", f.body?.ruled_out)}${list("Not checked", f.body?.not_checked)}</div>
+    </article>`).join("")}</section>`;
+}
+
 function incidentView(i, d) {
   const now = state.snap.atMs;
   const off = down() ? " disabled" : "";
@@ -297,17 +333,18 @@ function incidentView(i, d) {
     : "";
   const back = i.returned && !i.way ? `<div class="back-note"><b>${esc(m.RETURN_LABEL[i.returned.code] ?? "Back")}</b>${esc(i.returned.reason)}</div>` : "";
   const history = (d?.history ?? []).slice(-12).reverse().map((e) => `<li class="ev ev-${esc(e.kind)}"><span class="ev-kind">${esc(eventText(e))}</span><time>${m.ago(e.atMs, now)}</time></li>`).join("");
-  const requests = (d?.requests ?? []).map((r) => `<li class="request ${esc(r.state)}"><span class="orbit" aria-hidden="true"></span><span class="request-text">${esc(r.text)}</span><span class="request-state">${r.state === "queued" ? "queued, waiting for an agent" : esc(r.state)}</span></li>`).join("");
-  const findings = (d?.findings ?? []).map((f) => `<article class="finding ${esc(f.verdict)}">
-      <header><b>${esc({ real: "Real", not_real: "Not real", unsure: "Unsure" }[f.verdict] ?? f.verdict)}</b><span>${esc(f.body?.cause ?? "")}</span></header>
-      ${(f.claims ?? []).map((c) => `<p>${esc(c.statement)}</p>${(c.pieces ?? []).map((p) => `<pre class="evidence"><span class="handle">${esc(p.handle)}</span>${esc(p.text)}</pre>`).join("")}`).join("")}
-    </article>`).join("");
+  const turns = (d?.turns ?? []).map((t) => `<li class="turn ${esc(t.state)}"><p class="question">${esc(t.text)}</p>${
+    t.state === "answered" ? `<div class="answer">${esc(t.answer)}</div>` : t.state === "failed" ? `<p class="note bound">No answer: ${esc(t.reason ?? "")}</p>` : `<p class="request-state"><span class="orbit" aria-hidden="true"></span>${t.state === "running" ? "an agent is answering" : "queued, waiting for an agent"}</p>`}</li>`).join("");
+  const started = [...(state.snap.deploys ?? [])].reverse().find((x) => x.app === i.app && x.environment === i.environment && x.seq < i.firstSeq);
+  const sources = state.snap.sources.filter((x) => x.app === i.app && x.environment === i.environment);
+  const corrections = (d?.corrections ?? []).map((c) => `<li><time>${esc(c.date)}</time>${esc(c.text)}</li>`).join("");
+  const done = (d?.investigations ?? []).filter((x) => x.result).at(-1);
   return `<article class="incident sev-${esc(i.severity)}">
     <header class="incident-head">
       <span class="sev">${SEVERITY_GLYPH[i.severity] ?? ""}</span>
       <div>
         <h2>${esc(i.title)}</h2>
-        <div class="meta"><span class="place">${esc(i.app)} / ${esc(i.environment)}</span><span>${esc(i.severity)}</span><span class="count${i.exact ? "" : " bound"}">${m.countText(i.count, i.exact)}${i.exact ? "" : " (at least)"}</span><span>first ${m.ago(i.firstMs, now)}</span><span>last ${m.ago(i.lastMs, now)}</span>${i.active ? "" : '<span class="pill quiet">quiet</span>'}</div>
+        <div class="meta"><span class="place">${esc(i.app)} / ${esc(i.environment)}</span><span>${esc(i.severity)}</span><span class="count${i.exact ? "" : " bound"}">${m.countText(i.count, i.exact)}${i.exact ? "" : " (at least)"}</span><span>last ${m.ago(i.lastMs, now)}</span>${i.active ? "" : '<span class="pill quiet">quiet</span>'}</div>
       </div>
     </header>
     ${back}${way}
@@ -317,15 +354,23 @@ function incidentView(i, d) {
       <button type="button" data-action="worse"${off}>Until worse <kbd>w</kbd></button>
       <button type="button" data-action="never"${off}>Never <kbd>n</kbd></button>
       ${i.way ? `<button type="button" data-action="undo"${off}>Put back <kbd>u</kbd></button>` : ""}
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" data-action="investigate"${off}>Investigate <kbd>i</kbd></button>
+      <button type="button" data-action="open"${off}>Open in OpenCode <kbd>o</kbd></button>
+      ${done ? `<button type="button" data-action="correct"${off}>Was this right? <kbd>y</kbd></button>` : ""}
     </div>
+    ${verdictPanel(d)}
+    ${claimsPanel(d)}
+    ${corrections ? `<section class="panel"><h3>Your corrections (in ${esc(i.app)}'s playbook)</h3><ul class="corrections">${corrections}</ul></section>` : ""}
+    ${turns ? `<section class="panel"><h3>Questions</h3><ul class="turns">${turns}</ul></section>` : ""}
     <section class="panel">
-      <h3>Last 24 hours</h3>
+      <h3>Counts</h3>
+      ${started ? `<p class="started">Started after deploy <code>${esc(started.revision.slice(0, 12))}</code> to ${esc(i.app)}/${esc(i.environment)}.</p>` : ""}
       ${spark(i.spark, 560, 64)}
       <div class="axis"><span>24h ago</span><span>now</span></div>
-      ${i.exact ? "" : `<p class="note bound">The total is a lower bound: part of the time was not fully read (a gap, a cap, or lines that rotated away).</p>`}
+      <p class="note${i.exact ? "" : " bound"}">${i.exact ? `Exact: ${i.count.toLocaleString("en-US")} occurrences, every reading fully measured while it was active.` : "A lower bound: part of the time was not fully read (a gap, a cap, or lines that rotated away)."} First seen ${m.ago(i.firstMs, now)}.</p>
+      <ul class="sources">${sources.map((x) => `<li class="${x.failure ? "failing" : ""}" data-subject="${esc(x.subject)}"><b class="subject-link">${esc(x.id)}</b><span>${x.failure ? esc(causeTitle({ kind: x.failure })) : x.checkpointMs ? `read through ${m.ago(x.checkpointMs, now)}` : "not read yet"}</span></li>`).join("")}</ul>
     </section>
-    ${requests ? `<section class="panel"><h3>Questions</h3><ul class="requests">${requests}</ul><p class="note">Agents answer from milestone 3; until then a question waits here.</p></section>` : ""}
-    ${findings ? `<section class="panel"><h3>Findings</h3>${findings}</section>` : ""}
     <section class="panel"><h3>History</h3>${history ? `<ol class="history">${history}</ol>` : `<p class="note">Loading history…</p>`}</section>
   </article>`;
 }
@@ -340,6 +385,11 @@ function eventText(e) {
     case "quieted": return "Went quiet";
     case "deadline": return "Later's time came";
     case "seen": return "Seen";
+    case "investigation_queued": return `Investigation queued (${d.origin ?? "manual"})`;
+    case "adjudicated": return `Investigated: ${m.verdictView(d.result).label} (${m.verdictView(d.result).votes})`;
+    case "answered": return d.failed ? "A question went unanswered" : "A question was answered";
+    case "corrected": return `Corrected: “${d.text}”`;
+    case "opened": return "Opened in OpenCode";
     case "incident": return d.metric ? `Gauge ${d.state}` : "First counted";
     default: return e.kind;
   }
@@ -393,7 +443,7 @@ function renderDock() {
     const i = isIncident(f) ? incident(f) ?? state.detail?.incident : null;
     chip.innerHTML = `<span class="reticle" aria-hidden="true">⌖</span>${esc(i ? `${i.app}/${i.environment} · ${i.title}` : f.slice(4).replaceAll("/", " / "))}`;
     const t = state.target?.subject === f ? state.target.promptTarget : null;
-    route.textContent = down() ? "Service not answering: your draft is kept" : t ? (t.mode === "continue" ? "Adds to the queued request · Shift+Enter for a new one" : "Queues a new request for an agent") : "";
+    route.textContent = down() ? "Service not answering: your draft is kept" : t ? (t.mode === "continue" ? "Continues the conversation · Shift+Enter for a new one" : "Queues a new conversation with an agent") : "";
     $("[data-send]").firstChild.textContent = "Ask ";
   }
   $("[data-send]").disabled = down();
@@ -493,6 +543,104 @@ async function undo() {
     toast("Put back");
   } catch (e) {
     toast(e.status === 409 ? "That changed since: nothing undone" : e.message, "error");
+  }
+}
+
+/** A request key for this subject, from the service (the page makes no identifiers). */
+const requestKey = async (subject) => (await call("focus?subject=" + encodeURIComponent(subject))).requestKey;
+
+/** O: the focused thing in an ordinary OpenCode session. The window opens with the key press; the URL follows. */
+async function openInOpenCode() {
+  const subject = state.focus;
+  if (!subject || down()) return toast(subject ? "Service not answering" : "Put something in focus first");
+  const win = window.open("about:blank", "_blank");
+  try {
+    const r = await call("open", { subject }, { "Idempotency-Key": await requestKey(subject) });
+    if (win) win.location.href = r.url;
+    else window.location.href = r.url;
+  } catch (e) {
+    win?.close();
+    toast(e.message, "error");
+  }
+}
+
+async function investigate() {
+  const id = state.focus;
+  if (!isIncident(id) || down()) return;
+  try {
+    await call(`items/${encodeURIComponent(id)}/investigate`, {}, { "Idempotency-Key": await requestKey(id) });
+    toast("Investigation queued: independent readings, then a challenger if most say real.", "ok");
+    loadDetail(id);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+/** B: a brief to copy. The owner edits it and sends it himself; nothing is sent from here. */
+function briefSheet() {
+  state.overlay = "brief";
+  $("[data-overlay]").innerHTML = `<div class="backdrop" data-close></div>
+    <div class="sheet brief-sheet" role="dialog" aria-modal="true" aria-labelledby="brief-title">
+      <h2 id="brief-title">Brief</h2>
+      <label>For <select data-brief-audience><option value="owner">you (technical)</option><option value="team">the team (plain words)</option></select></label>
+      <textarea data-brief-text rows="14" spellcheck="true" aria-label="Brief text"></textarea>
+      <p class="hint">What changed, from the event log. Edit it, copy it, send it yourself.</p>
+      <div class="sheet-actions"><button type="button" data-close>Close <kbd>Esc</kbd></button><button type="button" class="primary" data-brief-copy>Copy</button></div>
+    </div>`;
+  const select = $("[data-brief-audience]");
+  const load = async () => {
+    const text = $("[data-brief-text]");
+    text.value = "Loading…";
+    try {
+      const b = await call("brief?audience=" + encodeURIComponent(select.value));
+      if (state.overlay === "brief" && select.value === b.audience) text.value = b.text;
+    } catch (e) {
+      text.value = "";
+      toast(e.message, "error");
+    }
+  };
+  select.addEventListener("change", load);
+  $("[data-brief-copy]").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("[data-brief-text]").value);
+      toast("Copied. Nothing was sent.", "ok");
+    } catch (e) {
+      toast(`Copy failed: ${e.message}`, "error");
+    }
+  });
+  select.focus();
+  load();
+}
+
+/** "Was this right?": one dated line in the app's playbook, read by later investigations of that app. */
+function correctSheet() {
+  const i = incident(state.focus);
+  const job = (state.detail?.investigations ?? []).filter((x) => x.result).at(-1);
+  if (!i || !job || down()) return toast(job ? "Service not answering" : "Nothing investigated to correct yet");
+  state.overlay = "correct";
+  $("[data-overlay]").innerHTML = `<div class="backdrop" data-close></div>
+    <form class="sheet" role="dialog" aria-modal="true" aria-labelledby="correct-title" data-sheet="correct" data-job="${esc(job.jobId)}">
+      <h2 id="correct-title">Was this right?</h2>
+      <p class="sheet-subject">${esc(i.title)}: ${esc(m.verdictView(job.result).label)}</p>
+      <label>What should the next investigation of ${esc(i.app)} know? <textarea data-sheet-input rows="4" maxlength="1000" placeholder="e.g. The regional maintenance window runs 02:00–03:00 UTC; check it first."></textarea></label>
+      <p class="hint">It becomes one dated line in ${esc(i.app)}'s playbook and is given to later readers as guidance. It does not change this verdict.</p>
+      <p class="error" data-sheet-error></p>
+      <div class="sheet-actions"><button type="button" data-close>Cancel <kbd>Esc</kbd></button><button type="submit" class="primary">Save <kbd>⌘↵</kbd></button></div>
+    </form>`;
+  $("[data-sheet-input]").focus();
+}
+
+async function saveCorrection(form) {
+  const text = $("[data-sheet-input]", form).value.trim();
+  if (!text) return void ($("[data-sheet-error]", form).textContent = "Write what was wrong or what to check");
+  const id = state.focus;
+  try {
+    await call(`items/${encodeURIComponent(id)}/corrections`, { jobId: form.dataset.job, text }, { "Idempotency-Key": await requestKey(id) });
+    close();
+    toast("Saved to the playbook.", "ok");
+    loadDetail(id);
+  } catch (e) {
+    $("[data-sheet-error]", form).textContent = e.message;
   }
 }
 
@@ -615,7 +763,8 @@ function help() {
   const keys = [
     ["j / ↓", "Next row"], ["k / ↑", "Previous row"], ["d", "Done: back if it happens again"], ["l", "Later: until something changes, a time, or worse"],
     ["w", "Later, until it gets worse"], ["n", "Never: back only if much worse or more severe"], ["u", "Undo the last way out"], ["r", "Show what waits behind “N new”"],
-    ["p / Enter", "Ask about what is in focus"], ["Shift+Enter", "Ask in a new request"], ["/ or ⌘K", "Find anything, even put away"], ["t", "Light or dark"], ["Esc", "Close, or leave the bar"],
+    ["p / Enter", "Ask about what is in focus"], ["i", "Investigate: independent readings and a challenger"], ["o", "Open in OpenCode, with this in focus"],
+    ["y", "Was this right? A line for the app's playbook"], ["b", "Brief: what changed, to edit and copy"], ["Shift+Enter", "Ask in a new request"], ["/ or ⌘K", "Find anything, even put away"], ["t", "Light or dark"], ["Esc", "Close, or leave the bar"],
   ];
   $("[data-overlay]").innerHTML = `<div class="backdrop" data-close></div><div class="sheet keys-sheet" role="dialog" aria-modal="true" aria-label="Keyboard"><h2>Keyboard</h2><dl>${keys.map(([k, v]) => `<div><dt>${k.split(" / ").map((x) => `<kbd>${esc(x)}</kbd>`).join(" ")}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl></div>`;
 }
@@ -642,7 +791,7 @@ async function submitPrompt(newSession) {
     state.key = null;
     autosize(input);
     if (state.focus === subject && isIncident(subject)) loadDetail(subject);
-    toast(result.target.mode === "new" ? "Queued for an agent. Agents answer from milestone 3." : "Added to the queued request.", "ok");
+    toast(result.target.mode === "new" ? "Queued: an agent answers here, under Questions." : "Added to the queued request.", "ok");
     call("focus?subject=" + encodeURIComponent(subject)).then((t) => ((state.target = t), renderDock()), () => undefined);
   } catch (e) {
     toast(e.message, "error");
@@ -673,6 +822,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") return e.preventDefault(), moveResult(e.key === "ArrowDown" ? 1 : -1);
     if (e.key === "Enter") return e.preventDefault(), chooseResult();
   }
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && target instanceof Element && target.closest("[data-sheet=correct]")) return e.preventDefault(), saveCorrection(target.closest("form"));
   if (target === $("[data-prompt]") && e.key === "Enter" && !e.shiftKey && !e.isComposing) return e.preventDefault(), submitPrompt(false);
   if (target === $("[data-prompt]") && e.key === "Enter" && e.shiftKey) return e.preventDefault(), submitPrompt(true);
   const c = m.command(e.key, { typing, overlay: Boolean(state.overlay), shift: e.shiftKey, meta: e.metaKey || e.ctrlKey });
@@ -693,6 +843,10 @@ document.addEventListener("keydown", (e) => {
     case "prompt": return state.focus ? $("[data-prompt]").focus() : openSearch();
     case "theme": return theme();
     case "help": return help();
+    case "open": return openInOpenCode();
+    case "brief": return briefSheet();
+    case "investigate": return investigate();
+    case "correct": return correctSheet();
   }
 });
 
@@ -734,13 +888,15 @@ document.addEventListener("click", (e) => {
   const action = t.closest("[data-action]");
   if (action && !action.disabled) {
     const a = action.dataset.action;
-    return a === "done" ? wayOut({ action: "done" }) : a === "worse" ? wayOut({ action: "later", when: "worse" }) : a === "undo" ? undo() : sheet(a);
+    return a === "done" ? wayOut({ action: "done" }) : a === "worse" ? wayOut({ action: "later", when: "worse" }) : a === "undo" ? undo()
+      : a === "open" ? openInOpenCode() : a === "investigate" ? investigate() : a === "correct" ? correctSheet() : sheet(a);
   }
 });
 
 document.addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.target;
+  if (form.matches("[data-sheet=correct]")) return saveCorrection(form);
   if (form.matches("[data-sheet]")) return submitSheet(form);
   if (form.matches("[data-dock]")) return submitPrompt(false);
 });
