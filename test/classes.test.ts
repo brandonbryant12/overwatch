@@ -5,25 +5,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { endpoint, IDENTITY, quietStep } from "../src/collect.ts";
 import { LIMITS, parseConfig, type Source } from "../src/config.ts";
 import { act, ask, deadlines } from "../src/inbox.ts";
 import { num, sample } from "../src/parse.ts";
-import { Full, references, Store, json, type Clean } from "../src/store.ts";
+import { Full, references, Store, TABLES, json, type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "ow-class-test-"));
-const REFS = (() => {
-  const store = Store.own(dir());
-  try {
-    return references((sql) => store.all(sql));
-  } finally {
-    store.close();
-  }
-})();
+const REFS = references();
 const config = (dataDir: string) =>
   parseConfig(
     { version: 2, dataDir, apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop" } } } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] },
@@ -225,4 +218,29 @@ test("class: a decision is bound to what was reviewed; interleaved tabs never re
     }),
     { numRuns: 60 },
   );
+});
+
+test("build: every column of every created table is declared, as data or as a reference to a named parent", () => {
+  const store = Store.own(dir());
+  try {
+    for (const t of TABLES) {
+      const created = store.all<{ name: string }>(`SELECT name FROM pragma_table_info('${t.name}')`).map((c) => c.name).sort();
+      assert.deepEqual(created, [...t.columns].sort(), `${t.name} has an undeclared or missing column`);
+      for (const [column, to] of Object.entries(t.refs ?? {})) {
+        assert.ok(t.columns.includes(column), `${t.name}.${column} is a reference to an undeclared column`);
+        assert.ok(TABLES.some((p) => p.name === to.split(".")[0] && p.columns.includes(to.split(".")[1]!)), `${t.name}.${column} refers to ${to}, which is not declared`);
+      }
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("build: only src/exec.ts starts a program, and only adapters open a connection", () => {
+  const src = new URL("../src/", import.meta.url).pathname;
+  for (const f of readdirSync(src).filter((n) => n.endsWith(".ts"))) {
+    const text = readFileSync(join(src, f), "utf8");
+    if (f !== "exec.ts") assert.doesNotMatch(text, /node:child_process|\bspawn\(|\bexecFile\(/, `${f} starts a program outside exec.ts`);
+    if (!["opencode.ts", "datadog.ts", "doctor.ts", "main.ts"].includes(f)) assert.doesNotMatch(text, /\bfetch\(/, `${f} opens a connection outside the adapters`);
+  }
 });

@@ -69,9 +69,11 @@ export async function install(configFile: string, dataDir: string) {
   return { label: LABEL, plist: file, config, log: join(dataDir, "service.log") };
 }
 
+/** Unloads and removes the agent, then asks launchd what is still loaded: the report is what is, not what was tried. */
 export async function uninstall() {
   const file = plistPath();
   const r = await run(["bootout", `${domain()}/${LABEL}`]);
+  if ((await run(["print", `${domain()}/${LABEL}`])).ok) throw new Error(`launchctl bootout failed (${r.text || "no reason given"}); ${LABEL} is still loaded and ${file} was kept. Stop it with: launchctl bootout ${domain()}/${LABEL}`);
   rmSync(file, { force: true });
   return { label: LABEL, plist: file, wasLoaded: r.ok };
 }

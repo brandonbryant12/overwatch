@@ -10,7 +10,8 @@ const BIN = new URL("../bin/overwatch", import.meta.url).pathname;
 function rig(secret = "keychain:ow/token", failing = "") {
   const home = mkdtempSync(join(tmpdir(), "ow-launchd-")), calls = join(home, "calls");
   const fake = join(home, "launchctl");
-  writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in ${failing || "none"}) echo "refused $1" >&2; exit 5;; esac\nexit 0\n`, { mode: 0o755 });
+  const loaded = join(home, "loaded");
+  writeFileSync(fake, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in ${failing || "none"}) echo "refused $1" >&2; exit 5;; esac\ncase "$1" in bootstrap) touch "${loaded}";; bootout) rm -f "${loaded}";; print) test -f "${loaded}" || exit 113;; esac\nexit 0\n`, { mode: 0o755 });
   const config = join(home, "config.json");
   writeFileSync(config, JSON.stringify({
     version: 2, dataDir: join(home, "data"), mcpToken: secret,
@@ -47,7 +48,8 @@ test("restart kickstarts the loaded agent; uninstall unloads it, removes the pli
   assert.equal(r.status, 0, r.stderr);
   assert.equal(existsSync(x.plist), false);
   assert.equal(existsSync(join(x.home, "data")), true);
-  assert.equal(x.calls().at(-1), `bootout gui/${process.getuid!()}/dev.overwatch.service`);
+  assert.equal(x.calls().at(-2), `bootout gui/${process.getuid!()}/dev.overwatch.service`);
+  assert.equal(x.calls().at(-1), `print gui/${process.getuid!()}/dev.overwatch.service`);
 });
 
 test("an env: secret is refused before anything is written, and a launchctl refusal is exit 3 with its words", () => {

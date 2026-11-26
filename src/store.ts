@@ -22,7 +22,12 @@ export const APPLICATION_ID = 0x4f575432;
 export const USER_VERSION = 1;
 
 /** Each table: its DDL, and which of its columns hold JSON. Restore copies exactly these columns, in this order. */
-export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: ReadonlyArray<string>; json?: ReadonlyArray<string>; derived?: boolean }> = [
+/**
+ * The schema, declared once: every table is created from its DDL here, and every column is listed, either as data or,
+ * in `refs`, as a reference to a named parent ("table.key"). Restore checks every declared reference, whatever the
+ * column is called; a unit test fails the build when a created table has a column this list does not declare.
+ */
+export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: ReadonlyArray<string>; refs?: Readonly<Record<string, string>>; json?: ReadonlyArray<string>; derived?: boolean }> = [
   {
     name: "events",
     ddl: `CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 40),
@@ -65,6 +70,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     name: "occurrences",
     ddl: `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL DEFAULT '', at_ms INTEGER NOT NULL, incident TEXT NOT NULL DEFAULT '')`,
     columns: ["key", "source", "stream", "at_ms", "incident"],
+    refs: { incident: "incidents.id" },
   },
   {
     name: "baselines",
@@ -103,18 +109,21 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       code TEXT NOT NULL CHECK (json_valid(code)), started_ms INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'reader', slot INTEGER, work_id TEXT,
       UNIQUE (job_id, attempt))`,
     columns: ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms", "role", "slot", "work_id"],
+    refs: { job_id: "jobs.id" },
     json: ["code"],
   },
   {
     name: "messages",
     ddl: `CREATE TABLE messages (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), purpose TEXT NOT NULL CHECK (purpose IN ('prompt','nudge')))`,
     columns: ["id", "run_id", "purpose"],
+    refs: { run_id: "runs.id" },
   },
   {
     name: "evidence",
     ddl: `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL,
       text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`,
     columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
+    refs: { run_id: "runs.id" },
   },
   {
     // What a piece of evidence is, apart from what its source is called. A piece without a row here is not
@@ -123,11 +132,13 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE origins (handle TEXT PRIMARY KEY REFERENCES evidence(handle) ON DELETE CASCADE,
       origin TEXT NOT NULL CHECK (origin IN ('telemetry','code','history','generated')))`,
     columns: ["handle", "origin"],
+    refs: { handle: "evidence.handle" },
   },
   {
     name: "hourly",
     ddl: `CREATE TABLE hourly (incident TEXT NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), PRIMARY KEY (incident, hour))`,
     columns: ["incident", "hour", "count"],
+    refs: { incident: "incidents.id" },
   },
   {
     name: "asks",
@@ -135,6 +146,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL,
       state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT, message TEXT)`,
     columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason", "message"],
+    refs: { job_id: "jobs.id" },
   },
   {
     // Agent work, one item per reading, challenge or answer: the queue the two slots take from, owner questions first.
@@ -143,6 +155,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0,
       ask_key TEXT, run_id TEXT REFERENCES runs(id), reason TEXT, seq INTEGER NOT NULL)`,
     columns: ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"],
+    refs: { job_id: "jobs.id", run_id: "runs.id" },
   },
   {
     // Idempotent owner requests (investigate, open, correct): the key binds to the operation and its payload.
@@ -155,6 +168,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     name: "corrections",
     ddl: `CREATE TABLE corrections (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), text TEXT NOT NULL, date TEXT NOT NULL)`,
     columns: ["seq", "app", "subject", "job_id", "text", "date"],
+    refs: { job_id: "jobs.id" },
   },
   {
     name: "notifications",
@@ -162,18 +176,21 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER,
       reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`,
     columns: ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"],
+    refs: { subject: "incidents.id" },
   },
   {
     // The latest lines of each problem (cleaned), what an investigation reads as telemetry.
     name: "lines",
     ddl: `CREATE TABLE lines (incident TEXT NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, text TEXT NOT NULL)`,
     columns: ["incident", "source", "at_ms", "text"],
+    refs: { incident: "incidents.id" },
   },
   {
     // When a problem was first observed, by the provider's own time (a log line's timestamp): its onset.
     name: "onsets",
     ddl: `CREATE TABLE onsets (incident TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)`,
     columns: ["incident", "at_ms"],
+    refs: { incident: "incidents.id" },
   },
   {
     // When a deploy rolled out: the provider's rollout time when it gives one (exact), else the interval between the
@@ -195,6 +212,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       state TEXT NOT NULL CHECK (state IN ('pending','regression','no_signal','unknown','same_release')), reason TEXT, staging_count INTEGER, production_count INTEGER,
       data TEXT NOT NULL CHECK (json_valid(data)), incident TEXT)`,
     columns: ["id", "app", "staging_revision", "production_revision", "start_seq", "state", "reason", "staging_count", "production_count", "data", "incident"],
+    refs: { incident: "incidents.id" },
     json: ["data"],
   },
   {
@@ -205,6 +223,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       state TEXT NOT NULL, reason TEXT, previous TEXT, deployed TEXT, base TEXT, candidate TEXT, head TEXT, diff TEXT, run_id TEXT,
       data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0)`,
     columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq", "version"],
+    refs: { incident: "incidents.id", job_id: "jobs.id", run_id: "runs.id" },
     json: ["data"],
   },
   {
@@ -212,6 +231,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     name: "proposals",
     ddl: `CREATE TABLE proposals (run_id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)), refused TEXT)`,
     columns: ["run_id", "body", "refused"],
+    refs: { run_id: "runs.id" },
     json: ["body"],
   },
   {
@@ -219,6 +239,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')),
       claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`,
     columns: ["id", "run_id", "verdict", "claims", "code", "body"],
+    refs: { run_id: "runs.id" },
     json: ["claims", "code", "body"],
   },
   {
@@ -228,6 +249,7 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE citations (finding TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
       handle TEXT NOT NULL REFERENCES evidence(handle) ON DELETE RESTRICT, PRIMARY KEY (finding, handle))`,
     columns: ["finding", "handle"],
+    refs: { finding: "findings.id", handle: "evidence.handle" },
     derived: true,
   },
 ];
@@ -297,22 +319,9 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
 ];
 
-/**
- * References are read from the schema, never from a list someone keeps: a column whose name is a key of another
- * table (`run_id`, `job_id`, `incident`, `finding`, `handle`) refers to that table, in every table that has it, now or
- * later. Columns declared with SQL REFERENCES are also checked by the database (foreign_key_check).
- */
-const VOCABULARY: Readonly<Record<string, [parent: string, key: string]>> = {
-  run_id: ["runs", "id"], job_id: ["jobs", "id"], incident: ["incidents", "id"], finding: ["findings", "id"], handle: ["evidence", "handle"],
-};
-export function references(read: (sql: string) => Array<{ name: string }>): Array<[table: string, column: string, parent: string, key: string]> {
-  const tables = read("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").map((t) => t.name);
-  return tables.flatMap((table) =>
-    read(`SELECT name FROM pragma_table_info('${table}')`).flatMap(({ name }) => {
-      const ref = VOCABULARY[name];
-      return ref && ref[0] !== table ? [[table, name, ref[0], ref[1]] as [string, string, string, string]] : [];
-    }),
-  );
+/** Every declared reference, whatever its column is called. SQL REFERENCES are also checked by the database. */
+export function references(): Array<[table: string, column: string, parent: string, key: string]> {
+  return TABLES.flatMap((t) => Object.entries(t.refs ?? {}).map(([column, to]) => [t.name, column, ...to.split(".")] as [string, string, string, string]));
 }
 
 /**
@@ -655,7 +664,7 @@ export class Store {
           w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
           const broken = this.all<{ table: string; parent: string }>("PRAGMA foreign_key_check");
           if (broken.length) throw new Error(`a ${broken[0]!.table} row refers to a ${broken[0]!.parent} row that does not exist (${broken.length})`);
-          for (const [table, column, parent, key] of references((sql) => this.all(sql))) {
+          for (const [table, column, parent, key] of references()) {
             const n = this.get<{ n: number }>(`SELECT count(*) AS n FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent})`)!.n;
             if (n) throw new Error(`a ${table}.${column} refers to a ${parent} row that does not exist (${n})`);
           }

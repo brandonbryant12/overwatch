@@ -6,7 +6,7 @@ import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Config } from "./config.ts";
-import { run as exec } from "./exec.ts";
+import { effect, outbound, run as exec } from "./exec.ts";
 import { LABEL, launchctl } from "./launchd.ts";
 import { validate } from "./datadog.ts";
 import { kubectl } from "./kube.ts";
@@ -46,7 +46,9 @@ export async function doctor(config: Config, store: Store | null, emptyDir: stri
     }
   };
   const ok = async (command: string, args: string[], what: string) => {
-    const r = await exec(command, args, { timeoutMs: 20_000 });
+    // A call that may reach a host (gh) is an outbound effect: it needs a recorded intent, so the database.
+    if (outbound(command, args) && !store) throw new Error(`${what} needs the database: run doctor with the service running, or with it stopped`);
+    const r = outbound(command, args) ? await effect(store!.permit("host", null, { doctor: what }), command, args, { timeoutMs: 20_000 }) : await exec(command, args, { timeoutMs: 20_000 });
     if (r.code !== 0) throw new Error(`${what}: ${(r.stderr || r.stdout).trim().slice(0, 200) || `exit ${r.code}`}`);
     return r.stdout.trim().split("\n")[0] ?? "";
   };

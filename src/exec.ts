@@ -20,7 +20,7 @@ interface Options { cwd?: string; timeoutMs?: number; maxBytes?: number; env?: N
 /** What kind of outbound effect a command is, or null for a read. */
 export function outbound(command: string, args: ReadonlyArray<string>): string | null {
   const name = command.split("/").at(-1);
-  return name === "gh" ? "host" : name === "terminal-notifier" ? "notice" : name === "git" && args.includes("push") ? "push" : null;
+  return name === "gh" && args[0] !== "--version" ? "host" : name === "terminal-notifier" ? "notice" : name === "git" && args.includes("push") ? "push" : null;
 }
 
 /** Runs a read to completion, without a shell, and never throws: a missing program is exit code 127. */

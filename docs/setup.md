@@ -103,8 +103,9 @@ Overwatch has no plugin. OpenCode loads it from its own configuration (`~/.confi
 ```
 
 and the owner skill: copy `skills/overwatch/` from this repository into OpenCode's skills folder
-(`~/.config/opencode/skills/overwatch/SKILL.md`). The three agents are the roles Overwatch runs: readers file a
-finding, the challenger files a challenge, the responder only reads to answer a question. Overwatch also binds the
+(`~/.config/opencode/skills/overwatch/SKILL.md`). The four agents are the roles Overwatch runs: readers file a
+finding, the challenger files a challenge, the responder only reads to answer a question, and the fixer (only for an
+app that opts in to fixes, step 6) selects one change. Overwatch also binds the
 role on its side, so a responder that somehow had `ow_finding` allowed would still be refused.
 
 **Your own sessions.** Any ordinary OpenCode session (your default agent, not the three above) can use the owner
@@ -125,10 +126,12 @@ not set. Under a plain `opencode serve` (as in the sample above), set `opencode.
 at the `OPENCODE_PASSWORD` it runs with. Without a matching password every OpenCode check fails with 401.
 
 Check: `bin/overwatch doctor` reports `opencode`, `model`, `agent` (the investigator), `agent:challenger`,
-`agent:responder`, `mcp` and `skill`. These show that OpenCode answers, the model replies, each role's rules allow
-exactly its tools (the four reading tools plus its own filing tool, none for the responder), the MCP server is
-connected and the skill is installed; they do not run a tool. A missing challenger or responder is reported with its
-repair but does not fail `doctor` on its own: collection and the page work without them, investigations do not. `bin/overwatch trial` is what shows the tools working end to end. The
+`agent:responder`, `mcp` and `skill`, and `agent:fixer` when an app opts in to fixes. These show that OpenCode
+answers, the model replies, each role's rules allow exactly its tools (the four reading tools plus its own filing
+tool, none for the responder, only `ow_telemetry` and `ow_proposal` for the fixer), the MCP server is connected and the
+skill is installed; they do not run a tool. A missing challenger, responder or fixer is reported as failing with its
+repair, but these role checks do not change `doctor`'s exit code: collection and the page work without them;
+investigations need the first three, fixes need the fixer, and each stays off until its trial passes. `bin/overwatch trial` is what shows the tools working end to end. The
 run in `test/real/opencode.ts` does both against a real OpenCode 2.4.1 with a scripted model.
 
 ## 4. Run it
@@ -162,7 +165,7 @@ Check: `bin/overwatch status` shows each environment's health, and the page is a
 ## 5. Check the laptop and the model
 
 ```sh
-bin/overwatch doctor     # every dependency, one by one, each failure with its fix (exit 4 if any fails)
+bin/overwatch doctor     # every dependency, each failure with its fix; exit 4 if a required check fails (role checks are reported, not counted)
 bin/overwatch trial      # five seeded cases through your model; turns automation on only if it passes
 ```
 
@@ -183,10 +186,13 @@ into its own mirror under `<dataDir>/fixes/` and pushes only `ow/fix/<attempt>` 
 rule covers `ow/fix/*`, and that your base branch is protected as usual.
 
 **Verification is macOS only.** The verify commands run in a fresh checkout of the candidate under `sandbox-exec`
-(`/usr/bin/sandbox-exec`): no network, writes only inside that checkout and a temporary folder, one process group
-at a time, 60 s per command and 180 s in all. Without `sandbox-exec`, verification fails closed and no draft is
+(`/usr/bin/sandbox-exec`) with a deny-by-default profile: no network; reads only of the system folders, the
+verify program's own installation, that checkout and its temporary folder; writes only inside the checkout and that
+folder; one process group at a time, 60 s per command and 180 s in all. The verifier and every file it imports come
+from the base: a change that touches one is refused. Without `sandbox-exec`, verification fails closed and no draft is
 published; the item says why. A fork on another system has to supply an OS-enforced equivalent with the same
-guarantees (no network, no writes outside the checkout, no host credentials, a killable process group), for example
+guarantees (no network, no reads or writes outside the checkout and the program's installation, a killable process
+group), for example
 a rootless container or `bwrap` on Linux, as `verify()` in `src/fixes.ts`.
 
 **Configure** the app (only these files may change, and only these commands verify):

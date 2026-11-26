@@ -174,8 +174,8 @@ export class Fixes {
 
   /** The one way an attempt changes: compare-and-set on the version the caller read; a newer decision wins. */
   private set(w: Writer, row: Row, state: string, reason: string | null, change: Partial<Row> = {}, data: Data = {}) {
+    // A retry's own "next" lasts only while it is the reason; the page says what each state waits for otherwise.
     const merged = { ...(JSON.parse(this.store.get<{ data: string }>("SELECT data FROM fixes WHERE id = ?", row.id)!.data) as Data), next: undefined, ...data, ...(state !== row.state ? { retries: 0, retryAt: 0 } : {}) };
-    merged.next ??= NEXT[state];
     const cols = Object.keys(change);
     const changed = w.run(`UPDATE fixes SET state = ?, reason = ?, data = ?, version = version + 1${cols.map((c) => `, ${c} = ?`).join("")} WHERE id = ? AND version = ?`,
       state as Clean, reason as Clean | null, json(merged), ...cols.map((c) => (change as Record<string, Clean>)[c]!), row.id as Clean, row.version).changes;
@@ -529,16 +529,6 @@ export class Fixes {
     return { passed, attempted: 2, verified };
   }
 }
-
-/** What the owner waits for in each state: the next observation that would change it. */
-const NEXT: Record<string, string> = {
-  queued: "Checking the rules, then a model selects a change.", proposing: "Waiting for the fixer's selection.", verifying: "Running the verify commands in isolation.",
-  publishing: "Asking the host, step by step.", draft: "Waiting for the draft to be merged or closed (checked once a minute).",
-  awaiting_deploy: "Waiting for a deployment that contains the merge, then three quiet intervals.", released_quiet: "Nothing: closed by rule.",
-  closed_unmerged: "Nothing: the problem stays open; a new investigation can lead to a new proposal.", blocked: "Pass the trials (overwatch trial --fixes), then press f.",
-  ineligible: "A new investigation or a new deployment; f checks again.", refused: "Nothing for this finding.", verify_failed: "A passing overwatch trial --fixes, then f.",
-  stale: "Press f to try again on the current base.", declined: "Nothing: declined.", unresolved: "Press f to try again once the host answers.",
-};
 
 /** Git in one repository (the private mirror, or a calibration repository). */
 interface Git {

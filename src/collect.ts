@@ -115,7 +115,7 @@ export class Slice {
   /** The provider's rollout time of `revision`, when the cluster says it. */
   rollout: number | null = null;
   /** A used-capacity sample (null value: not measured), by the provider's time. */
-  capacity: { at: number; value: number | null } | null = null;
+  capacity: { at: number; value: number | null; unit: string | null } | null = null;
   readonly source: Source;
   readonly span: Span;
   private readonly saturated: ReadonlyArray<Span>;
@@ -528,7 +528,7 @@ export class Collector {
           slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? end });
           // Fresh as of the point's own time: an old point returned again is not a new measurement.
           slice.readings.set("metrics", observe(point !== null, point?.at ?? 0));
-          if (source.capacity) slice.capacity = { at: point?.at ?? end, value: point ? point.value : null };
+          if (source.capacity) slice.capacity = { at: point?.at ?? end, value: point ? point.value : null, unit: point?.unit ?? null };
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
@@ -632,7 +632,8 @@ export class Collector {
       if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
       if (slice.revision) this.deploy(w, source, slice.revision, slice.rollout, lastSeen, now);
       if (slice.capacity && source.capacity) {
-        const series = sha(source.metric, source.capacity.resource, source.capacity.unit, source.capacity.limit);
+        // A sample carries what it proves: the metric, the configured unit and ceiling, and the provider's own unit.
+        const series = `${sha(source.metric, source.capacity.resource, source.capacity.unit, source.capacity.limit)}:${slice.capacity.unit ?? ""}`;
         w.run("INSERT INTO samples (source, series, at_ms, value) VALUES (?, ?, ?, ?)", source.id as Clean, series as Clean, slice.capacity.at, slice.capacity.value);
         w.run("DELETE FROM samples WHERE source = ? AND id NOT IN (SELECT id FROM samples WHERE source = ? ORDER BY id DESC LIMIT 60)", source.id as Clean, source.id as Clean);
       }

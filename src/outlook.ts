@@ -40,8 +40,11 @@ export function forecast(source: Source, rows: ReadonlyArray<{ series: string; a
   const base = { source: source.id, resource: cap.resource, unit: cap.unit, limit: cap.limit, intervalMs: every };
   const run: Array<{ at: number; value: number }> = [];
   let why: string | null = null;
+  let unit: string | null = null;
   for (const r of rows) {
-    if (r.series !== series) { run.length = 0; why = "the metric or its ceiling changed; history starts again"; continue; }
+    // Samples combine only when they carry the same metric, ceiling and provider unit.
+    const [hash, provider = ""] = r.series.split(":");
+    if (hash !== series || provider !== unit) { run.length = 0; why = hash !== series ? "the metric or its ceiling changed; history starts again" : "the provider's unit changed; samples in different units do not combine"; unit = provider; if (hash !== series) continue; }
     if (r.value === null || !Number.isFinite(r.value) || r.value < 0) { run.length = 0; why = "a reading was not measured; the series starts again after it"; continue; }
     const last = run.at(-1);
     if (last && r.at_ms <= last.at) continue; // the same provider point returned again is not a new sample
@@ -110,6 +113,15 @@ export function compare(store: Store, config: Config) {
       });
       continue;
     }
+    // A newer production rollout invalidates any comparison made against the old one, finished or not.
+    if (pr && current.production_revision !== null && pr.revision !== current.production_revision && current.state !== "same_release") {
+      const same = pr.revision === current.staging_revision;
+      store.tx((w) => {
+        w.run("UPDATE comparisons SET state = ?, reason = ? WHERE id = ?", (same ? "same_release" : "unknown") as Clean, (same ? "production now runs the staging revision" : `production rolled out ${pr.revision.slice(0, 12)} since; this comparison no longer describes it`) as Clean, current.id as Clean);
+        w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state: same ? "same_release" : "unknown", productionRevision: pr.revision });
+      });
+      continue;
+    }
     if (current.state !== "pending") continue;
     const data = JSON.parse(current.data) as Data;
     const now = sources.map((s) => ({ s, e: latest(s) }));
@@ -120,11 +132,17 @@ export function compare(store: Store, config: Config) {
       const d = JSON.parse(e!.data) as { ordinary?: boolean; readings?: Record<string, { state: string }> };
       return !d.ordinary || s.readings.some((r) => d.readings?.[r] && d.readings[r]!.state !== "ok");
     });
+    // Aligned: every source's interval ends at the same provider time (within a second), or the two are not comparable.
+    const ends = now.map(({ e }) => (e!.kind === "slice" ? (JSON.parse(e!.data) as { to: number }).to : 0));
     const moved = (pr && pr.revision !== current.production_revision) ? "production rolled out another revision" : null;
     const finish = (w: Writer, state: string, reason: string | null, sc: number | null, pc: number | null, incident: string | null = null) => {
       w.run("UPDATE comparisons SET state = ?, reason = ?, staging_count = ?, production_count = ?, data = ?, incident = ? WHERE id = ?", state as Clean, reason as Clean | null, sc, pc, json(data), incident as Clean | null, current.id as Clean);
       w.event("comparison", `env:${app}/${staging}` as Clean, { id: current.id, state, reason, stagingCount: sc, productionCount: pc });
     };
+    if (!unmeasured && !moved && Math.max(...ends) - Math.min(...ends) > 1000) {
+      store.tx((w) => finish(w, "unknown", `staging and production intervals are not aligned (their ends differ by ${Math.round((Math.max(...ends) - Math.min(...ends)) / 1000)} s); they cannot be compared`, null, null));
+      continue;
+    }
     if (unmeasured || moved) {
       const side = unmeasured?.s.environment === production ? `production (${production})` : `staging (${staging})`;
       store.tx((w) => finish(w, "unknown", moved ?? `${side} was not fully measured in interval ${n}: ${unmeasured!.s.name} ${unmeasured!.e!.kind === "slice" ? "had a gap or catch-up" : "failed"}`, null, null));

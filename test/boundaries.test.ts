@@ -83,10 +83,16 @@ test("class: a reading is complete only when the adapter recognised the reply; a
 
 test("class: freshness is the provider's observation time, never the time Overwatch asked", async () => {
   await fc.assert(
-    fc.asyncProperty(fc.integer({ min: 0, max: 50 * 60_000 }), async (age) => {
+    fc.asyncProperty(fc.oneof(fc.integer({ min: 0, max: 61_000 }), fc.integer({ min: 61_001, max: 50 * 60_000 })), async (age) => {
       const r = rig(["metrics"]);
       reply.query = { series: [{ metric: "shop.errors", pointlist: [[r.now + 60_000 - age, 1]] }] };
       await r.step();
+      // A point dated outside the queried window (one interval) proves nothing about it: a gap, never fresh.
+      if (age > 61_000) {
+        assert.equal(r.reading("metrics")?.state, "gap");
+        assert.notEqual(r.snap().environments[0]!.health, "quiet");
+        return r.store.close();
+      }
       // Stored, and as every consumer sees it: the snapshot's reading age and the environment's health.
       assert.equal(r.reading("metrics")?.ok_ms, r.now - age);
       assert.equal(r.store.get<{ at_ms: number }>("SELECT at_ms FROM readings")!.at_ms, r.now - age);
