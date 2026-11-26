@@ -5,6 +5,8 @@ import { rig, stamp } from "../m1/rig.mjs"
 import { finished, send, model, until } from "../m3/rig.mjs"
 import { browser, binary } from "./chrome.mjs"
 
+import { fleetPageStates } from "./m4-page-fixture.mjs"
+
 async function fleet(x) {
   const environments = x.cfg.apps.shop.environments
   const template = structuredClone(environments.prod)
@@ -68,17 +70,29 @@ for (const kind of ["demo", "fleet"]) test("owner keyboard timings, " + kind, { 
   if (hold) t.after(()=>hold.resolve())
   const b = await browser(t, x)
   await b.cmd("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
+  if (hold) await b.cmd("Page.enable")
+  if (hold) await b.cmd("Page.addScriptToEvaluateOnNewDocument", {source: "(" + fleetPageStates.toString() + ")()"})
   await b.visit(x.url + "/"); await b.wait("document.querySelector('[data-connection=live]')")
   const s = await x.status()
-  assert.deepEqual([s.incidents.length, s.environments.length], kind === "demo" ? [5, 3] : [200, 6])
+  assert.deepEqual([s.incidents.length, s.environments.length], kind === "demo" ? [7, 3] : [200, 6])
   const time = async (label, fn) => {
     const start = performance.now(); await fn()
     t.diagnostic(label + " " + Math.round(performance.now() - start) + " ms")
+  }
+  if (hold) {
+    for (const env of s.environments) {
+      await b.evaluate("document.querySelector('[data-env=" + env.environment + "]').click()")
+      await b.wait("document.querySelector('[data-focus-id]').innerText.includes('Staging against production')")
+      const stateText = await b.evaluate("Array.from(document.querySelectorAll('[data-focus-id] .panel')).filter(p=>['Time left','Staging against production'].includes(p.querySelector('h3')?.innerText)).map(p=>p.innerText).join(' / ')")
+      t.diagnostic(env.environment + " " + stateText.replaceAll("\n"," "))
+    }
+    await b.visit(x.url + "/"); await b.wait("document.querySelector('[data-connection=live]')")
   }
   await b.key("Enter")
   t.diagnostic("Empty-focus Enter targets " + await b.evaluate("document.activeElement.outerHTML.slice(0,85)"))
   await b.key("Escape")
   await b.key("j"); await b.key("j")
+  if (hold) await b.wait("document.querySelectorAll('[data-fix]').length === 14")
   for (const key of ["d", "l", "n"]) {
     const id = await b.evaluate(focus)
     await time(key, async () => {

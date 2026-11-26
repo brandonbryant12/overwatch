@@ -74,3 +74,18 @@ M3 adds tests of peer delivery, durable filing and request boundaries, evidence 
 ```
 
 M4 implements the assessor side of revision 5 only. The disposable bare Git remote accepts candidate branches and logs attempted ref updates. The fake gh records draft status, head, base and body, and lets the fixture drive an external close or merge. The service sees these changes through its ordinary scheduler. Tests exercise an unearned gate, an investigation-only gate, a disallowed proposal, failed app verification, a planted change request, both draft lifecycles, a short and a noisy series, and staging compared with both complete and missing production data. On M3 the fixture control runs; prospective scenarios stop at the unsupported M4 configuration keys. See the assessment for observed pass/fail counts and focused reproduction commands.
+
+## Independent milestone 4 review
+
+The current M4 rules are in revision 6 of the interface contract. The draft fixture can install a selected multi-commit or merge rollout, different production sighting and replica-set clocks, a later base, and timed host-ledger barriers. Product Git operations target a disposable local bare remote. The fake host can independently fail, time out, report the wrong PR or retain a created draft across SIGKILL. Every acceptance assertion runs against the unchanged product. Deliberately failing regressions are part of the release ledger.
+
+Run the four milestone globs as above. The optional native run takes a separately unpacked macOS arm64 OpenCode 2.4.1 executable. The provider, cluster, Git remote and PR host are local fixtures.
+
+```sh
+OPENCODE_BIN=/absolute/path/to/package/bin/opencode node --no-warnings --test accept/m4/native.mjs
+node accept/m4/setup.mjs
+/Users/brandon/.local/bin/codex-heavy -- node accept/m4/extensions.mjs
+/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+```
+
+The timed fleet has 200 real fixture problems across six watched namespaces. A Chrome response fixture adds display examples of every fix, forecast and comparison state. The write routes, search, focus, queue and clipboard checks still exercise the real page and service. The native and publication tests separately exercise the states a verifier or host actually produced. The installation exercise clones the assessed revision and runs the guide examples with an isolated home and launchctl ledger.

@@ -180,7 +180,7 @@ export async function peers(world) {
         }
         if (path.endsWith("/monitor")) return send(w.monitors ?? [])
         if (path.endsWith("/query"))
-          return send({
+          return send(w.metricReply ?? {
             status: "ok",
             series: [{ metric: "shop.errors", pointlist: [[w.ddPointTime ?? Number(u.searchParams.get("to")) * 1000, "ddValue" in w ? w.ddValue : 1]] }],
           })

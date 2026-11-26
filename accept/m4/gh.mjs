@@ -9,11 +9,28 @@ fs.appendFileSync(path.join(cwd, "gh.jsonl"), JSON.stringify(args) + "\n")
 const rows = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : []
 const option = (n) => (args.includes(n) ? args[args.indexOf(n) + 1] : null)
 const [group, op] = args
+const faultFile = path.join(cwd, "host-fault.json")
+const fault = fs.existsSync(faultFile) ? JSON.parse(fs.readFileSync(faultFile)) : {}
+async function boundary(stage) {
+  if (fault.pause !== stage || fs.existsSync(path.join(cwd,"host-resume"))) return
+  fs.writeFileSync(path.join(cwd,"host-paused"),stage)
+  const end = Date.now()+12000
+  while (!fs.existsSync(path.join(cwd,"host-resume")) && Date.now()<end)
+    await new Promise(r=>setTimeout(r,15))
+  if (fault.interrupt) process.exit(1)
+}
+if (group === "pr" && op === "list" && fault.listTimeout) await new Promise(r=>setTimeout(r,32000))
+await boundary(group === "api" ? "protection" : op)
+if (group === "api" && fault.protectionError) { console.error("branch policy unavailable"); process.exit(1) }
+if (group === "pr" && op === "list" && fault.listError) { console.error("draft lookup unavailable"); process.exit(1) }
+if (group === "pr" && op === "list" && fault.listRow) { console.log(JSON.stringify([{...fault.listRow,headRefName:option("--head")}])); process.exit(0) }
+if (group === "pr" && op === "create" && fault.createError) { console.error("fixture draft permission denied"); process.exit(1) }
+if (group === "pr" && op === "create" && fault.createOutput) { console.log(fault.createOutput); process.exit(0) }
 if (args[0] === "--version") console.log("gh version 2.80.0")
 else if (group === "auth" && op === "status") console.log("Fixture account")
 else if (group === "api" && args.some((a) => a.includes("branches/"))) {
   const name = args.find((a) => a.includes("branches/")).split("branches/")[1]
-  console.log(JSON.stringify({ name, protected: name === "main" }))
+  console.log(JSON.stringify({ name, protected: fault.protected === true || name === "main" }))
 } else if (group === "pr" && op === "create") {
   const body = option("--body-file") ? fs.readFileSync(option("--body-file"), "utf8") : option("--body")
   const number = rows.length + 1,
@@ -30,6 +47,7 @@ else if (group === "api" && args.some((a) => a.includes("branches/"))) {
     mergeCommit: null,
   })
   fs.writeFileSync(file, JSON.stringify(rows))
+  await boundary("created")
   console.log(url)
 } else if (group === "pr" && ["list", "view"].includes(op)) {
   let result = rows.filter((r) => !option("--head") || r.headRefName === option("--head"))

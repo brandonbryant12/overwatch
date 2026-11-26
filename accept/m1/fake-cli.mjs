@@ -99,6 +99,7 @@ else if (verb === "get" && res.startsWith("deploy"))
       },
     ],
   })
+else if (verb === "get" && res === "replicasets") json({ items: state.replicaSets ?? [] })
 else if (verb === "get" && res.startsWith("event")) json({ items: state.events ?? [] })
 else if (verb === "get") json({ items: [] })
 else if (verb === "top") {
