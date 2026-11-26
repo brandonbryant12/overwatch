@@ -10,6 +10,7 @@
 import { LIMITS, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { approvalKey } from "./trial.ts";
+import { inbox, rows as incidentRows } from "./inbox.ts";
 import type { Collector } from "./collect.ts";
 import type { Store } from "./store.ts";
 
@@ -59,6 +60,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
     return {
       app: w.app,
       environment: w.environment,
+      subject: `env:${w.app}/${w.environment}`,
       health,
       excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),
     };
@@ -66,7 +68,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
 
   const sources = config.sources.map((s) => {
     const r = rows.get(s.id);
-    return { id: s.id, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1, fix: r?.failure ? r.fix : null };
+    return { id: s.id, subject: `src:${s.id}`, app: s.app, environment: s.environment, kind: s.kind, checkpointMs: r?.checkpoint_ms ?? null, failure: r?.failure ?? null, streak: r?.streak ?? 0, nextMs: r?.next_ms ?? null, suspended: r?.suspended === 1, fix: r?.failure ? r.fix : null };
   });
 
   // One cause per failure; everything unreachable at once, across several independent endpoints, is one: offline.
@@ -98,11 +100,8 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
     automation: store.meta(approvalKey(config)) === "on",
     environments,
     sources,
-    incidents: store
-      .all<{ id: string; title: string; count: number; exact: number; severity: string; app: string; environment: string; active: number }>(
-        "SELECT id, title, count, exact, severity, app, environment, active FROM incidents ORDER BY seq, id",
-      )
-      .map((i) => ({ id: i.id, title: i.title, count: i.count, exact: i.exact === 1, severity: i.severity, app: i.app, environment: i.environment, active: i.active === 1 })),
+    incidents: incidentRows(store),
+    inbox: inbox(store),
     coverage,
     metrics: store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name").map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),

@@ -1,16 +1,19 @@
 /**
  * The service: one process that owns the database, runs the scheduler, and answers on IPv4 loopback.
  *
- * Routes: GET /v2/status, GET /v2/changes (server-sent events: a snapshot, then changes, and a heartbeat every five
- * seconds that needs no request), POST /v2/backup, /v2/doctor, /v2/trial, and POST /mcp (Streamable HTTP MCP, JSON
- * replies). Requests must come to a loopback host name, and from the same origin if they name one.
+ * Routes: GET / and the page's files from web/; GET /v2/status, GET /v2/changes (server-sent events: a snapshot, then
+ * changes, and a heartbeat every five seconds that needs no request), GET /v2/inbox, /v2/items/:id, /v2/search,
+ * /v2/focus; POST /v2/items/:id/action, /v2/ask, /v2/backup, /v2/doctor, /v2/trial, and POST /mcp (Streamable HTTP
+ * MCP, JSON replies). Requests must come to a loopback host name, and from the same origin if they name one.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { createInterface } from "node:readline";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { act, ask, deadlines, detail, focus, HttpError, inbox, search } from "./inbox.ts";
 import type { Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { Collector } from "./collect.ts";
@@ -41,6 +44,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const pass = async () => {
     await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
     if (options.collect) await collector.pass();
+    deadlines(store);
     options.tick?.();
   };
 
@@ -76,7 +80,8 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     const host = req.headers.host ?? "";
     if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)) return error(403, "forbidden", "Overwatch answers on loopback only");
     if (req.headers.origin && req.headers.origin !== `http://${host}`) return error(403, "forbidden", "cross-origin requests are refused");
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    const address = new URL(req.url ?? "/", "http://localhost");
+    const path = address.pathname;
     let raw = "";
     for await (const chunk of req) {
       raw += chunk;
@@ -91,6 +96,22 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       }
     }
     if (req.method === "GET" && path === "/v2/status") return reply(200, current());
+    if (req.method === "GET" && !path.startsWith("/v2/") && path !== "/mcp") return page(path, res);
+    try {
+      if (req.method === "GET" && path === "/v2/inbox") return reply(200, inbox(store));
+      if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? ""));
+      if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
+      const item = /^\/v2\/items\/([^/]+)(\/action)?$/.exec(path);
+      if (item && req.method === "GET" && !item[2]) return reply(200, detail(store, config, decodeURIComponent(item[1]!)));
+      if (item && req.method === "POST" && item[2]) {
+        const done = act(store, config, decodeURIComponent(item[1]!), body);
+        return reply(200, { ...current(), action: done });
+      }
+      if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, req.headers["idempotency-key"] as string | undefined));
+    } catch (e) {
+      if (e instanceof HttpError) return error(e.status, e.status === 404 ? "not_found" : e.status === 409 ? "conflict" : "bad_request", errorText(e));
+      throw e;
+    }
     if (req.method === "GET" && path === "/v2/changes") {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
       const s = current();
@@ -235,6 +256,20 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       rmSync(join(config.dataDir, "service.json"), { force: true });
     },
   };
+}
+
+/** The page: plain files from web/, the entry at /. Nothing outside that folder is served. */
+const WEB = fileURLToPath(new URL("../web/", import.meta.url));
+const TYPES: Record<string, string> = { ".html": "text/html; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
+function page(path: string, res: ServerResponse) {
+  const name = path === "/" ? "index.html" : path.slice(1);
+  const file = join(WEB, name);
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name) || !TYPES[extname(name)] || !existsSync(file) || !statSync(file).isFile()) {
+    res.writeHead(404, { "content-type": "application/json" });
+    return res.end(JSON.stringify({ error: { code: "not_found", message: `no page file ${path}` } }));
+  }
+  res.writeHead(200, { "content-type": TYPES[extname(name)]!, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+  res.end(readFileSync(file));
 }
 
 function networkKey(): string {

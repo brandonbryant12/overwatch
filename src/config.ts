@@ -54,7 +54,16 @@ export interface Source {
   readonly appKey?: string;
   readonly query?: string;
   readonly metric?: string;
+  /** The app's problem words: literal whole words per class (`problemPatterns`), else the defaults. */
+  readonly words: Words;
 }
+
+/** Literal whole words that make a line an error or a warning; an empty list disables the class. */
+export interface Words {
+  readonly error: ReadonlyArray<string>;
+  readonly warn: ReadonlyArray<string>;
+}
+export const DEFAULT_WORDS: Words = { error: ["error", "fatal", "panic", "exception", "critical"], warn: ["warn", "warning"] };
 
 export interface Watcher {
   readonly app: string;
@@ -70,7 +79,7 @@ export interface Config {
   readonly mcpToken: string | null;
   readonly opencode: { readonly url: string | null; readonly model: string | null; readonly password: string | null };
   readonly readings: number;
-  readonly apps: Readonly<Record<string, { readonly checkout: string }>>;
+  readonly apps: Readonly<Record<string, { readonly checkout: string; readonly words: Words }>>;
   readonly watchers: ReadonlyArray<Watcher>;
   readonly sources: ReadonlyArray<Source>;
 }
@@ -120,11 +129,19 @@ export function parseConfig(raw: unknown, file: string): Config {
   const oc = root.opencode === undefined ? {} : keys(root.opencode, "config.opencode", ["url", "model", "password"]);
   if (oc.url !== undefined && !/^https?:\/\//.test(text(oc.url, "config.opencode.url"))) throw new ConfigError("config.opencode.url must be an http(s) URL");
 
-  const apps: Record<string, { checkout: string }> = {};
+  const apps: Record<string, { checkout: string; words: Words }> = {};
   const envSources = new Map<string, Source[]>();
   for (const [app, appValue] of Object.entries(keys(root.apps, "config.apps", Object.keys(isObject(root.apps) ? root.apps : {})))) {
-    const a = keys(appValue, `apps.${app}`, ["checkout", "environments"], ["checkout", "environments"]);
-    apps[app] = { checkout: path(text(a.checkout, `apps.${app}.checkout`)) };
+    const a = keys(appValue, `apps.${app}`, ["checkout", "environments", "problemPatterns"], ["checkout", "environments"]);
+    const patterns = a.problemPatterns === undefined ? {} : keys(a.problemPatterns, `apps.${app}.problemPatterns`, ["error", "warn"]);
+    const words = (k: "error" | "warn") => {
+      if (patterns[k] === undefined) return DEFAULT_WORDS[k];
+      const list = patterns[k];
+      if (!Array.isArray(list) || list.some((w) => typeof w !== "string" || !/^\S+$/.test(w) || w.length > 100) || list.length > 50)
+        throw new ConfigError(`apps.${app}.problemPatterns.${k} must be a list of at most 50 nonempty words without spaces`);
+      return list as string[];
+    };
+    apps[app] = { checkout: path(text(a.checkout, `apps.${app}.checkout`)), words: { error: words("error"), warn: words("warn") } };
     for (const [environment, envValue] of Object.entries(keys(a.environments, `apps.${app}.environments`, Object.keys(isObject(a.environments) ? a.environments : {})))) {
       const e = keys(envValue, `apps.${app}.environments.${environment}`, ["sources"], ["sources"]);
       const list: Source[] = [];
@@ -138,7 +155,7 @@ export function parseConfig(raw: unknown, file: string): Config {
         const chosen = s.readings === undefined ? [...all] : s.readings;
         if (!Array.isArray(chosen) || chosen.some((r) => !all.includes(r)) || new Set(chosen).size !== chosen.length)
           throw new ConfigError(`${where}.readings must list some of: ${all.join(", ")}`);
-        const common = { id: `${app}/${environment}/${name}`, app, environment, name, kind: kind as "kubernetes" | "datadog", everyMs: 0, readings: chosen as string[], excluded: all.filter((r) => !chosen.includes(r)), checkout: apps[app].checkout };
+        const common = { id: `${app}/${environment}/${name}`, app, environment, name, kind: kind as "kubernetes" | "datadog", everyMs: 0, readings: chosen as string[], excluded: all.filter((r) => !chosen.includes(r)), checkout: apps[app].checkout, words: apps[app].words };
         if (kind === "kubernetes") {
           for (const k of ["baseUrl", "apiKey", "appKey", "query", "metric"]) if (s[k] !== undefined) throw new ConfigError(`${where}.${k} is a Datadog setting`);
           list.push({ ...common, context: text(s.context, `${where}.context`), namespace: text(s.namespace, `${where}.namespace`), selector: text(s.selector, `${where}.selector`) });

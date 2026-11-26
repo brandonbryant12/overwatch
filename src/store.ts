@@ -55,8 +55,11 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     ddl: `CREATE TABLE incidents (id TEXT PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
       severity TEXT NOT NULL CHECK (severity IN ('error','warn','info')), count INTEGER NOT NULL CHECK (count >= 0), exact INTEGER NOT NULL CHECK (exact IN (0,1)),
       first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL, seq INTEGER NOT NULL,
-      reading TEXT NOT NULL DEFAULT 'logs', active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0))`,
-    columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak"],
+      reading TEXT NOT NULL DEFAULT 'logs', active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
+      way TEXT CHECK (way IS NULL OR json_valid(way)), returned TEXT CHECK (returned IS NULL OR json_valid(returned)),
+      seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0)`,
+    columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq"],
+    json: ["way", "returned"],
   },
   {
     name: "occurrences",
@@ -110,6 +113,17 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
   },
   {
+    name: "hourly",
+    ddl: `CREATE TABLE hourly (incident TEXT NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), PRIMARY KEY (incident, hour))`,
+    columns: ["incident", "hour", "count"],
+  },
+  {
+    name: "asks",
+    ddl: `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')),
+      text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL)`,
+    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq"],
+  },
+  {
     name: "findings",
     ddl: `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')),
       claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`,
@@ -121,7 +135,12 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
 const INDEXES = `CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms);
 CREATE INDEX IF NOT EXISTS occurrences_stream ON occurrences (stream, at_ms);
 CREATE INDEX IF NOT EXISTS coverage_recent ON coverage (source, reading, id);
-CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment);`;
+CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment);
+CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour);
+CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);`;
+
+/** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
+const ADDED_TABLES = new Set(["hourly", "asks"]);
 
 const MAINTENANCE = `CREATE TABLE maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), active INTEGER NOT NULL CHECK (active IN (0,1)));
 INSERT INTO maintenance VALUES (1, 0);
@@ -147,6 +166,10 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["metrics", "over", "over INTEGER NOT NULL DEFAULT 0 CHECK (over >= 0)"],
   ["metrics", "under", "under INTEGER NOT NULL DEFAULT 0 CHECK (under >= 0)"],
   ["metrics", "breach", "breach INTEGER NOT NULL DEFAULT 0 CHECK (breach IN (0,1))"],
+  ["incidents", "way", "way TEXT CHECK (way IS NULL OR json_valid(way))"],
+  ["incidents", "returned", "returned TEXT CHECK (returned IS NULL OR json_valid(returned))"],
+  ["incidents", "seen_seq", "seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0)"],
+  ["incidents", "first_seq", "first_seq INTEGER NOT NULL DEFAULT 0"],
 ];
 
 /**
@@ -160,7 +183,10 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
   ["a row refers to a job, run or incident that does not exist", `SELECT (SELECT count(*) FROM runs WHERE job_id NOT IN (SELECT id FROM jobs))
     + (SELECT count(*) FROM messages WHERE run_id NOT IN (SELECT id FROM runs)) + (SELECT count(*) FROM evidence WHERE run_id NOT IN (SELECT id FROM runs))
     + (SELECT count(*) FROM findings WHERE run_id NOT IN (SELECT id FROM runs))
-    + (SELECT count(*) FROM occurrences WHERE incident <> '' AND incident NOT IN (SELECT id FROM incidents))`],
+    + (SELECT count(*) FROM occurrences WHERE incident <> '' AND incident NOT IN (SELECT id FROM incidents))
+    + (SELECT count(*) FROM asks WHERE job_id NOT IN (SELECT id FROM jobs))`],
+  ["a disposition or return names a sequence number that was never issued", `SELECT count(*) FROM incidents, (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0) AS s) h
+    WHERE coalesce(json_extract(way, '$.seq'), 0) > h.s OR coalesce(json_extract(returned, '$.seq'), 0) > h.s OR seen_seq > h.s OR first_seq > h.s`],
   ["a finding cites evidence that is not stored for its own run", `SELECT count(*) FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
     WHERE NOT EXISTS (SELECT 1 FROM evidence v WHERE v.handle = json_extract(p.value, '$.handle') AND v.run_id = f.run_id)`],
   ["an incident's times or a source's state are impossible", `SELECT (SELECT count(*) FROM incidents WHERE last_ms < first_ms)
@@ -274,6 +300,7 @@ export class Store {
       db.exec("COMMIT");
     } else if (app === APPLICATION_ID && version === USER_VERSION) {
       db.exec("BEGIN IMMEDIATE");
+      for (const t of TABLES) if (ADDED_TABLES.has(t.name)) db.exec(t.ddl.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS"));
       for (const [table, column, definition] of ADDED) {
         const has = (db.prepare(`SELECT 1 FROM pragma_table_info('${table}') WHERE name = ?`).get(column) as object | undefined) !== undefined;
         if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
@@ -375,13 +402,14 @@ export class Store {
       if (version !== USER_VERSION) throw new Incompatible(`${source} has schema version ${version}; this program restores version ${USER_VERSION}`);
       if (integrity !== "ok") throw new Incompatible(`${source} fails SQLite's integrity check`);
       const present = new Set((backup.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as Array<{ name: string }>).map((r) => r.name));
-      for (const t of TABLES) if (!present.has(t.name)) throw new Incompatible(`${source} has no ${t.name} table`);
+      for (const t of TABLES) if (!present.has(t.name) && !ADDED_TABLES.has(t.name)) throw new Incompatible(`${source} has no ${t.name} table`);
       const high = (backup.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0;
       try {
         this.tx((w) => {
           w.run("UPDATE maintenance SET active = 1");
           for (const t of [...TABLES].reverse()) w.run(`DELETE FROM ${t.name}`);
           for (const t of TABLES) {
+            if (!present.has(t.name)) continue;
             // A backup from an earlier build of version 1 may lack columns added since; they take their defaults.
             const has = new Set((backup.prepare(`SELECT name FROM pragma_table_info('${t.name}')`).all() as Array<{ name: string }>).map((r) => r.name));
             const columns = t.columns.filter((c) => has.has(c) || !ADDED.some(([table, column]) => table === t.name && column === c));
@@ -470,7 +498,7 @@ export class Store {
         const cited = `SELECT json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p`;
         return w.run(`DELETE FROM evidence WHERE run_id IN (${old}) AND handle NOT IN (${cited})`).changes + w.run(`DELETE FROM messages WHERE run_id IN (${old})`).changes;
       }],
-      ["coverage", (w) => w.run("DELETE FROM coverage WHERE to_ms < ?", now - 30 * day).changes],
+      ["coverage", (w) => w.run("DELETE FROM coverage WHERE to_ms < ?", now - 30 * day).changes + w.run("DELETE FROM hourly WHERE hour < ?", Math.floor((now - 30 * day) / 3_600_000)).changes],
     ];
     for (const [step, work] of steps) {
       if (!over()) return;

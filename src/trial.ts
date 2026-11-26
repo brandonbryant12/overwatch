@@ -266,7 +266,7 @@ export function approvalKey(config: Config): string {
 export async function reconcile(store: Store, config: Config, driving: ReadonlySet<string>): Promise<void> {
   const open = store.all<{ id: string; session_id: string | null; run_id: string | null }>(
     `SELECT j.id, r.session_id, r.id AS run_id FROM jobs j LEFT JOIN runs r ON r.job_id = j.id AND r.attempt = (SELECT max(attempt) FROM runs WHERE job_id = j.id)
-     WHERE j.state IN ('queued', 'running')`,
+     WHERE j.kind = 'trial' AND j.state IN ('queued', 'running')`,
   );
   const oc = connect(config.opencode);
   for (const job of open) {

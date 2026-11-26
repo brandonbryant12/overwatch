@@ -4,7 +4,7 @@
  * its readings, any deploy, and the checkpoint. Keys older than the overlap are dropped in the same commit. A crash
  * before the commit changes nothing; replaying the same records after it adds nothing, because their keys exist.
  *
- * An occurrence's key is made only from the source's own data: for a log line, the cluster, namespace, pod UID,
+ * An occurrence's key is scoped to the source that counts it, and made only from the source's own data: for a log line, the cluster, namespace, pod UID,
  * container, container instance, the full timestamp, a digest of the line and its ordinal among identical lines at
  * that timestamp in that instance; for a Datadog log, its ID; for a Kubernetes event, its UID with the cumulative
  * count kept as a baseline beyond the overlap.
@@ -14,13 +14,14 @@
  */
 import { createHash } from "node:crypto";
 import { statfsSync } from "node:fs";
-import { LIMITS, type Config, type Source } from "./config.ts";
+import { DEFAULT_WORDS, LIMITS, type Config, type Source, type Words } from "./config.ts";
 import { clock } from "./clock.ts";
 import { kubectl, parseEvents, parsePods, parseRevision, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
 import * as datadog from "./datadog.ts";
 import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
 import { type Clean, type Store, type Writer } from "./store.ts";
+import { afterChange, afterDeploy, hourly } from "./inbox.ts";
 
 const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -29,9 +30,19 @@ const iso = (ms: number) => new Date(ms).toISOString();
 export type Span = { readonly from: number; readonly to: number };
 export const within = (s: Span, at: number) => at >= s.from && at < s.to;
 
-/** Lines that are problems, how bad, and what groups them: numbers, IDs, quoted values and times do not. */
-export function problem(text: string): { fingerprint: string; title: string; severity: "error" | "warn" } | null {
-  const severity = /\b(error|fatal|panic|exception|critical)\b/i.test(text) ? "error" : /\bwarn(ing)?\b/i.test(text) ? "warn" : null;
+const matchers = new WeakMap<Words, { error: RegExp | null; warn: RegExp | null }>();
+const wordsRe = (list: ReadonlyArray<string>) =>
+  list.length ? new RegExp(`(?<![\\p{L}\\p{N}_])(${list.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}_])`, "iu") : null;
+
+/**
+ * Lines that are problems, how bad, and what groups them: numbers, IDs, quoted values and times do not. The app's
+ * words decide the class (whole words, any case; error wins a tie). A provider's own severity (`given`) wins over
+ * the words.
+ */
+export function problem(text: string, words: Words = DEFAULT_WORDS, given?: "error" | "warn"): { fingerprint: string; title: string; severity: "error" | "warn" } | null {
+  let re = matchers.get(words);
+  if (!re) matchers.set(words, (re = { error: wordsRe(words.error), warn: wordsRe(words.warn) }));
+  const severity = given ?? (re.error?.test(text) ? "error" : re.warn?.test(text) ? "warn" : null);
   if (!severity) return null;
   const normal = clean(text.split("\n")[0]!, 2000)
     .replace(/\d{4}-\d{2}-\d{2}[T ][\d:.,]+(Z|[+-]\d{2}:?\d{2})?/g, "<ts>")
@@ -336,7 +347,7 @@ export class Collector {
         if (!container.instances.some((i) => !i.previous) && (pod.running || container.restarts > 0)) worse("gap");
         if (container.restarts > 0 && !container.instances.some((i) => i.previous)) worse("gap");
         for (const instance of container.instances) {
-          const stream = sha("k8s", t.context, t.namespace, pod.uid, container.name, instance.id);
+          const stream = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id);
           const ordinals = new Map<string, number>();
           const seen = new Set<string>();
           let lastAt = slice.span.from;
@@ -346,12 +357,12 @@ export class Collector {
             if (at < slice.span.from) return;
             if (at >= slice.span.to) return false;
             lastAt = at;
-            const p = problem(text);
+            const p = problem(text, source.words);
             if (!p) return;
             const digest = sha(text);
             const ordinal = ordinals.get(stamp + digest) ?? 0;
             ordinals.set(stamp + digest, ordinal + 1);
-            const key = sha("k8s", t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
+            const key = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
             seen.add(key);
             lines.push({ key, stream, at, ...p });
           });
@@ -401,8 +412,8 @@ export class Collector {
       else {
         for (const e of parseEvents(r.stdout)) {
           if (e.type !== "Warning") continue;
-          const p = problem(`WARN ${e.reason}: ${e.message}`)!;
-          slice.counter(sha("k8s-event", t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
+          const p = problem(`WARN ${e.reason}: ${e.message}`, source.words, "warn")!;
+          slice.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
         slice.readings.set("events", { state: "ok", missed: null });
       }
@@ -443,7 +454,8 @@ export class Collector {
           let unplaced = false;
           await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
             if (log.at === null) return void (unplaced = true);
-            const p = problem(/^(error|critical|emergency|alert)$/i.test(log.status) ? `ERROR ${log.message}` : /^warn/i.test(log.status) ? `WARN ${log.message}` : log.message);
+            const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
+            const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
             if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity);
           });
           slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice } : { state: unplaced ? "gap" : "ok", missed: null });
@@ -500,11 +512,16 @@ export class Collector {
           "INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms, incident) VALUES (?, ?, ?, ?, ?)",
           record.key as Clean, source.id as Clean, record.stream as Clean, record.at, incidentId(source, record.bucket) as Clean,
         ).changes;
-        if (inserted) counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
+        if (!inserted) continue;
+        counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
+        hourly(w, incidentId(source, record.bucket), record.at);
       }
       for (const b of slice.baselines) {
         const before = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", b.key)?.count ?? 0;
-        if (b.count > before) counts.set(b.bucket, (counts.get(b.bucket) ?? 0) + (b.count - before));
+        if (b.count > before) {
+          counts.set(b.bucket, (counts.get(b.bucket) ?? 0) + (b.count - before));
+          hourly(w, incidentId(source, b.bucket), now, b.count - before);
+        }
         w.run(
           "INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = max(count, excluded.count), seen_ms = excluded.seen_ms",
           b.key as Clean, source.id as Clean, b.count, now,
@@ -515,8 +532,11 @@ export class Collector {
         const added = counts.get(bucket) ?? 0;
         if (added > 0 || info.seen) touched.add(incidentId(source, bucket));
         if (added === 0 && !info.inexact && !info.seen) continue;
-        if (added === 0 && !info.inexact && !this.store.get("SELECT 1 FROM incidents WHERE id = ?", incidentId(source, bucket))) continue;
+        const id = incidentId(source, bucket);
+        const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
+        if (added === 0 && !info.inexact && !before) continue;
         incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen);
+        afterChange(w, this.store, id, before, added, seq);
       }
       for (const id of slice.uncertain) w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
       // Time a reading did not fully cover: the totals of problems active then are lower bounds from now on.
@@ -586,7 +606,11 @@ export class Collector {
     const was = { over: row?.over ?? 0, under: row?.under ?? 0, breach: row?.breach === 1 };
     const next = rule ? hysteresis(rule, was, m.value) : { over: 0, under: 0, breach: false };
     if (rule && next.breach && !was.breach) {
+      const id = incidentId(source, `metric:${m.name}`);
+      const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
       incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", "gauge", 1, true, now, seq, true);
+      hourly(w, id, now);
+      afterChange(w, this.store, id, before, 1, seq);
       w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value: m.value, over: rule.over });
     } else if (was.breach && !next.breach) {
       w.run("UPDATE incidents SET active = 0 WHERE id = ?", incidentId(source, `metric:${m.name}`) as Clean);
@@ -604,6 +628,7 @@ export class Collector {
     if (last?.revision === revision) return;
     const seq = w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id });
     w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, ?, ?, ?, ?)", seq, source.app as Clean, source.environment as Clean, revision as Clean, (last?.revision ?? null) as Clean | null);
+    afterDeploy(w, this.store, source.app, source.environment, seq, revision);
   }
 
   /** A failure: the next attempt (and possibly suspension) in one transaction; the checkpoint stays. */
@@ -615,6 +640,8 @@ export class Collector {
     const now = clock.now();
     this.store.tx((w) => {
       w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
+      // An interval that could not be read is not a quiet one: the count toward quiet starts again.
+      w.run("UPDATE incidents SET streak = 0 WHERE source = ? AND streak > 0", source.id as Clean);
       w.run(
         `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
@@ -632,12 +659,12 @@ export class Collector {
  */
 function incident(w: Writer, source: Source, bucket: string, title: string, severity: Severity, reading: string, added: number, exact: boolean, now: number, seq: number, active: boolean) {
   w.run(
-    `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak, first_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
      ON CONFLICT (id) DO UPDATE SET count = count + excluded.count, exact = min(exact, excluded.exact), last_ms = max(last_ms, excluded.last_ms), seq = excluded.seq,
        severity = CASE WHEN excluded.severity = 'error' THEN 'error' ELSE severity END,
        active = max(active, excluded.active), streak = CASE WHEN excluded.active = 1 THEN 0 ELSE streak END`,
     incidentId(source, bucket) as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
-    reading as Clean, active ? 1 : 0,
+    reading as Clean, active ? 1 : 0, seq,
   );
 }
 
