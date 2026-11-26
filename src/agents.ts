@@ -8,7 +8,7 @@
  * slot, its evidence namespace (evidence.run_id) and its deadline. A verdict is never a model's: adjudicate() is a
  * pure function of stored filings, and readings never see each other.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { LIMITS, type Config } from "./config.ts";
@@ -18,7 +18,7 @@ import { afterFinding, announce, groupNow, HttpError, label, passed, receipt } f
 import { connect, OpenCode, Unavailable } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { json, type Clean, type Store, type Writer } from "./store.ts";
-import type { Code, Tools } from "./tools.ts";
+import type { Code, RunContext, Tools } from "./tools.ts";
 
 /** Sessions actively driven at once, across the trial, readings, challengers and answers. */
 export const slots = { active: 0, max: 2 };
@@ -48,9 +48,90 @@ export function adjudicate(planned: number, readings: ReadonlyArray<Reading>, ch
 }
 
 const ROLE = { reading: "investigator", challenge: "challenger", answer: "responder" } as const;
-const AGENT = { investigator: "ow-investigator", challenger: "ow-challenger", responder: "ow-responder" } as const;
+const AGENT = { investigator: "ow-investigator", challenger: "ow-challenger", responder: "ow-responder", fixer: "ow-fixer" } as const;
+type Role = keyof typeof AGENT;
+
+/** A run's row and its tool context, stored before anything is sent: its role, slot, evidence namespace and deadline. */
+function openRun(store: Store, tools: Tools, t: { jobId: string; role: Role; slot?: number | null; workId?: string | null; code?: Code; context: Omit<RunContext, "deadline" | "role"> }, existing?: string) {
+  const deadline = clock.mono() + LIMITS.runActiveMs;
+  const prior = existing ? store.get<{ id: string }>("SELECT id FROM runs WHERE session_id = ?", existing) : undefined;
+  const runId = prior?.id ?? id("run"), sessionId = existing ?? id("ses");
+  store.tx((w) => {
+    if (prior) return void w.run("UPDATE runs SET calls = 0 WHERE id = ?", runId as Clean);
+    const attempt = store.get<{ n: number }>("SELECT coalesce(max(attempt), 0) AS n FROM runs WHERE job_id = ?", t.jobId)!.n + 1;
+    w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role, slot, work_id) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?)",
+      runId as Clean, t.jobId as Clean, attempt, sessionId as Clean, json(t.code ?? {}), clock.now(), t.role as Clean, t.slot ?? null, (t.workId ?? null) as Clean | null);
+    if (t.workId) w.run("UPDATE work SET run_id = ? WHERE id = ?", runId as Clean, t.workId as Clean);
+    w.event("run", runId as Clean, { job: t.jobId, role: t.role, slot: t.slot ?? null, session: sessionId });
+  });
+  tools.contexts.set(runId, { ...t.context, deadline, role: t.role });
+  tools.authored.set(runId, []);
+  return { runId, sessionId, deadline };
+}
+
+/** Whether a run has filed its one filing (a finding, a challenge, or a fixer's proposal). */
+export const filed = (store: Store, runId: string) => Boolean(store.get("SELECT 1 FROM findings WHERE run_id = ? UNION ALL SELECT 1 FROM proposals WHERE run_id = ?", runId, runId));
+
+export interface Talk {
+  jobId: string; role: Role; slot?: number | null; workId?: string | null; title: string; prompt: string; nudge: string;
+  context: Omit<RunContext, "deadline" | "role">; code?: Code; heard?: (said: string) => void;
+}
+/**
+ * The one session driver, for readings, challenges, the trial and the fixer: a prompt and a nudge, then one fresh
+ * session and its nudge, each message's intent stored before it is sent and every wait bounded by the run's deadline.
+ * A committed filing is final; OpenCode being away (Unavailable) is thrown for the caller to defer, unless filed.
+ */
+export async function converse(store: Store, tools: Tools, config: Config, emptyDir: string, t: Talk) {
+  const oc = connect(config.opencode);
+  if (!oc) throw new Unavailable("OpenCode is not configured and has not registered itself");
+  let runId: string | null = null, reason = "no valid filing after a nudge, a fresh retry and its nudge", tries = 0, nudges = 0;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const s = openRun(store, tools, t);
+    runId = s.runId;
+    tries++;
+    try {
+      await bounded(oc.createSession({ id: s.sessionId, title: t.title, agent: AGENT[t.role], model: config.opencode.model, directory: emptyDir }), s.deadline);
+      for (const [i, text] of [t.prompt, t.nudge].entries()) {
+        if (i === 1 && (filed(store, s.runId) || clock.mono() >= s.deadline)) break;
+        if (i === 1) nudges++;
+        const message = id("msg");
+        store.tx((w) => w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, ?)", message as Clean, s.runId as Clean, (i ? "nudge" : "prompt") as Clean));
+        await bounded(oc.prompt(s.sessionId, { id: message, text }), s.deadline);
+        let after = OpenCode.after(await bounded(oc.messages(s.sessionId), s.deadline), message);
+        while (!after.idle) {
+          if (clock.mono() >= s.deadline) throw new Expired();
+          await sleep(25);
+          after = OpenCode.after(await bounded(oc.messages(s.sessionId), s.deadline), message);
+        }
+        t.heard?.(after.said);
+        if (filed(store, s.runId)) break;
+      }
+    } catch (e) {
+      if (e instanceof Unavailable && !filed(store, s.runId)) throw e;
+      if (e instanceof Expired) void oc.interrupt(s.sessionId);
+      reason = e instanceof Expired ? "its five minutes ran out; the session was interrupted" : e instanceof Unavailable ? reason : `OpenCode failed: ${errorText(e, 300)}`;
+    } finally {
+      tools.contexts.delete(s.runId);
+      for (const args of tools.authored.get(s.runId) ?? []) t.heard?.(args); // what the model wrote into tool calls
+      tools.authored.delete(s.runId);
+      store.tx((w) => w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", s.runId as Clean));
+    }
+    if (filed(store, s.runId)) return { runId, filed: true, reason: null, tries, nudges };
+  }
+  return { runId, filed: false, reason, tries, nudges };
+}
+
+/** Waits for a free session slot (shared by every agent session) around one piece of work. */
+export async function withSlot<T>(work: () => Promise<T>): Promise<T> {
+  while (slots.active >= slots.max) await sleep(50);
+  slots.active++;
+  try {
+    return await work();
+  } finally {
+    slots.active--;
+  }
+}
 const START = ["the telemetry", "the change that was deployed", "a harmless explanation"];
-const sha = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 const id = (prefix: string) => `${prefix}_${randomBytes(12).toString("hex")}`;
 
 interface WorkRow { id: string; job_id: string; kind: "reading" | "challenge" | "answer"; slot: number | null; priority: number; state: string; tries: number; ask_key: string | null; run_id: string | null; reason: string | null; seq: number }
@@ -191,80 +272,29 @@ export class Agents {
     return oc;
   }
 
-  /** Starts a session for a run: the run row (role, slot, evidence namespace) and its first message are stored first. */
-  private async session(work: WorkRow, job: JobRow, role: keyof typeof AGENT, title: string, telemetry: Inputs["telemetry"], code: Code, repo: string | null, existing?: string) {
-    const deadline = clock.mono() + LIMITS.runActiveMs;
-    const prior = existing ? this.store.get<{ id: string }>("SELECT id FROM runs WHERE session_id = ?", existing) : undefined;
-    const runId = prior?.id ?? id("run");
-    const sessionId = existing ?? id("ses");
-    if (!prior) {
-      this.store.tx((w) => {
-        const attempt = (this.store.get<{ n: number }>("SELECT coalesce(max(attempt), 0) AS n FROM runs WHERE job_id = ?", job.id)!.n) + 1;
-        w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role, slot, work_id) VALUES (?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?)",
-          runId as Clean, job.id as Clean, attempt, sessionId as Clean, json(code), clock.now(), role as Clean, work.slot, work.id as Clean);
-        w.run("UPDATE work SET run_id = ? WHERE id = ?", runId as Clean, work.id as Clean);
-        w.event("run", runId as Clean, { job: job.id, role, slot: work.slot, session: sessionId });
-      });
-    } else this.store.tx((w) => w.run("UPDATE runs SET calls = 0 WHERE id = ?", runId as Clean));
-    this.tools.contexts.set(runId, { telemetry, repo, deadline, role });
-    if (!existing) await bounded(this.oc().createSession({ id: sessionId, title, agent: AGENT[role], model: this.config.opencode.model, directory: this.emptyDir }), deadline);
-    return { runId, sessionId, deadline };
-  }
-
-  /** Sends one message (its intent stored first) and waits for the session to go idle after it. */
-  private async say(runId: string, sessionId: string, text: string, deadline: number, purpose: "prompt" | "nudge" = "prompt") {
-    const message = id("msg");
-    this.store.tx((w) => w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, ?)", message as Clean, runId as Clean, purpose as Clean));
-    const oc = this.oc();
-    await bounded(oc.prompt(sessionId, { id: message, text }), deadline);
-    while (clock.mono() < deadline) {
-      const after = OpenCode.after(await bounded(oc.messages(sessionId), deadline), message);
-      if (after.idle) return after;
-      await sleep(25);
-    }
-    throw new Expired();
-  }
-
   private async code(revision: string | null, app: string): Promise<{ code: Code; repo: string | null }> {
     const repo = this.config.apps[app]?.checkout ?? null;
     const present = revision && repo ? (await exec("git", ["-C", repo, "cat-file", "-e", `${revision}^{commit}`], { timeoutMs: 10_000 })).code === 0 : false;
     return { code: { expected: revision, read: present ? revision : null, deployed: Boolean(present) }, repo };
   }
 
-  /** A reading or the challenge: a prompt and a nudge, then one fresh session and its nudge; then a missing vote. */
+  /** A reading or the challenge, through the one session driver; a missing vote when it never files. */
   private async read(work: WorkRow) {
     const job = this.store.get<JobRow>("SELECT * FROM jobs WHERE id = ?", work.job_id)!;
     const frozen = JSON.parse(job.inputs!) as Inputs;
     const role = ROLE[work.kind] as "investigator" | "challenger";
     const { code, repo } = await this.code(frozen.revision, frozen.app);
-    const prompt = role === "investigator" ? readerPrompt(frozen, work.slot!) : challengerPrompt(frozen, this.claims(job.id));
-    let reason = "no valid filing after a nudge, a fresh retry and its nudge";
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      let s: { runId: string; sessionId: string; deadline: number } | undefined;
-      try {
-        s = await this.session(work, job, role, `Overwatch ${role === "investigator" ? `reading ${work.slot}/${frozen.planned}` : "challenge"}: ${frozen.app}/${frozen.environment}`, frozen.telemetry, code, repo);
-        for (const [i, text] of [prompt, NUDGE[role]].entries()) {
-          if (i === 1 && (this.filed(s.runId) || clock.mono() >= s.deadline)) break;
-          await this.say(s.runId, s.sessionId, text, s.deadline, i === 0 ? "prompt" : "nudge");
-          if (this.filed(s.runId)) break;
-        }
-      } catch (e) {
-        if (e instanceof Unavailable && !(s && this.filed(s.runId))) {
-          if (s) this.store.tx((w) => w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", s!.runId as Clean));
-          if (s) this.tools.contexts.delete(s.runId);
-          return this.defer(work, e);
-        }
-        if (s && e instanceof Expired) void this.oc().interrupt(s.sessionId);
-        reason = e instanceof Expired ? "its five minutes ran out; the session was interrupted" : `OpenCode failed: ${errorText(e, 300)}`;
-      } finally {
-        if (s) {
-          this.tools.contexts.delete(s.runId);
-          this.store.tx((w) => w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", s!.runId as Clean));
-        }
-      }
-      if (s && this.filed(s.runId)) return this.finish(work, s.runId, null);
+    try {
+      const r = await converse(this.store, this.tools, this.config, this.emptyDir, {
+        jobId: job.id, role, slot: work.slot, workId: work.id, code, context: { telemetry: frozen.telemetry, repo },
+        title: `Overwatch ${role === "investigator" ? `reading ${work.slot}/${frozen.planned}` : "challenge"}: ${frozen.app}/${frozen.environment}`,
+        prompt: role === "investigator" ? readerPrompt(frozen, work.slot!) : challengerPrompt(frozen, this.claims(job.id)), nudge: NUDGE[role],
+      });
+      this.finish(work, r.filed ? r.runId : null, r.reason);
+    } catch (e) {
+      if (e instanceof Unavailable) return this.defer(work, e);
+      throw e;
     }
-    this.finish(work, null, reason);
   }
 
   private filed(runId: string) {
@@ -366,7 +396,8 @@ export class Agents {
       const oc = this.oc();
       let existing = ask.session_id ?? this.store.get<{ session_id: string }>("SELECT session_id FROM runs WHERE job_id = ? AND role = 'responder' ORDER BY attempt DESC LIMIT 1", job.id)?.session_id;
       if (existing && !(await oc.exists(existing))) existing = undefined;
-      s = await this.session(work, job, "responder", `Overwatch question: ${clean(what, 120)}`, scope.telemetry, code, repo, existing);
+      s = openRun(this.store, this.tools, { jobId: job.id, role: "responder", workId: work.id, code, context: { telemetry: scope.telemetry, repo } }, existing);
+      if (!existing) await bounded(oc.createSession({ id: s.sessionId, title: `Overwatch question: ${clean(what, 120)}`, agent: AGENT.responder, model: this.config.opencode.model, directory: this.emptyDir }), s.deadline);
       const message = ask.message && ask.session_id === s.sessionId ? ask.message : id("msg");
       this.store.tx((w) => {
         w.run("UPDATE asks SET session_id = ?, message = ? WHERE key = ?", s!.sessionId as Clean, message as Clean, ask.key as Clean);

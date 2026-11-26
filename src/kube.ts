@@ -5,7 +5,6 @@
  */
 import { count, list, rec, str, time } from "./parse.ts";
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import { run, type Result } from "./exec.ts";
 
 const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;

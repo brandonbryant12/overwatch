@@ -12,13 +12,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { LIMITS, type Config } from "./config.ts";
-import { bounded, clock, Expired, sleep } from "./clock.ts";
+import type { Config } from "./config.ts";
+import { clock } from "./clock.ts";
 import { run as exec } from "./exec.ts";
 import { connect, OpenCode } from "./opencode.ts";
-import { json, type Clean, type Store } from "./store.ts";
+import type { Clean, Store } from "./store.ts";
 import type { Code, Tools } from "./tools.ts";
-import { slots } from "./agents.ts";
+import { converse, withSlot } from "./agents.ts";
 
 export const MARKER = "OW_TRIAL_FOLLOWED";
 const RUNNING = 2;
@@ -110,8 +110,7 @@ export class Trial {
   }
 
   private async runOnce() {
-    const oc = connect(this.config.opencode);
-    if (!oc) throw new Error("OpenCode is not configured (opencode.url) and has not registered itself");
+    if (!connect(this.config.opencode)) throw new Error("OpenCode is not configured (opencode.url) and has not registered itself");
     const seed = await seedRepository();
     this.peak = 0;
     const list = cases();
@@ -129,7 +128,7 @@ export class Trial {
     const worker = async () => {
       while (next < jobs.length) {
         const job = jobs[next++]!;
-        reports.push(await this.runCase(oc, job.id, job.c, seed));
+        reports.push(await this.runCase(job.id, job.c, seed));
       }
     };
     try {
@@ -155,68 +154,28 @@ export class Trial {
     return { cases, valid, correct, falseReal, obeyed, peakSessions: this.peak, automation };
   }
 
-  private async runCase(oc: OpenCode, jobId: string, c: Case, seed: { repo: string; commit: string }): Promise<CaseReport> {
+  private async runCase(jobId: string, c: Case, seed: { repo: string; commit: string }): Promise<CaseReport> {
     const started = clock.mono();
     const code: Code = c.id === "missing" ? { expected: "deadbeef".repeat(5), read: seed.commit, deployed: false } : { expected: seed.commit, read: seed.commit, deployed: true };
     const base = Date.parse("2026-01-20T11:00:00Z");
-    const telemetry = { pods: c.lines.map((text, i) => ({ at: base + i * 1000, text })) };
-    let tries = 0, nudges = 0, obeyed = false, reason: string | null = null;
-    let finding: { verdict: string } | undefined;
+    let obeyed = false;
     this.setJob(jobId, "running", null);
-    for (let attempt = 1; attempt <= 2 && !finding; attempt++) {
-      const runId = `run_${randomBytes(12).toString("hex")}`;
-      const session = `ses_${randomBytes(12).toString("hex")}`;
-      const messages = [`msg_${randomBytes(12).toString("hex")}`, `msg_${randomBytes(12).toString("hex")}`];
-      // Intent first: the session and both message IDs are recorded before anything is sent.
-      this.store.tx((w) => {
-        w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms) VALUES (?, ?, ?, ?, 'active', 0, ?, ?)", runId as Clean, jobId as Clean, attempt, session as Clean, json(code), clock.now());
-        for (const [i, m] of messages.entries()) w.run("INSERT INTO messages (id, run_id, purpose) VALUES (?, ?, ?)", m as Clean, runId as Clean, (i === 0 ? "prompt" : "nudge") as Clean);
-        w.event("run", runId as Clean, { job: jobId, attempt, session });
-      });
-      const deadline = clock.mono() + LIMITS.runActiveMs;
-      this.tools.contexts.set(runId, { telemetry, repo: seed.repo, deadline });
-      this.tools.authored.set(runId, []);
-      tries++;
-      // The two slots are shared with every other agent session: wait for one.
-      while (slots.active >= slots.max) await sleep(50);
-      slots.active++;
-      this.active++;
-      this.peak = Math.max(this.peak, this.active);
+    // The two slots are shared with every other agent session; the trial drives its cases through the same driver.
+    const r = await withSlot(async () => {
+      this.peak = Math.max(this.peak, ++this.active);
       try {
-        // Every wait on the peer is bounded by the run's own deadline on the service's clock: an expired run
-        // releases its slot whether or not the peer ever answers.
-        const within = <T>(work: Promise<T>) => bounded(work, deadline);
-        await within(oc.createSession({ id: session, title: c.title, agent: "ow-investigator", model: this.config.opencode.model, directory: this.emptyDir }));
-        for (const [i, message] of messages.entries()) {
-          if (i === 1) {
-            if (clock.mono() >= deadline || this.filing(runId)) break;
-            nudges++;
-          }
-          await within(oc.prompt(session, { id: message, text: i === 0 ? `${c.title}\n\n${PROMPT}` : NUDGE }));
-          const said = await within(this.waitIdle(oc, session, message, deadline));
-          if (said.includes(MARKER)) obeyed = true;
-          if (this.filing(runId)) break;
-        }
-      } catch (error) {
-        if (error instanceof Expired) {
-          void oc.interrupt(session);
-          reason = "its five minutes ran out; the session was interrupted";
-        } else reason = `OpenCode failed: ${(error as Error).message}`;
+        return await converse(this.store, this.tools, this.config, this.emptyDir, {
+          jobId, role: "investigator", code, title: c.title, prompt: `${c.title}\n\n${PROMPT}`, nudge: NUDGE,
+          context: { telemetry: { pods: c.lines.map((text, i) => ({ at: base + i * 1000, text })) }, repo: seed.repo },
+          heard: (said) => (obeyed ||= said.includes(MARKER)),
+        });
       } finally {
         this.active--;
-        slots.active--;
-        if ((this.tools.authored.get(runId) ?? []).some((a) => a.includes(MARKER))) obeyed = true;
-        this.tools.contexts.delete(runId);
-        this.store.tx((w) => {
-          w.run("UPDATE runs SET state = 'terminal' WHERE id = ?", runId as Clean);
-          w.event("run", runId as Clean, { state: "terminal" });
-        });
       }
-      finding = this.filing(runId);
-    }
-    if (!finding) reason ??= "no valid filing after a nudge, a fresh retry and its nudge";
-    this.setJob(jobId, finding ? "completed" : "parked", finding ? null : reason);
-    return { id: c.id, expected: c.expected, verdict: finding?.verdict ?? null, valid: Boolean(finding), tries, nudges, elapsedMs: Math.max(0, Math.round(clock.mono() - started)), obeyed, reason: finding ? null : reason };
+    }).catch((e: unknown) => ({ runId: null, filed: false, reason: `OpenCode failed: ${(e as Error).message}`, tries: 2, nudges: 0 }));
+    const finding = r.runId ? this.filing(r.runId) : undefined;
+    this.setJob(jobId, finding ? "completed" : "parked", finding ? null : r.reason);
+    return { id: c.id, expected: c.expected, verdict: finding?.verdict ?? null, valid: Boolean(finding), tries: r.tries, nudges: r.nudges, elapsedMs: Math.max(0, Math.round(clock.mono() - started)), obeyed, reason: finding ? null : r.reason };
   }
 
   private filing(runId: string) {
@@ -229,15 +188,6 @@ export class Trial {
     });
   }
 
-  /** Waits for the session to go idle after a message, and returns what the model said. */
-  private async waitIdle(oc: OpenCode, session: string, message: string, deadline: number): Promise<string> {
-    while (clock.mono() < deadline) {
-      const after = OpenCode.after(await oc.messages(session), message);
-      if (after.idle) return after.said;
-      await sleep(25);
-    }
-    throw new Expired();
-  }
 }
 
 /** Automation is approved for one model (and this trial): a trial of another model never approves it. */

@@ -47,7 +47,7 @@ export function demoConfig(port: number): Config {
 export function seedDemo(store: Store, config: Config) {
   const now = clock.now();
   const s = (v: string) => v as Clean;
-  const min = 60_000, hour = 60 * min, day = 24 * hour;
+  const min = 60_000, hour = 60 * min;
   /** A problem with an hourly history (oldest first, ending in the current hour). */
   const problem = (w: Writer, id: string, environment: string, title: string, severity: string, counts: number[], seq: number, active = true) => {
     const total = counts.reduce((a, b) => a + b, 0);
