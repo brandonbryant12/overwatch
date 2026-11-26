@@ -58,13 +58,18 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   that refers to a named parent ("table.key"). Restore checks every declared reference whatever the column is called;
   a build test fails when a created table has a column the list does not declare, and the class property fails until a
   row of a new referencing table is seeded. Whether a column is data or a reference is still the author's call.
-- **One receipt per keyed owner write, from the router.** Keyed routes are declared only in the router's `KEYED` table
-  (`src/server.ts`); a handler returns a `Plan` (operation, subject, body, change, optional outbound step) and
-  `keyed()` wraps the change in its receipt. `receipt()` is private to `src/inbox.ts`, and a build test fails when the
-  request key is read anywhere else.
+- **Every POST is declared with its guard, in one table.** The router's `WRITES` table (`src/server.ts`) is the only
+  place a POST is handled, and each entry is `keyed` (a handler returns a `Plan`; `keyed()` wraps its change in the
+  receipt), `fenced` (the router hands over the `basisSeq` the owner was shown, read only by `basisOf()`; a decision
+  made since refuses it) or a `command` that changes no item (backup, doctor, trial, the MCP transport). A guard of any
+  other shape is refused before it runs. `receipt()` is private to `src/inbox.ts`; build tests fail when the request
+  key or `basisSeq` is read elsewhere, or a POST is handled outside the table. A decision without a `basisSeq` is still
+  accepted (scripts and the accept suites send none), so the fence is only as strong as the caller's use of it.
 - **Nothing leaves without an intent.** `src/exec.ts` is the only module that starts a program (a build test checks
   it); `run()` refuses outbound commands (`gh`, `git push`, the notifier) and `effect()` runs them only with a
   `Permit` that a `Writer` made in the transaction recording the intent, live once that commits and spent by its use.
+  A permit is bound to its exact effect: `spend()` refuses arguments that do not contain every bound token (the
+  repository, the branch and commit for a push, the exact `gh` call for a host step).
   OpenCode writes (sessions, prompts, interrupts) take permits too. A permit constructed anywhere else is never live.
 - **Age, then pressure.** `Store.expire` removes by age on every pass; `Store.retain` adds old events under
   pressure. Neither can remove a finding or its cited evidence.
@@ -112,8 +117,9 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   unit (`forecast()` in `src/outlook.ts`); a staging comparison needs two aligned (same end, within a second), ordinary,
   fully measured intervals on both sides, and a production rollout invalidates it. Otherwise the answer is unknown,
   with the reason. An unknown monitor state, a reply that says it is partial and a point outside the queried window
-  are gaps. Consumers are given the time to compare against: passing the wall clock where a provider time belongs is
-  still a convention.
+  are gaps. A provider time is a type (`ProviderTime`, `src/parse.ts`), made from provider data by `time()`; the one
+  cast, `answered()`, is for a live read that has no time of its own (pods, events, usage, logs read up to now,
+  monitors) and a build test allows it only in the collector. Readings, samples and freshness reads take that type.
 
 ## The page
 

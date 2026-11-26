@@ -340,8 +340,9 @@ missing or not exact is shown as such, with the reason and a few retries; after 
 **Following it.** Overwatch reads the draft's state at most once a minute. Closed without merging: the problem stays
 open and this finding is not proposed again. Merged: it waits for a deployment in the same environment that contains
 the merge, then for three consecutive fresh, quiet, fully measured intervals (a failed or catch-up interval starts the
-count again); then the problem is Done by rule, with that history on the item. If you decided first (Done, Later,
-Never), your decision stands. You can decline an attempt at any time; if something already exists on the host (the
+count again); then the attempt says *ready to close*, with that history, and you close the item with Done like any
+other. Nothing closes by itself. If the deployment is replaced by one without the fix, or the problem comes back, it
+goes back to waiting and says why. If you decided first (Done, Later, Never), your decision stands. You can decline an attempt at any time; if something already exists on the host (the
 branch, or the draft), the item says exactly what and how to remove it there.
 
 **The description** stands on its own for a reviewer: the problem, the finding with its votes and the challenger's
