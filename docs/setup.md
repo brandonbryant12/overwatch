@@ -5,6 +5,7 @@ check it.
 
 ```sh
 git clone <this repository's Git remote> overwatch && cd overwatch
+pnpm install            # builds the page into web/dist
 bin/overwatch check     # step 2 first: write the configuration
 ```
 
@@ -12,15 +13,16 @@ bin/overwatch check     # step 2 first: write the configuration
 
 | Tool | Why | Check |
 | --- | --- | --- |
-| Node 22.13 or newer | Runs Overwatch (it strips the TypeScript types itself; nothing is built). | `node --version` |
+| Node 22.13 or newer | Runs Overwatch (it strips the TypeScript types itself; only the page is built). | `node --version` |
 | git | Reads code from the deployed commit. | `git --version` |
 | `kubectl`, signed in to each cluster | Kubernetes, read-only: `get`, `describe`, `logs`, `top`. | `kubectl --context <ctx> -n <ns> get pods` |
 | Datadog API and application keys | Only if you watch Datadog. | `overwatch doctor` |
 | OpenCode 2.4.1 | Runs the model for `trial` and `doctor`'s model check. | `opencode --version` |
 | `gh` | Checked by `doctor` for later milestones. | `gh --version` |
 
-There is no `npm install` for running it: `"dependencies"` is empty. `pnpm install` only fetches the development
-tools (TypeScript, fast-check) for running the tests.
+The service needs nothing installed. The page does: `pnpm install` fetches Effect, Effect UI and rolldown and builds
+`web/dist/`, which the service serves (`pnpm run build:web` builds it again). Where the bundler's native binding cannot
+load, the install says so and carries on; build `web/dist/` on another machine and copy it over.
 
 ## 2. Configure
 

@@ -2,7 +2,8 @@
 
 Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts what goes wrong exactly where it
 read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
-not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, with no runtime dependencies and nothing to build.
+not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file. The service runs as it is; the page is one bundle that `pnpm install`
+builds.
 
 This is the **simple core, milestones 1 to 3**: the kernel, the tools for proving it on a real laptop and a real
 model, the page, and the agents.
@@ -16,7 +17,8 @@ independent readings and a challenger, evidence is cited by handle, and disagree
 ## In one minute
 
 ```sh
-git clone <this repository> overwatch && cd overwatch     # Node 22.13 or newer; nothing to install
+git clone <this repository> overwatch && cd overwatch     # Node 22.13 or newer
+pnpm install                                              # builds the page into web/dist
 bin/overwatch check  --config ~/.config/overwatch/config.json
 bin/overwatch serve  --config ~/.config/overwatch/config.json   # then open the address it prints
 bin/overwatch status --config ~/.config/overwatch/config.json
@@ -64,9 +66,10 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 ## Tests
 
 ```sh
-pnpm install          # dev dependencies only: typescript, fast-check, @types/node
-pnpm run check        # typecheck and the unit and property tests in test/
+pnpm install          # the tools, and the page built into web/dist
+pnpm run build:web    # build the page again after changing web/src
+pnpm run check        # typecheck (service and page) and the tests in test/ and web/test/
 pnpm run accept       # the milestone 1 acceptance suite in accept/m1 (M1_LONG=1 for the release run)
-node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs   # the page contract (uses system Chrome)
+node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs   # the page contract (system Chrome; build first)
 node --experimental-strip-types --no-warnings test/real/screenshots.ts  # screenshots of the demo
 ```
