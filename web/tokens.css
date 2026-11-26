@@ -1,0 +1,163 @@
+/*
+ * Overwatch Design System: "Observatory Control Deck"
+ * Dual theme: Night Watch (default dark) & Daylight Chart (light).
+ * Zero external fonts, zero network requests, semantic state never by colour alone.
+ */
+
+:root {
+  /* Typography: 2 families, strict 4-step dense dashboard scale */
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+
+  --text-lg: 1.125rem;   /* 18px: focused incident title, sheet titles */
+  --text-md: 0.9375rem;  /* 15px: section headings, root cause, prompt input */
+  --text-base: 0.875rem; /* 14px: body prose, inbox item titles, prompts */
+  --text-sm: 0.8125rem;  /* 13px: metadata, timestamps, citations, controls */
+
+  /* Spacing & geometry */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-sm: 4px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --topbar-height: 52px;
+  --rail-width: 380px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 140ms;
+  --dur-med: 200ms;
+
+  /* Night Watch (default dark) surfaces & ink */
+  --bg-canvas: #0b0f14;
+  --bg-deck: #10161f;
+  --bg-elevated: #161f2b;
+  --bg-well: #0c1118;
+  --bg-hover: rgba(148, 175, 206, 0.07);
+  --bg-selected: rgba(245, 166, 35, 0.09);
+
+  --border-hairline: rgba(148, 175, 206, 0.14);
+  --border-strong: rgba(148, 175, 206, 0.26);
+
+  --ink-primary: #edf2f7;
+  --ink-secondary: #a8b7ca;
+  --ink-muted: #7f91a8;
+  --ink-inverse: #0b0f14;
+
+  /* Brand & Focus Reticle Accent: Signal Amber + Phosphor Cyan */
+  --accent: #f5a623;
+  --accent-bright: #ffd166;
+  --accent-surface: rgba(245, 166, 35, 0.13);
+  --accent-border: rgba(245, 166, 35, 0.42);
+  --cyan: #38d9c0;
+  --cyan-surface: rgba(56, 217, 192, 0.11);
+
+  /* Semantic states (always paired with distinct shape/pattern + text) */
+  --state-error: #f26461;
+  --state-error-surface: rgba(242, 100, 97, 0.12);
+  --state-error-border: rgba(242, 100, 97, 0.36);
+
+  --state-warn: #f5a623;
+  --state-warn-surface: rgba(245, 166, 35, 0.12);
+  --state-warn-border: rgba(245, 166, 35, 0.36);
+
+  --state-ok: #2dd4a0;
+  --state-ok-surface: rgba(45, 212, 160, 0.11);
+  --state-ok-border: rgba(45, 212, 160, 0.34);
+
+  --state-active: #38bdf8;
+  --state-active-surface: rgba(56, 189, 248, 0.12);
+  --state-active-border: rgba(56, 189, 248, 0.36);
+
+  /* Unknown / Unverifiable: cool slate + diagonal hatch, NEVER green */
+  --state-unknown: #a2b0c3;
+  --state-unknown-border: rgba(162, 176, 195, 0.38);
+  --hatch-unknown: repeating-linear-gradient(
+    -45deg,
+    rgba(148, 163, 184, 0.08),
+    rgba(148, 163, 184, 0.08) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+
+  /* Suspended / Offline */
+  --state-suspended: #e0915c;
+  --state-suspended-surface: rgba(224, 145, 92, 0.11);
+  --state-suspended-border: rgba(224, 145, 92, 0.4);
+
+  /* Logo mark surface tokens */
+  --logo-housing-fill: #121b26;
+  --logo-housing-stroke: #2c3f55;
+  --logo-aperture-fill: #0b0f14;
+  --logo-aperture-stroke: #edf2f7;
+
+  /* Focus ring & elevation */
+  --ring: #f5a623;
+  --shadow-sheet: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+
+[data-theme="light"] {
+  --bg-canvas: #f2f5f8;
+  --bg-deck: #ffffff;
+  --bg-elevated: #f8fafc;
+  --bg-well: #edf1f6;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --bg-selected: rgba(184, 107, 0, 0.085);
+
+  --border-hairline: rgba(15, 23, 42, 0.11);
+  --border-strong: rgba(15, 23, 42, 0.22);
+
+  --ink-primary: #111824;
+  --ink-secondary: #3c4b60;
+  --ink-muted: #55657c;
+  --ink-inverse: #ffffff;
+
+  --accent: #b86b00;
+  --accent-bright: #d97706;
+  --accent-surface: rgba(184, 107, 0, 0.1);
+  --accent-border: rgba(184, 107, 0, 0.42);
+  --cyan: #0b806e;
+  --cyan-surface: rgba(11, 128, 110, 0.1);
+
+  --state-error: #c52828;
+  --state-error-surface: rgba(197, 40, 40, 0.08);
+  --state-error-border: rgba(197, 40, 40, 0.3);
+
+  --state-warn: #a65f00;
+  --state-warn-surface: rgba(166, 95, 0, 0.09);
+  --state-warn-border: rgba(166, 95, 0, 0.34);
+
+  --state-ok: #0a7252;
+  --state-ok-surface: rgba(10, 114, 82, 0.09);
+  --state-ok-border: rgba(10, 114, 82, 0.32);
+
+  --state-active: #0369a1;
+  --state-active-surface: rgba(3, 105, 161, 0.09);
+  --state-active-border: rgba(3, 105, 161, 0.32);
+
+  --state-unknown: #4b5a70;
+  --state-unknown-border: rgba(75, 90, 112, 0.38);
+  --hatch-unknown: repeating-linear-gradient(
+    -45deg,
+    rgba(71, 85, 105, 0.07),
+    rgba(71, 85, 105, 0.07) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+
+  --state-suspended: #9a4a1a;
+  --state-suspended-surface: rgba(154, 74, 26, 0.09);
+  --state-suspended-border: rgba(154, 74, 26, 0.36);
+
+  --logo-housing-fill: #131c28;
+  --logo-housing-stroke: #33465e;
+  --logo-aperture-fill: #0b0f14;
+  --logo-aperture-stroke: #edf2f7;
+
+  --ring: #b86b00;
+  --shadow-sheet: 0 18px 42px rgba(15, 23, 42, 0.16);
+}
