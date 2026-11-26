@@ -45,6 +45,9 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
     if (w.sources.every((s) => s.readings.length === 0)) worse("stale");
     if (errors.has(`${w.app}/${w.environment}`)) worse("attention");
     if (collector?.paused) worse("partial");
+    // Each expected reading with when it was last measured (by the older-looking clock, as of atMs): a viewer ages
+    // these on its own clock, so a live connection never certifies a measurement that has since gone old.
+    const measured: Array<{ source: string; reading: string; state: string | null; okMs: number | null }> = [];
     for (const s of w.sources) {
       const row = rows.get(s.id);
       if (row?.failure === "signin") worse("signed_out");
@@ -53,6 +56,7 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
         const r = readings.get(`${s.id}|${reading}`);
         const okMono = collector?.okAtMono(s.id, reading);
         const age = r?.ok_ms == null ? Infinity : Math.max(now - r.ok_ms, okMono === undefined ? 0 : mono - okMono);
+        measured.push({ source: s.id, reading, state: r?.state ?? null, okMs: Number.isFinite(age) ? now - age : null });
         if (age > limit) worse("stale");
         else if (r!.state !== "ok") worse("partial");
       }
@@ -62,6 +66,8 @@ export function snapshot(store: Store, config: Config, collector: Collector | nu
       environment: w.environment,
       subject: `env:${w.app}/${w.environment}`,
       health,
+      readings: measured,
+      freshForMs: limit,
       excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),
     };
   });

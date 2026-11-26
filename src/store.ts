@@ -22,7 +22,7 @@ export const APPLICATION_ID = 0x4f575432;
 export const USER_VERSION = 1;
 
 /** Each table: its DDL, and which of its columns hold JSON. Restore copies exactly these columns, in this order. */
-export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: ReadonlyArray<string>; json?: ReadonlyArray<string> }> = [
+export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: ReadonlyArray<string>; json?: ReadonlyArray<string>; derived?: boolean }> = [
   {
     name: "events",
     ddl: `CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 40),
@@ -57,8 +57,8 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
       first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL, seq INTEGER NOT NULL,
       reading TEXT NOT NULL DEFAULT 'logs', active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
       way TEXT CHECK (way IS NULL OR json_valid(way)), returned TEXT CHECK (returned IS NULL OR json_valid(returned)),
-      seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0)`,
-    columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq"],
+      seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0, decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0))`,
+    columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq", "decided_seq"],
     json: ["way", "returned"],
   },
   {
@@ -130,6 +130,15 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     columns: ["id", "run_id", "verdict", "claims", "code", "body"],
     json: ["claims", "code", "body"],
   },
+  {
+    // Each cited handle, kept by a trigger on findings: evidence a finding cites cannot be deleted (RESTRICT), so
+    // retention and restore get the rule from the database. Derived: never copied, rebuilt by the trigger.
+    name: "citations",
+    ddl: `CREATE TABLE citations (finding TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+      handle TEXT NOT NULL REFERENCES evidence(handle) ON DELETE RESTRICT, PRIMARY KEY (finding, handle))`,
+    columns: ["finding", "handle"],
+    derived: true,
+  },
 ];
 
 const INDEXES = `CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms);
@@ -140,14 +149,21 @@ CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour);
 CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);`;
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
-const ADDED_TABLES = new Set(["hourly", "asks"]);
+const ADDED_TABLES = new Set(["hourly", "asks", "citations"]);
+
+/** Rules kept by the database itself; created with the schema and on open of an older file. */
+const TRIGGERS = `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN
+  INSERT OR IGNORE INTO citations (finding, handle)
+    SELECT NEW.id, json_extract(p.value, '$.handle') FROM json_each(NEW.claims) c, json_each(c.value, '$.pieces') p;
+END;`;
 
 const MAINTENANCE = `CREATE TABLE maintenance (id INTEGER PRIMARY KEY CHECK (id = 1), active INTEGER NOT NULL CHECK (active IN (0,1)));
 INSERT INTO maintenance VALUES (1, 0);
 CREATE TRIGGER events_append_only_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER events_append_only_delete BEFORE DELETE ON events WHEN (SELECT active FROM maintenance) = 0
   BEGIN SELECT RAISE(ABORT, 'events are append-only outside maintenance'); END;
-${INDEXES}`;
+${INDEXES}
+${TRIGGERS}`;
 
 
 
@@ -170,6 +186,23 @@ const ADDED: ReadonlyArray<[table: string, column: string, definition: string]> 
   ["incidents", "returned", "returned TEXT CHECK (returned IS NULL OR json_valid(returned))"],
   ["incidents", "seen_seq", "seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0)"],
   ["incidents", "first_seq", "first_seq INTEGER NOT NULL DEFAULT 0"],
+  ["incidents", "decided_seq", "decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0)"],
+];
+
+/**
+ * Every reference between tables, declared once: restore refuses a copy that breaks any of them. A new table is
+ * covered by adding its line here (the database also enforces the ones declared with REFERENCES in the DDL).
+ */
+export const REFERENCES: ReadonlyArray<[table: string, column: string, parent: string, key: string]> = [
+  ["runs", "job_id", "jobs", "id"],
+  ["messages", "run_id", "runs", "id"],
+  ["evidence", "run_id", "runs", "id"],
+  ["findings", "run_id", "runs", "id"],
+  ["citations", "finding", "findings", "id"],
+  ["citations", "handle", "evidence", "handle"],
+  ["occurrences", "incident", "incidents", "id"],
+  ["hourly", "incident", "incidents", "id"],
+  ["asks", "job_id", "jobs", "id"],
 ];
 
 /**
@@ -180,11 +213,8 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
   ["a row refers to a sequence number that was never issued", `SELECT (SELECT count(*) FROM incidents WHERE seq > h.s) + (SELECT count(*) FROM coverage WHERE seq > h.s)
     + (SELECT count(*) FROM deploys WHERE seq > h.s) + (SELECT count(*) FROM jobs WHERE created_seq > h.s) + (SELECT count(*) FROM events WHERE seq > h.s)
     FROM (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0) AS s) h`],
-  ["a row refers to a job, run or incident that does not exist", `SELECT (SELECT count(*) FROM runs WHERE job_id NOT IN (SELECT id FROM jobs))
-    + (SELECT count(*) FROM messages WHERE run_id NOT IN (SELECT id FROM runs)) + (SELECT count(*) FROM evidence WHERE run_id NOT IN (SELECT id FROM runs))
-    + (SELECT count(*) FROM findings WHERE run_id NOT IN (SELECT id FROM runs))
-    + (SELECT count(*) FROM occurrences WHERE incident <> '' AND incident NOT IN (SELECT id FROM incidents))
-    + (SELECT count(*) FROM asks WHERE job_id NOT IN (SELECT id FROM jobs))`],
+  ["a row refers to a row that does not exist", REFERENCES.map(([table, column, parent, key]) =>
+    `(SELECT count(*) FROM ${table} WHERE ${column} IS NOT NULL AND ${column} <> '' AND ${column} NOT IN (SELECT ${key} FROM ${parent}))`).join(" + ").replace(/^/, "SELECT ")],
   ["a disposition or return names a sequence number that was never issued", `SELECT count(*) FROM incidents, (SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name = 'events'), 0) AS s) h
     WHERE coalesce(json_extract(way, '$.seq'), 0) > h.s OR coalesce(json_extract(returned, '$.seq'), 0) > h.s OR seen_seq > h.s OR first_seq > h.s`],
   ["a finding cites evidence that is not stored for its own run", `SELECT count(*) FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
@@ -193,7 +223,12 @@ const INVARIANTS: ReadonlyArray<[what: string, sql: string]> = [
     + (SELECT count(*) FROM sources WHERE (failure IS NULL) <> (streak = 0))`],
 ];
 
+/** Literal, case-insensitive matching across Unicode: compatibility-normalised, then folded through upper case (ß matches SS). */
+export const fold = (text: string) => text.normalize("NFKC").toUpperCase().toLowerCase();
+
 export class Busy extends Error {}
+/** The disk is short: nothing is admitted until there is room again. */
+export class Full extends Error {}
 export class Incompatible extends Error {}
 
 /** Identifiers Overwatch generates (hex digests, random hex): stored as they are. */
@@ -242,6 +277,10 @@ export class Writer {
     tick();
     return { changes: Number(result.changes), lastInsertRowid: Number(result.lastInsertRowid) };
   }
+  /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
+  next(): number {
+    return ((this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0) + 1;
+  }
   /** Appends to the log and returns its seq. */
   event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): number {
     return this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data)).lastInsertRowid;
@@ -257,6 +296,8 @@ export class Store {
     this.db = db;
     this.file = file;
     this.writer = new Writer(db);
+    // One case-folding for every literal match: Unicode, not SQLite's ASCII-only lower().
+    db.function("fold", { deterministic: true }, (v) => (typeof v === "string" ? fold(v) : v));
   }
 
   /**
@@ -306,6 +347,9 @@ export class Store {
         if (!has) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
       }
       db.exec(INDEXES);
+      db.exec(TRIGGERS);
+      db.exec(`INSERT OR IGNORE INTO citations (finding, handle) SELECT f.id, json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p
+        WHERE json_extract(p.value, '$.handle') IN (SELECT handle FROM evidence)`);
       db.exec("COMMIT");
     }
     if (app !== 0 && (app !== APPLICATION_ID || version !== USER_VERSION)) {
@@ -324,8 +368,18 @@ export class Store {
   }
 
   /** One change: one IMMEDIATE transaction. Listeners hear of it after it commits. */
-  tx<A>(work: (w: Writer) => A): A {
+  /**
+   * Admission for every write: set by the owner of the disk check, it runs before each transaction opens, so a
+   * failure record, a deadline or a page action is refused by the same rule as a slice. Only maintenance (making
+   * room) passes without it.
+   */
+  guard: (() => void) | null = null;
+
+  tx<A>(work: (w: Writer) => A, maintenance = false): A {
+    if (!maintenance) this.guard?.();
     this.db.exec("BEGIN IMMEDIATE");
+    // References are checked when the change commits, as one whole: a violation rolls the transaction back.
+    this.db.exec("PRAGMA defer_foreign_keys = ON");
     let result: A;
     try {
       result = work(this.writer);
@@ -406,10 +460,11 @@ export class Store {
       const high = (backup.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'events'").get() as { seq: number } | undefined)?.seq ?? 0;
       try {
         this.tx((w) => {
+          // References are checked once, on the whole staged copy, by the database's own foreign keys.
           w.run("UPDATE maintenance SET active = 1");
           for (const t of [...TABLES].reverse()) w.run(`DELETE FROM ${t.name}`);
           for (const t of TABLES) {
-            if (!present.has(t.name)) continue;
+            if (!present.has(t.name) || t.derived) continue;
             // A backup from an earlier build of version 1 may lack columns added since; they take their defaults.
             const has = new Set((backup.prepare(`SELECT name FROM pragma_table_info('${t.name}')`).all() as Array<{ name: string }>).map((r) => r.name));
             const columns = t.columns.filter((c) => has.has(c) || !ADDED.some(([table, column]) => table === t.name && column === c));
@@ -423,6 +478,8 @@ export class Store {
           // The backup's own high-water mark: a row beyond it is an invariant violation, not a reason to raise it.
           w.run("DELETE FROM sqlite_sequence WHERE name = 'events'");
           w.run("INSERT INTO sqlite_sequence (name, seq) VALUES ('events', ?)", high);
+          const broken = this.all<{ table: string; parent: string }>("PRAGMA foreign_key_check");
+          if (broken.length) throw new Error(`a ${broken[0]!.table} row refers to a ${broken[0]!.parent} row that does not exist (${broken.length})`);
           for (const [what, sql] of INVARIANTS) {
             const violations = Object.values(this.get<Record<string, number>>(sql) ?? {})[0] ?? 0;
             if (violations > 0) throw new Error(`${what} (${violations})`);
@@ -471,42 +528,48 @@ export class Store {
   }
 
   /**
-   * Makes room, in this order, stopping as soon as `over()` says the database fits: old events (counts and the
-   * sequence are kept); trial rows older than seven days; evidence that no finding cites, and messages, older than
-   * fourteen days; coverage rows older than thirty days. Evidence a finding cites is never removed. Each step is one
-   * audited transaction.
+   * Age: what has outlived its use goes, on every pass, whatever the disk: trial messages and uncited trial evidence
+   * after seven days; real messages and uncited evidence after fourteen; coverage rows and hourly counts after thirty.
+   * A finding and the evidence it cites are never removed (the citations table restricts it). One audited
+   * transaction, only when something is due.
+   */
+  expire(now: number): number {
+    const day = 86_400_000;
+    const old = (days: number, trial: boolean) =>
+      `SELECT r.id FROM runs r JOIN jobs j ON j.id = r.job_id WHERE r.state = 'terminal' AND (j.kind = 'trial') = ${trial ? 1 : 0} AND r.started_ms < ${now - days * day}`;
+    const due = [
+      `DELETE FROM evidence WHERE run_id IN (${old(7, true)}) AND handle NOT IN (SELECT handle FROM citations)`,
+      `DELETE FROM messages WHERE run_id IN (${old(7, true)})`,
+      `DELETE FROM evidence WHERE run_id IN (${old(14, false)}) AND handle NOT IN (SELECT handle FROM citations)`,
+      `DELETE FROM messages WHERE run_id IN (${old(14, false)})`,
+      `DELETE FROM coverage WHERE to_ms < ${now - 30 * day}`,
+      `DELETE FROM hourly WHERE hour < ${Math.floor((now - 30 * day) / 3_600_000)}`,
+    ];
+    const any = due.some((sql) => this.get(sql.replace(/^DELETE FROM (\w+) WHERE/, "SELECT 1 FROM $1 WHERE") + " LIMIT 1") !== undefined);
+    if (!any) return 0;
+    return this.tx((w) => {
+      let removed = 0;
+      for (const sql of due) removed += w.run(sql).changes;
+      w.event("compacted", null, { step: "age", removed, throughSeq: 0 });
+      return removed;
+    }, true);
+  }
+
+  /**
+   * Makes room under pressure: old events (counts and the sequence are kept), then what age allows. Nothing else is
+   * removed; if that is not enough, the caller pauses collection. Cited evidence is never removed.
    */
   retain(now: number, over: () => boolean, keepEvents = 10_000): void {
-    const day = 86_400_000;
-    const steps: Array<[string, (w: Writer) => number]> = [
-      ["events", (w) => {
-        w.run("UPDATE maintenance SET active = 1");
-        const n = w.run("DELETE FROM events WHERE seq <= ?", Math.max(0, this.seq() - keepEvents)).changes;
-        w.run("UPDATE maintenance SET active = 0");
-        return n;
-      }],
-      ["trial", (w) => {
-        const old = `SELECT id FROM jobs WHERE kind = 'trial' AND state IN ('completed', 'parked') AND NOT EXISTS (SELECT 1 FROM runs WHERE job_id = jobs.id AND started_ms >= ${now - 7 * day})`;
-        const runs = `SELECT id FROM runs WHERE job_id IN (${old})`;
-        let n = 0;
-        for (const t of ["findings", "evidence", "messages"]) n += w.run(`DELETE FROM ${t} WHERE run_id IN (${runs})`).changes;
-        n += w.run(`DELETE FROM runs WHERE job_id IN (${old})`).changes;
-        return n + w.run(`DELETE FROM jobs WHERE id IN (${old})`).changes;
-      }],
-      ["evidence", (w) => {
-        const old = `SELECT id FROM runs WHERE state = 'terminal' AND started_ms < ${now - 14 * day}`;
-        const cited = `SELECT json_extract(p.value, '$.handle') FROM findings f, json_each(f.claims) c, json_each(c.value, '$.pieces') p`;
-        return w.run(`DELETE FROM evidence WHERE run_id IN (${old}) AND handle NOT IN (${cited})`).changes + w.run(`DELETE FROM messages WHERE run_id IN (${old})`).changes;
-      }],
-      ["coverage", (w) => w.run("DELETE FROM coverage WHERE to_ms < ?", now - 30 * day).changes + w.run("DELETE FROM hourly WHERE hour < ?", Math.floor((now - 30 * day) / 3_600_000)).changes],
-    ];
-    for (const [step, work] of steps) {
-      if (!over()) return;
+    if (over()) {
       this.tx((w) => {
         const throughSeq = Math.max(0, this.seq() - keepEvents);
-        w.event("compacted", null, { step, removed: work(w), throughSeq });
-      });
+        w.run("UPDATE maintenance SET active = 1");
+        const removed = w.run("DELETE FROM events WHERE seq <= ?", throughSeq).changes;
+        w.run("UPDATE maintenance SET active = 0");
+        w.event("compacted", null, { step: "events", removed, throughSeq });
+      }, true);
     }
+    if (over()) this.expire(now);
   }
 }
 

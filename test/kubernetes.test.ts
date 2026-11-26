@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { Collector, hysteresis, METRIC_RULES } from "../src/collect.ts";
 import { LIMITS, parseConfig } from "../src/config.ts";
 import { Store } from "../src/store.ts";
+import { sample, UNMEASURED } from "../src/parse.ts";
 import { snapshot } from "../src/snapshot.ts";
 import { clock } from "../src/clock.ts";
 
@@ -46,7 +47,7 @@ else if (verb === "top") {
   const id = previous ? status.lastState?.terminated?.containerID : status.containerID;
   if (!id || !w.logs[id]) { console.error('previous terminated container "api" in pod "' + args[1] + '" not found'); process.exit(1); }
   const since = Date.parse(args.find((a) => a.startsWith("--since-time=")).slice(13));
-  for (const [stamp, text] of w.logs[id]) if (Date.parse(stamp) >= since) console.log(stamp + " " + text);
+  for (const [stamp, text] of w.logs[id]) if (!(Date.parse(stamp) < since)) console.log(stamp + " " + text);
 } else { console.error("unsupported " + args.join(" ")); process.exit(1); }
 `,
   { mode: 0o755 },
@@ -252,7 +253,7 @@ test("hysteresis agrees with the kept rule: open after n measured samples over i
       let state = { over: 0, under: 0, breach: false };
       let open = false;
       samples.forEach((value, i) => {
-        state = hysteresis(rule, state, value);
+        state = hysteresis(rule, state, value === null ? UNMEASURED : sample(value));
         // The trailing run of measured samples on one side of the limit, as the earlier detection computed it.
         const tail = samples.slice(Math.max(0, i - rule.samples + 1), i + 1);
         const full = tail.length === rule.samples && tail.every((v) => v !== null);
@@ -341,5 +342,42 @@ test("a running container without an instance cannot be read, and is a gap", asy
   set({ listings: [[pod("shop-a", "uid-a", { current: "" })]], logs: {} });
   await r.pass();
   assert.equal(r.logs(), "gap");
+  r.close();
+});
+
+test("class: any sequence of measured, unmeasured and failed passes moves a gauge exactly as the kept rule says", async () => {
+  const rule = METRIC_RULES[0]!;
+  await fc.assert(
+    fc.asyncProperty(fc.array(fc.constantFrom<number | "fail" | null>(490, 64, null, "fail"), { minLength: 1, maxLength: 7 }), async (steps) => {
+      const r = rig(["usage"]);
+      const p = pod("shop-a", "uid-a", { current: "c-1" });
+      let model = { over: 0, under: 0, breach: false };
+      for (const s of steps) {
+        set({ listings: [[p]], logs: {}, memory: s === "fail" ? 1 : s, ...(s === "fail" ? { unauthorized: true } : {}) });
+        r.advance(60_000);
+        r.restart(); // each pass as if fresh: no in-memory schedule hides a failure
+        await r.pass();
+        // A failed pass and an unmeasured sample are the same thing to the rule: not measured.
+        model = hysteresis(rule, model, typeof s === "number" ? sample((100 * s) / 512) : UNMEASURED);
+        const row = r.store.get<{ breach: number }>("SELECT breach FROM metrics");
+        assert.equal(Boolean(row?.breach), model.breach, JSON.stringify(steps));
+      }
+      r.close();
+    }),
+    { numRuns: 12 },
+  );
+});
+
+test("a log line without a readable time is a gap and makes the active total a lower bound", async () => {
+  const r = rig();
+  const p = pod("shop-a", "uid-a", { current: "c-1" });
+  const t = at(r.now - 10_000);
+  set({ listings: [[p]], logs: { "c-1": [[t, "ERROR checkout"]] } });
+  await r.pass();
+  r.advance(60_000);
+  set({ listings: [[p]], logs: { "c-1": [[t, "ERROR checkout"], ["not-a-time", "ERROR checkout"]] } });
+  await r.pass();
+  assert.equal(r.logs(), "gap");
+  assert.equal(r.store.get<{ exact: number }>("SELECT exact FROM incidents")!.exact, 0);
   r.close();
 });

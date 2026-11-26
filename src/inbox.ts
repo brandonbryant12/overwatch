@@ -11,7 +11,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { clean } from "./redact.ts";
-import { json, type Clean, type Store, type Writer } from "./store.ts";
+import { fold, json, type Clean, type Store, type Writer } from "./store.ts";
 
 export class HttpError extends Error {
   readonly status: number;
@@ -33,6 +33,8 @@ interface Way {
   delayMs: number | null;
   count: number;
   baseline: number;
+  /** Whether the count was exact when put away: a rate needs a known baseline. */
+  exact?: boolean;
   severity: string;
   previous: Way | null;
 }
@@ -50,6 +52,7 @@ interface Row {
   returned: string | null;
   seen_seq: number;
   first_seq: number;
+  decided_seq: number;
   seq: number;
   first_ms: number;
   last_ms: number;
@@ -63,8 +66,23 @@ const production = (environment: string) => /^(prod|production)$/i.test(environm
 const parse = <T>(text: string | null): T | null => (text ? (JSON.parse(text) as T) : null);
 export const publicWay = (w: Way | null) => (w ? { kind: w.kind, seq: w.seq, untilMs: w.untilMs, when: w.when, reason: w.reason } : null);
 
-/** Live deadlines on the monotonic clock, rebuilt after a restart as at most their stored delay. */
+/** Live deadlines on the monotonic clock, rebuilt at start (rebuild()) as at most their stored delay. */
 const live = new Map<string, number>();
+
+const deadlineOf = (w: Way) => (w.kind === "done" ? w.atMs + w.delayMs! : w.untilMs);
+
+/**
+ * At start: every stored deadline gets its live bound now, before any arrival or pass looks at it, so the time a
+ * process was down counts by the wall clock and a wall clock set back cannot stretch it past the owner's delay.
+ */
+export function rebuild(store: Store) {
+  const now = clock.now();
+  for (const row of store.all<Row>("SELECT id, way FROM incidents WHERE way IS NOT NULL")) {
+    const way = parse<Way>(row.way)!;
+    const at = deadlineOf(way);
+    if (at !== null && way.delayMs !== null) live.set(`${row.id}:${way.seq}`, clock.mono() + Math.min(Math.max(0, at - now), way.delayMs));
+  }
+}
 function passed(key: string, wallAt: number, delay: number, strict: boolean): boolean {
   const now = clock.now();
   if (strict ? now > wallAt : now >= wallAt) return true;
@@ -106,7 +124,7 @@ export function rows(store: Store) {
   }
   return store.all<Row>("SELECT * FROM incidents ORDER BY seq, id").map((r) => ({
     id: r.id, title: r.title, count: r.count, exact: r.exact === 1, severity: r.severity, app: r.app, environment: r.environment,
-    source: r.source, active: r.active === 1, group: groupOf(r, open), way: publicWay(parse<Way>(r.way)), returned: parse<{ seq: number; causeSeq: number; code: string; reason: string }>(r.returned),
+    source: r.source, active: r.active === 1, group: groupOf(r, open), decidedSeq: r.decided_seq, way: publicWay(parse<Way>(r.way)), returned: parse<{ seq: number; causeSeq: number; code: string; reason: string }>(r.returned),
     seenSeq: r.seen_seq, firstSeq: r.first_seq, lastSeq: r.seq, firstMs: r.first_ms, lastMs: r.last_ms, spark: spark.get(r.id) ?? Array(24).fill(0),
   }));
 }
@@ -119,7 +137,7 @@ function trailing(store: Store, id: string): number {
 /** Brings a row back: one `returned` event after its cause, the disposition cleared, the problem active again. */
 function ret(w: Writer, row: Row, code: string, causeSeq: number, actionSeq: number, reason: string) {
   const seq = w.event("returned", row.id as Clean, { actionSeq, causeSeq, code, reason });
-  w.run("UPDATE incidents SET way = NULL, returned = ?, active = 1, streak = 0 WHERE id = ?", json({ seq, causeSeq, code, reason }), row.id as Clean);
+  w.run("UPDATE incidents SET way = NULL, returned = ?, active = 1, streak = 0, decided_seq = ? WHERE id = ?", json({ seq, causeSeq, code, reason }), seq, row.id as Clean);
 }
 
 const get = (store: Store, id: string) => store.get<Row>("SELECT * FROM incidents WHERE id = ?", id);
@@ -150,8 +168,9 @@ export function afterChange(w: Writer, store: Store, id: string, before: { sever
     if (passed(`${id}:${way.seq}`, way.atMs + way.delayMs!, way.delayMs!, true)) ret(w, row, "again", causeSeq, way.seq, `Happened again since Done: ${plural(added, "new occurrence")} after the grace.`);
     return;
   }
+  // A rate needs a known baseline: a count that was a lower bound when put away cannot be the denominator.
   const day = trailing(store, id), base = Math.max(1, way.baseline), factor = way.kind === "never" ? 10 : 2;
-  if (since >= 5 && day >= factor * base) {
+  if (way.exact !== false && since >= 5 && day >= factor * base) {
     ret(w, row, "worse", causeSeq, way.seq, `Worse: ${plural(since, "new occurrence")} since ${way.kind === "never" ? "Never" : "Later"}, ${day} in the last day against ${way.baseline} before.`);
   }
 }
@@ -190,6 +209,13 @@ export function act(store: Store, config: Config, id: string, body: Record<strin
   const action = body.action;
   const int = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
   const way = parse<Way>(row.way);
+  // A decision is bound to what the owner reviewed: given basisSeq (the item's decidedSeq they were shown), it is
+  // refused when the disposition has changed since, so an old sheet in another tab cannot replace a newer decision.
+  if (action !== "seen" && body.basisSeq !== undefined && body.basisSeq !== null) {
+    const basis = int(body.basisSeq);
+    if (basis === null) throw new HttpError(400, "basisSeq is the decidedSeq that was shown");
+    if (basis !== row.decided_seq) throw new HttpError(409, "this item was decided again since you looked; look again");
+  }
   if (action === "seen") {
     const through = int(body.throughSeq);
     if (through === null || through < 0 || through > store.seq()) throw new HttpError(400, "throughSeq must be a seq from 0 to the current one");
@@ -202,7 +228,7 @@ export function act(store: Store, config: Config, id: string, body: Record<strin
     if (!way || way.seq !== actionSeq) throw new HttpError(409, "that action is no longer the current one");
     return { seq: store.tx((w) => {
       const seq = w.event("action", id as Clean, { action: "undo", actionSeq, previous: publicWay(way), way: publicWay(way.previous) });
-      w.run("UPDATE incidents SET way = ? WHERE id = ?", way.previous ? json(way.previous) : null, id as Clean);
+      w.run("UPDATE incidents SET way = ?, decided_seq = ? WHERE id = ?", way.previous ? json(way.previous) : null, seq, id as Clean);
       return seq;
     }) };
   }
@@ -220,11 +246,14 @@ export function act(store: Store, config: Config, id: string, body: Record<strin
   const now = clock.now();
   const next: Way = {
     kind: action, seq: 0, untilMs, when: when as "worse" | null, reason: reason === null ? null : clean(reason, 500), atMs: now,
-    delayMs: action === "done" ? grace : untilMs !== null ? untilMs - now : null, count: row.count, baseline: trailing(store, id), severity: row.severity, previous: way,
+    delayMs: action === "done" ? grace : untilMs !== null ? untilMs - now : null, count: row.count, baseline: trailing(store, id), exact: row.exact === 1, severity: row.severity, previous: way,
   };
   const seq = store.tx((w) => {
-    next.seq = w.event("action", id as Clean, { action, previous: publicWay(way), way: publicWay({ ...next, seq: 0 }) });
-    w.run("UPDATE incidents SET way = ? WHERE id = ?", json(next), id as Clean);
+    // One position for the disposition: the action event's own seq, named inside the event and stored with the way.
+    next.seq = w.next();
+    if (w.event("action", id as Clean, { action, previous: publicWay(way), way: publicWay(next) }) !== next.seq) throw new Error("the event log moved during an action");
+    // Acting on an item is looking at it.
+    w.run("UPDATE incidents SET way = ?, decided_seq = ?, seen_seq = max(seen_seq, seq) WHERE id = ?", json(next), next.seq, id as Clean);
     return next.seq;
   });
   if (next.delayMs !== null) live.set(`${id}:${seq}`, clock.mono() + next.delayMs);
@@ -241,7 +270,11 @@ export function detail(store: Store, config: Config, id: string) {
   const findings = store
     .all<{ id: string; verdict: string; claims: string; body: string }>("SELECT f.id, f.verdict, f.claims, f.body FROM findings f JOIN runs r ON r.id = f.run_id JOIN jobs j ON j.id = r.job_id WHERE j.subject = ? AND j.kind <> 'trial' ORDER BY f.rowid", id)
     .map((f) => ({ id: f.id, verdict: f.verdict, claims: JSON.parse(f.claims), body: JSON.parse(f.body) }));
-  return { incident: row, history, findings, promptTarget: target(store, id), label: label(store, config, id) };
+  // What the owner asked about this item, with where each request stands.
+  const requests = store
+    .all<{ job_id: string; text: string; mode: string; seq: number; state: string }>("SELECT a.job_id, a.text, a.mode, a.seq, j.state FROM asks a JOIN jobs j ON j.id = a.job_id WHERE a.subject = ? ORDER BY a.seq", id)
+    .map((r) => ({ jobId: r.job_id, text: r.text, mode: r.mode, seq: r.seq, state: r.state }));
+  return { incident: row, history, findings, requests, promptTarget: target(store, id), label: label(store, config, id) };
 }
 
 /** Where a prompt about a subject goes: its latest open job, or a new one. */
@@ -295,27 +328,38 @@ export function ask(store: Store, config: Config, body: Record<string, unknown>,
  * GET /v2/search: literal, case-insensitive, over real problems' titles, retained evidence and findings of real work,
  * and prompts; each subject once, newest matching seq first. Trial work is not searched.
  */
-export function search(store: Store, config: Config, q: string) {
-  const needle = q.trim().toLowerCase();
-  if (!needle) return { items: [] };
+export function search(store: Store, config: Config, q: string, cursor: string | null = null) {
+  const needle = fold(q.trim());
+  if (!needle) return { items: [], nextCursor: null };
+  const bind = createHash("sha256").update(needle).digest("hex").slice(0, 12);
+  let offset = 0;
+  if (cursor) {
+    const m = /^s(\d{1,7})_([0-9a-f]{12})$/.exec(cursor);
+    if (!m || m[2] !== bind) throw new HttpError(400, "cursor does not belong to this query");
+    offset = Number(m[1]);
+  }
   const hits = [
-    ...store.all<{ subject: string; text: string; seq: number }>("SELECT id AS subject, title AS text, seq FROM incidents WHERE instr(lower(title), ?) > 0", needle),
+    ...store.all<{ subject: string; text: string; seq: number }>("SELECT id AS subject, title AS text, seq FROM incidents WHERE instr(fold(title), ?) > 0", needle),
     ...store.all<{ subject: string; text: string; seq: number }>(
       `SELECT j.subject, e.text, j.created_seq AS seq FROM evidence e JOIN runs r ON r.id = e.run_id JOIN jobs j ON j.id = r.job_id
-       WHERE j.kind <> 'trial' AND instr(lower(e.text), ?) > 0 LIMIT 500`, needle),
+       WHERE j.kind <> 'trial' AND instr(fold(e.text), ?) > 0`, needle),
     ...store.all<{ subject: string; text: string; seq: number }>(
       `SELECT j.subject, f.claims || ' ' || f.body AS text, j.created_seq AS seq FROM findings f JOIN runs r ON r.id = f.run_id JOIN jobs j ON j.id = r.job_id
-       WHERE j.kind <> 'trial' AND instr(lower(f.claims || ' ' || f.body), ?) > 0 LIMIT 500`, needle),
-    ...store.all<{ subject: string; text: string; seq: number }>("SELECT subject, text, seq FROM asks WHERE instr(lower(text), ?) > 0 LIMIT 500", needle),
+       WHERE j.kind <> 'trial' AND instr(fold(f.claims || ' ' || f.body), ?) > 0`, needle),
+    ...store.all<{ subject: string; text: string; seq: number }>("SELECT subject, text, seq FROM asks WHERE instr(fold(text), ?) > 0", needle),
   ];
   const best = new Map<string, { id: string; title: string; excerpt: string; seq: number }>();
   for (const h of hits) {
-    const at = h.text.toLowerCase().indexOf(needle);
-    const excerpt = clean(`${at > 60 ? "…" : ""}${h.text.slice(Math.max(0, at - 60), at + needle.length + 80)}${at + needle.length + 80 < h.text.length ? "…" : ""}`, 400);
     const prior = best.get(h.subject);
-    if (!prior || h.seq > prior.seq) best.set(h.subject, { id: h.subject, title: label(store, config, h.subject) ?? h.subject, excerpt, seq: h.seq });
+    if (prior && h.seq <= prior.seq) continue;
+    const at = Math.max(0, fold(h.text).indexOf(needle));
+    const excerpt = clean(`${at > 60 ? "…" : ""}${h.text.slice(Math.max(0, at - 60), at + needle.length + 80)}${at + needle.length + 80 < h.text.length ? "…" : ""}`, 400);
+    best.set(h.subject, { id: h.subject, title: label(store, config, h.subject) ?? h.subject, excerpt, seq: h.seq });
   }
-  return { items: [...best.values()].sort((a, b) => b.seq - a.seq || (a.id < b.id ? -1 : 1)).slice(0, 50) };
+  // Every matching subject is reachable: pages of 50 in a stable order (newest matching seq, then ID).
+  const all = [...best.values()].sort((a, b) => b.seq - a.seq || (a.id < b.id ? -1 : 1));
+  const items = all.slice(offset, offset + 50);
+  return { items, nextCursor: offset + 50 < all.length ? `s${offset + 50}_${bind}` : null };
 }
 
 /** Counts an occurrence by the hour of its event time, in the transaction that counts it. */

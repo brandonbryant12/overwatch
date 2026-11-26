@@ -50,7 +50,8 @@ async function request(source: Source, path: string, init: { method?: string; bo
 
 
 export interface DatadogLog {
-  readonly id: string;
+  /** null when the log has no stable ID: it cannot be counted once, so the reading is incomplete. */
+  readonly id: string | null;
   /** null when the log has no readable time: it cannot be placed in a window. */
   readonly at: number | null;
   readonly message: string;
@@ -69,8 +70,7 @@ export async function searchLogs(source: Source, from: number, to: number, each:
     const reply = rec(await request(source, "/api/v2/logs/events/search", { method: "POST", body }));
     for (const row of list(reply.data)) {
       const a = rec(rec(row).attributes);
-      const id = str(rec(row).id);
-      if (id) each({ id, at: time(a.timestamp), message: typeof a.message === "string" ? a.message : "", status: str(a.status) ?? "error" });
+      each({ id: str(rec(row).id), at: time(a.timestamp), message: typeof a.message === "string" ? a.message : "", status: str(a.status) ?? "error" });
     }
     const after = rec(rec(reply.meta).page).after;
     if (typeof after !== "string" || !after) return;

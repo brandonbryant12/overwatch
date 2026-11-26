@@ -13,7 +13,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, ask, deadlines, detail, focus, HttpError, inbox, search } from "./inbox.ts";
+import { act, ask, deadlines, detail, focus, HttpError, inbox, rebuild, search } from "./inbox.ts";
 import type { Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { Collector } from "./collect.ts";
@@ -21,7 +21,7 @@ import { doctor } from "./doctor.ts";
 import { secret } from "./exec.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
-import { trace, type Store } from "./store.ts";
+import { Full, trace, type Store } from "./store.ts";
 import { Refusal, Tools } from "./tools.ts";
 import { emptyFolder, reconcile, Trial } from "./trial.ts";
 
@@ -41,11 +41,17 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
   const current = () => snapshot(store, config, collector, true);
 
   /** One scheduler pass: reconcile work from another timeline, then collect what is due. */
+  rebuild(store);
   const pass = async () => {
     await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
     if (options.collect) await collector.pass();
-    deadlines(store);
-    options.tick?.();
+    try {
+      store.expire(clock.now());
+      deadlines(store);
+      options.tick?.();
+    } catch (e) {
+      if (!(e instanceof Full)) throw e; // paused for disk: deadlines wait for room like every write
+    }
   };
 
   // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.
@@ -99,7 +105,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     if (req.method === "GET" && !path.startsWith("/v2/") && path !== "/mcp") return page(path, res);
     try {
       if (req.method === "GET" && path === "/v2/inbox") return reply(200, inbox(store));
-      if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? ""));
+      if (req.method === "GET" && path === "/v2/search") return reply(200, search(store, config, address.searchParams.get("q") ?? "", address.searchParams.get("cursor")));
       if (req.method === "GET" && path === "/v2/focus") return reply(200, focus(store, config, address.searchParams.get("subject") ?? ""));
       const item = /^\/v2\/items\/([^/]+)(\/action)?$/.exec(path);
       if (item && req.method === "GET" && !item[2]) return reply(200, detail(store, config, decodeURIComponent(item[1]!)));
@@ -110,6 +116,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       if (req.method === "POST" && path === "/v2/ask") return reply(200, ask(store, config, body, req.headers["idempotency-key"] as string | undefined));
     } catch (e) {
       if (e instanceof HttpError) return error(e.status, e.status === 404 ? "not_found" : e.status === 409 ? "conflict" : "bad_request", errorText(e));
+      if (e instanceof Full) return error(503, "paused", "collection is paused for disk space; see pausedFix in status");
       throw e;
     }
     if (req.method === "GET" && path === "/v2/changes") {

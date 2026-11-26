@@ -7,12 +7,22 @@ export const rec = (v: unknown): Record<string, unknown> => (v && typeof v === "
 export const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 export const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
-/** A finite number, or a string that is exactly one. */
+/** A finite number, or a string that is exactly one. Finiteness is checked last, on the value itself, for every shape. */
 export function num(v: unknown): number | null {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  if (typeof v !== "string" || !/^\s*-?\d+(\.\d+)?([eE][-+]?\d+)?\s*$/.test(v)) return null;
-  return Number(v);
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\s*-?\d+(\.\d+)?([eE][-+]?\d+)?\s*$/.test(v) ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : null;
 }
+
+/**
+ * A measurement: measured with a finite value, or not measured. Built only here, so every consumer (hysteresis,
+ * health, quiet streaks, rate baselines) receives one of the two and cannot mistake one for the other.
+ */
+export type Sample = { readonly measured: true; readonly value: number } | { readonly measured: false };
+export const UNMEASURED: Sample = Object.freeze({ measured: false });
+export const sample = (v: unknown): Sample => {
+  const n = num(v);
+  return n === null ? UNMEASURED : Object.freeze({ measured: true, value: n });
+};
 
 /** A non-negative whole number. */
 export function count(v: unknown): number | null {

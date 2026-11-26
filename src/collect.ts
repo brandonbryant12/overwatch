@@ -20,7 +20,8 @@ import { kubectl, parseEvents, parsePods, parseRevision, parseTop, streamLogs, t
 import * as datadog from "./datadog.ts";
 import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
-import { type Clean, type Store, type Writer } from "./store.ts";
+import { Full, type Clean, type Store, type Writer } from "./store.ts";
+import { sample, UNMEASURED, type Sample } from "./parse.ts";
 import { afterChange, afterDeploy, hourly } from "./inbox.ts";
 
 const sha = (...parts: ReadonlyArray<unknown>) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
@@ -77,8 +78,9 @@ export const METRIC_RULES: ReadonlyArray<{ name: string; over: number; samples: 
 type Hysteresis = { over: number; under: number; breach: boolean };
 
 /** One sample through a rule: the runs over and under the limit, and whether the problem is open. */
-export function hysteresis(rule: { over: number; samples: number }, state: Hysteresis, value: number | null): Hysteresis {
-  if (value === null) return { over: 0, under: 0, breach: state.breach };
+export function hysteresis(rule: { over: number; samples: number }, state: Hysteresis, s: Sample): Hysteresis {
+  if (!s.measured) return { over: 0, under: 0, breach: state.breach };
+  const value = s.value;
   const over = value > rule.over ? state.over + 1 : 0, under = value > rule.over ? 0 : state.under + 1;
   return { over, under, breach: state.breach ? under < rule.samples : over >= rule.samples };
 }
@@ -94,7 +96,7 @@ export class Slice {
   readonly baselines: Array<{ key: string; count: number; bucket: string }> = [];
   readonly readings = new Map<string, Reading>();
   /** Gauge samples; null is a sample that could not be measured. */
-  readonly metrics: Array<{ name: string; reading: string; value: number | null; at: number }> = [];
+  readonly metrics: Array<{ name: string; reading: string; sample: Sample; at: number }> = [];
   /** Incidents whose stored total is now known to be a lower bound (lines counted before were lost). */
   readonly uncertain = new Set<string>();
   fresh = 0;
@@ -161,8 +163,6 @@ export interface Space {
   dbBytes: number;
 }
 
-/** The disk is short: nothing is admitted and collection pauses. */
-class Full extends Error {}
 
 const incidentId = (source: Source, bucket: string) => `inc_${sha(source.app, source.environment, source.id, bucket).slice(0, 32)}`;
 
@@ -183,6 +183,10 @@ export class Collector {
     this.store = store;
     this.config = config;
     this.directory = directory;
+    // Every write, wherever it comes from, is admitted by the same disk check.
+    store.guard = () => {
+      if (!this.room(false)) throw new Full("collection is paused for disk space");
+    };
   }
 
   wake() {
@@ -249,25 +253,31 @@ export class Collector {
     if (!roomy) return;
     const woke = this.wakeAt !== null && clock.mono() >= this.wakeAt;
     this.refused.clear();
-    for (const source of this.config.sources) {
-      if (!this.due(source)) continue;
-      try {
-        const earlier = this.refused.get(endpoint(source));
-        if (earlier) throw earlier;
-        if (source.kind === "kubernetes") await this.kubernetes(source);
-        else await this.datadog(source);
-      } catch (error) {
-        if (error instanceof Full) return;
-        if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) this.refused.set(endpoint(source), error);
-        this.fail(source, error);
+    try {
+      for (const source of this.config.sources) {
+        if (!this.due(source)) continue;
+        try {
+          const earlier = this.refused.get(endpoint(source));
+          if (earlier) throw earlier;
+          if (source.kind === "kubernetes") await this.kubernetes(source);
+          else await this.datadog(source);
+        } catch (error) {
+          if (error instanceof Full) throw error;
+          if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) this.refused.set(endpoint(source), error);
+          this.fail(source, error);
+        }
       }
+    } catch (error) {
+      if (error instanceof Full) return; // paused: the failure record waits for room like everything else
+      throw error;
     }
     if (woke) this.wakeAt = null;
   }
 
   /**
    * Where reading starts: the checkpoint, never before the 14-day floor. Older time is the gap [checkpoint, floor).
-   * `scheduled` is true for an ordinary interval (not a catch-up after a sleep).
+   * `ordinary` is true for one new ordinary interval: time moved on since the checkpoint, by no more than two polling
+   * intervals. A replay of the same window (the clock did not move) and a catch-up after a sleep are not ordinary.
    */
   private window(source: Source, overlap: number) {
     const now = clock.now(), floor = now - LIMITS.catchUpMs;
@@ -278,7 +288,7 @@ export class Collector {
     const saturated = this.store
       .all<{ from_ms: number; to_ms: number }>("SELECT from_ms, to_ms FROM saturated WHERE source = ?", source.id)
       .map((s): Span => ({ from: s.from_ms, to: s.to_ms }));
-    return { now, start, floor, gap, overlap, saturated, scheduled: now - start <= 2 * source.everyMs };
+    return { now, start, floor, gap, overlap, saturated, ordinary: now - start > 0 && now - start <= 2 * source.everyMs };
   }
 
   private slice(source: Source, w: ReturnType<Collector["window"]>, start: number, end: number) {
@@ -306,7 +316,7 @@ export class Collector {
         if (slice.readings.get("logs")!.state === "failed") stuck = true;
       }
       if (end === w.now) await this.present(t, source, slice, pods, w.now);
-      this.commit(slice, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, w.scheduled && end === w.now);
+      this.commit(slice, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = stuck ? Math.max(end, w.now - LIMITS.sliceMs) : end;
     } while (start < w.now);
@@ -425,7 +435,7 @@ export class Collector {
         slice.revision = parseRevision(r.stdout);
         slice.readings.set("workloads", { state: slice.revision ? "ok" : "gap", missed: null });
       }
-      slice.metrics.push({ name: NOT_READY, reading: "workloads", value: pods.filter((p) => !p.ready).length, at: now });
+      slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: now });
     }
     if (source.readings.includes("usage")) {
       const r = await kubectl(t, "top", ["pod", "-l", source.selector!, "--containers", "--no-headers"]);
@@ -438,7 +448,7 @@ export class Collector {
         if (limited.length && used.every((m) => m !== null)) worst = Math.max(...used.map((m, i) => (100 * m!) / limited[i]!.limit));
         slice.readings.set("usage", { state: worst === null ? "gap" : "ok", missed: null });
       }
-      slice.metrics.push({ name: MEMORY, reading: "usage", value: worst === null ? null : Math.round(worst * 10) / 10, at: now });
+      slice.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: now });
     }
   }
 
@@ -453,7 +463,7 @@ export class Collector {
         if (source.readings.includes("logs")) {
           let unplaced = false;
           await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
-            if (log.at === null) return void (unplaced = true);
+            if (log.at === null || log.id === null) return void (unplaced = true); // cannot be placed or counted once
             const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
             if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity);
@@ -473,25 +483,24 @@ export class Collector {
         }
         if (end === w.now && source.readings.includes("metrics")) {
           const point = await datadog.metric(source, end - source.everyMs, end);
-          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", value: point?.value ?? null, at: point?.at ?? end });
+          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? end });
           slice.readings.set("metrics", { state: point ? "ok" : "gap", missed: null });
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
         throw error;
       }
-      this.commit(slice, gap, end, LIMITS.overlapMs.datadog, w.scheduled && end === w.now);
+      this.commit(slice, gap, end, LIMITS.overlapMs.datadog, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = end;
     } while (start < w.now);
   }
 
   /**
-   * The slice, in one transaction, after checking there is room. `scheduled` marks an ordinary complete interval:
-   * only those count toward a problem going quiet (three in a row with nothing new and the reading fully measured).
+   * The slice, in one transaction (admitted by the store's guard). The last slice of a pass closes the pass's
+   * interval (`last`); see interval().
    */
-  private commit(slice: Slice, gap: Span | null, checkpoint: number | null, overlap: number, scheduled: boolean) {
-    if (!this.room(false)) throw new Full();
+  private commit(slice: Slice, gap: Span | null, checkpoint: number | null, overlap: number, last: { ordinary: boolean } | null) {
     const source = slice.source;
     const now = clock.now();
     this.store.tx((w) => {
@@ -535,7 +544,7 @@ export class Collector {
         const id = incidentId(source, bucket);
         const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
         if (added === 0 && !info.inexact && !before) continue;
-        incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen);
+        incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen, info.seen);
         afterChange(w, this.store, id, before, added, seq);
       }
       for (const id of slice.uncertain) w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
@@ -554,8 +563,7 @@ export class Collector {
         );
         if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono());
       }
-      for (const m of slice.metrics) this.metric(w, source, m, now, seq);
-      this.quiet(w, slice, touched, scheduled, seq);
+      if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
       if (slice.revision) this.deploy(w, source, slice.revision);
       if (checkpoint !== null) {
         const before = this.store.get<{ failure: string | null }>("SELECT failure FROM sources WHERE id = ?", source.id);
@@ -579,46 +587,46 @@ export class Collector {
   }
 
   /**
-   * An occurrence problem stays active until three ordinary intervals in a row read its reading completely and found
-   * nothing new; an interval that was not fully measured starts the count again. Gauge problems follow their breach.
+   * The one place a pass's interval is recorded, whether it was read or failed: every gauge gets a sample (a failure
+   * gives each an unmeasured one) and every active occurrence problem's quiet count moves by quietStep(). Nothing
+   * else changes hysteresis or quiet streaks.
    */
-  private quiet(w: Writer, slice: Slice, touched: ReadonlySet<string>, scheduled: boolean, seq: number) {
-    const active = this.store.all<{ id: string; reading: string; streak: number }>("SELECT id, reading, streak FROM incidents WHERE source = ? AND active = 1 AND reading <> 'gauge'", slice.source.id);
+  private interval(w: Writer, source: Source, readings: ReadonlyMap<string, Reading>, samples: Slice["metrics"], touched: ReadonlySet<string>, ordinary: boolean, seq: number, now: number) {
+    for (const m of samples) this.metric(w, source, m, now, seq);
+    const active = this.store.all<{ id: string; reading: string; streak: number }>("SELECT id, reading, streak FROM incidents WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id);
     for (const i of active) {
-      const state = slice.readings.get(i.reading)?.state;
-      if (touched.has(i.id) || state === undefined) continue;
-      if (state !== "ok" || !scheduled) {
-        if (state !== "ok" && i.streak > 0) w.run("UPDATE incidents SET streak = 0 WHERE id = ?", i.id as Clean);
-        continue;
-      }
-      if (i.streak + 1 >= LIMITS.quietIntervals) {
+      const state = readings.get(i.reading)?.state;
+      if (state === undefined) continue; // not a reading of this pass (a present-state reading on a catch-up slice)
+      const next = quietStep(i.streak, { touched: touched.has(i.id), measured: state === "ok", ordinary });
+      if (next.quiet) {
         w.run("UPDATE incidents SET active = 0, streak = 0 WHERE id = ?", i.id as Clean);
         w.event("quieted", i.id as Clean, { slice: seq });
-      } else w.run("UPDATE incidents SET streak = streak + 1 WHERE id = ?", i.id as Clean);
+      } else if (next.streak !== i.streak) w.run("UPDATE incidents SET streak = ? WHERE id = ?", next.streak, i.id as Clean);
     }
   }
 
   /** One gauge sample through its rule's hysteresis; the breach that opens is counted as one occurrence of its problem. */
   private metric(w: Writer, source: Source, m: Slice["metrics"][number], now: number, seq: number) {
     const row = this.store.get<{ value: number; at_ms: number; over: number; under: number; breach: number }>("SELECT * FROM metrics WHERE source = ? AND name = ?", source.id, m.name);
-    if (m.value === null && !row) return;
+    if (!m.sample.measured && !row) return;
     const rule = METRIC_RULES.find((r) => r.name === m.name);
     const was = { over: row?.over ?? 0, under: row?.under ?? 0, breach: row?.breach === 1 };
-    const next = rule ? hysteresis(rule, was, m.value) : { over: 0, under: 0, breach: false };
+    const next = rule ? hysteresis(rule, was, m.sample) : { over: 0, under: 0, breach: false };
+    const value = m.sample.measured ? m.sample.value : null;
     if (rule && next.breach && !was.breach) {
       const id = incidentId(source, `metric:${m.name}`);
       const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
       incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", "gauge", 1, true, now, seq, true);
       hourly(w, id, now);
       afterChange(w, this.store, id, before, 1, seq);
-      w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value: m.value, over: rule.over });
+      w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value, over: rule.over });
     } else if (was.breach && !next.breach) {
       w.run("UPDATE incidents SET active = 0 WHERE id = ?", incidentId(source, `metric:${m.name}`) as Clean);
-      w.event("incident", source.id as Clean, { metric: m.name, state: "clear", value: m.value });
+      w.event("incident", source.id as Clean, { metric: m.name, state: "clear", value });
     }
     w.run(
       "INSERT OR REPLACE INTO metrics (source, name, value, at_ms, over, under, breach) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      source.id as Clean, m.name as Clean, m.value ?? row!.value, m.value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0,
+      source.id as Clean, m.name as Clean, value ?? row!.value, value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0,
     );
   }
 
@@ -639,9 +647,11 @@ export class Collector {
     const next = backoff(kind, row?.failure ? row.streak : 0, source.everyMs);
     const now = clock.now();
     this.store.tx((w) => {
-      w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
-      // An interval that could not be read is not a quiet one: the count toward quiet starts again.
-      w.run("UPDATE incidents SET streak = 0 WHERE source = ? AND streak > 0", source.id as Clean);
+      const seq = w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
+      // A failed pass is still an interval: every reading failed, every gauge unmeasured.
+      const failed = new Map(source.readings.map((r) => [r, { state: "failed" as const, missed: null }]));
+      const gauges = this.store.all<{ name: string }>("SELECT name FROM metrics WHERE source = ?", source.id).map((g) => ({ name: g.name, reading: "", sample: UNMEASURED, at: now }));
+      this.interval(w, source, failed, gauges, new Set(), false, seq, now);
       w.run(
         `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
@@ -657,11 +667,11 @@ export class Collector {
  * Adds to a problem's count, creating it the first time; an inexact addition makes the count a lower bound. A
  * problem observed now (`active`) is active again and its quiet count starts over.
  */
-function incident(w: Writer, source: Source, bucket: string, title: string, severity: Severity, reading: string, added: number, exact: boolean, now: number, seq: number, active: boolean) {
+function incident(w: Writer, source: Source, bucket: string, title: string, severity: Severity, reading: string, added: number, exact: boolean, now: number, seq: number, active: boolean, current = false) {
   w.run(
     `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak, first_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
      ON CONFLICT (id) DO UPDATE SET count = count + excluded.count, exact = min(exact, excluded.exact), last_ms = max(last_ms, excluded.last_ms), seq = excluded.seq,
-       severity = CASE WHEN excluded.severity = 'error' THEN 'error' ELSE severity END,
+       severity = CASE WHEN ${current ? 1 : 0} = 1 OR excluded.severity = 'error' THEN excluded.severity ELSE severity END,
        active = max(active, excluded.active), streak = CASE WHEN excluded.active = 1 THEN 0 ELSE streak END`,
     incidentId(source, bucket) as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
     reading as Clean, active ? 1 : 0, seq,
@@ -679,4 +689,17 @@ export class SourceFailure extends Error {
 }
 
 /** What a refusal is shared by: a cluster context, or a Datadog site and key. */
-export const endpoint = (s: Source) => (s.kind === "kubernetes" ? `kubernetes:${s.context}` : `datadog:${s.baseUrl}:${s.apiKey}`);
+export const endpoint = (s: Source) => JSON.stringify(s.kind === "kubernetes" ? ["kubernetes", s.context] : ["datadog", s.baseUrl, s.apiKey, s.appKey]);
+
+/** The fields that identify a connection: two sources share a refusal only if every one of them is equal. */
+export const IDENTITY = { kubernetes: ["context"], datadog: ["baseUrl", "apiKey", "appKey"] } as const;
+
+/**
+ * One step of an active problem's count toward Quiet: an interval that found it again restarts the count; one that
+ * was not fully measured or not one new ordinary interval resets it; three fully measured ordinary intervals in a
+ * row with nothing new make it quiet.
+ */
+export function quietStep(streak: number, i: { touched: boolean; measured: boolean; ordinary: boolean }): { streak: number; quiet: boolean } {
+  if (i.touched || !i.measured || !i.ordinary) return { streak: 0, quiet: false };
+  return streak + 1 >= LIMITS.quietIntervals ? { streak: 0, quiet: true } : { streak: streak + 1, quiet: false };
+}

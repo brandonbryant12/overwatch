@@ -59,14 +59,16 @@ export function seedDemo(store: Store, config: Config) {
     }
     const first = w.event("deploy", s("shop/production"), { revision: "9f8e7d6c5b4a", previous: null, demo: true });
     w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, 'shop', 'production', '9f8e7d6c5b4a', NULL)", first);
-    problem(w, "inc_d0c5ea12", "production", "ERROR search index rebuild stalled at shard 12", "error", [0, 2, 3, 1, 1], w.event("incident", s("inc_d0c5ea12"), { demo: true }), false);
-    problem(w, "inc_d0c7a1e5", "staging", "ERROR thumbnail worker exited 137 (OOMKilled) on large uploads", "error", [1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], w.event("incident", s("inc_d0c7a1e5"), { demo: true }), false);
+    // Seeded history is labelled as such: it belongs to the environment, not to the problem's own timeline.
+    const seeded = (id: string, environment: string) => w.event("incident", s(`shop/${environment}`), { demo: true, seeded: id });
+    problem(w, "inc_d0c5ea12", "production", "ERROR search index rebuild stalled at shard 12", "error", [0, 2, 3, 1, 1], seeded("inc_d0c5ea12", "production"), false);
+    problem(w, "inc_d0c7a1e5", "staging", "ERROR thumbnail worker exited 137 (OOMKilled) on large uploads", "error", [1, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0], seeded("inc_d0c7a1e5", "staging"), false);
     w.event("quieted", s("inc_d0c7a1e5"), { demo: true, reason: "three measured intervals with nothing new" });
     const deploy = w.event("deploy", s("shop/production"), { revision: "a1b2c3d4e5f6", previous: "9f8e7d6c5b4a", demo: true });
     w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, 'shop', 'production', 'a1b2c3d4e5f6', '9f8e7d6c5b4a')", deploy);
-    problem(w, "inc_d0c4ab11", "production", "ERROR checkout: payments timeout after 300ms", "error", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 11, 16, 12], w.event("incident", s("inc_d0c4ab11"), { demo: true }));
-    problem(w, "inc_d0c3f00d", "staging", "WARN cache warm-up took longer than 2s", "warn", [1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0], w.event("incident", s("inc_d0c3f00d"), { demo: true }));
-    problem(w, "inc_d0c1ed9e", "production", "WARN ledger reconciliation lag above 120s on shard 4", "warn", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 1, 1], w.event("incident", s("inc_d0c1ed9e"), { demo: true }));
+    problem(w, "inc_d0c4ab11", "production", "ERROR checkout: payments timeout after 300ms", "error", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 11, 16, 12], seeded("inc_d0c4ab11", "production"));
+    problem(w, "inc_d0c3f00d", "staging", "WARN cache warm-up took longer than 2s", "warn", [1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0], seeded("inc_d0c3f00d", "staging"));
+    problem(w, "inc_d0c1ed9e", "production", "WARN ledger reconciliation lag above 120s on shard 4", "warn", [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 1, 1], seeded("inc_d0c1ed9e", "production"));
   });
   // The owner's history, through the same rules as real work: an old issue put away with Done; the staging warning
   // put away with Later, then a finding on it brings it back; a question about the ledger lag queued for an agent.
