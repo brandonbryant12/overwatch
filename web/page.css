@@ -92,7 +92,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .env-name { display: flex; align-items: baseline; gap: 8px; }
 .env-name b { font-size: var(--text-md); font-weight: 640; letter-spacing: -0.01em; }
 .env-name span, .env-state span { color: var(--ink-muted); font-size: var(--text-sm); }
-.env-state { display: flex; gap: 8px; align-items: baseline; font-size: var(--text-sm); }
+.env-state { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: var(--text-sm); }
+.env-state b, .env-state > span:not(.ahead) { white-space: nowrap; }
 .env-state b { font-weight: 560; }
 .env.quiet .glyph { color: var(--state-ok); background: var(--state-ok-surface); }
 .env.quiet .env-state b { color: var(--state-ok); }
@@ -407,7 +408,7 @@ body[data-link="down"] .groups, body[data-link="down"] .stage { opacity: 0.55; f
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 
 /* ------------------------------------------------------------ looking ahead: time left and staging signals */
-.env-state .ahead { display: block; margin-top: 2px; font-size: var(--text-xs, 12px); color: var(--state-warn); font-variant-numeric: tabular-nums; }
+.env-state .ahead { flex-basis: 100%; margin-top: 0; font-size: var(--text-xs, 12px); color: var(--state-warn); font-variant-numeric: tabular-nums; }
 .env-state .ahead.warn { color: var(--state-warn); }
 .note.warn { color: var(--state-warn); }
 
