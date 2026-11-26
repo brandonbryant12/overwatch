@@ -2,8 +2,14 @@
  * Kubernetes through `kubectl`, read-only. Only `get`, `describe`, `logs` and `top` run, always with the configured
  * context and namespace, and only with the flags and value shapes listed here: an allowlist, so anything else is
  * refused before a process starts. Logs are read line by line with a byte cap; nothing builds a list of all it read.
+ *
+ * kubectl's JSON is decoded by Schema, tolerantly: a field of the wrong kind is absent, a list that is not one is
+ * empty, an entry that is not an object has no fields. Text that is not JSON at all fails the decode (a defect the
+ * collector records as the source's failure, as before).
  */
-import { count, list, rec, str, time, type ProviderTime } from "./parse.ts";
+import { Effect, Option, Schema } from "effect";
+import type { ChildProcessSpawner } from "effect/process";
+import { count, time, type ProviderTime } from "./parse.ts";
 import { run, stream, type Result, type StreamRead } from "./exec.ts";
 
 const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
@@ -53,10 +59,12 @@ export interface Target {
 
 const base = (t: Target) => ["--context", t.context, "-n", t.namespace];
 
-export async function kubectl(t: Target, verb: string, args: ReadonlyArray<string>): Promise<Result> {
-  checkKubectl(verb, args);
-  return run("kubectl", [...base(t), verb, ...args], { timeoutMs: 60_000 });
-}
+/** One allowlisted kubectl read. A call off the allowlist is refused before any process starts (a defect). */
+export const kubectl = (t: Target, verb: string, args: ReadonlyArray<string>): Effect.Effect<Result, never, ChildProcessSpawner.ChildProcessSpawner> =>
+  Effect.suspend(() => {
+    checkKubectl(verb, args);
+    return run("kubectl", [...base(t), verb, ...args], { timeoutMs: 60_000 });
+  });
 
 export type LogRead = StreamRead;
 
@@ -65,14 +73,23 @@ export type LogRead = StreamRead;
  * byte cap. `line` returns false to stop the read: kubectl lists a container's lines in time order, so a catch-up
  * slice stops at the first line after its end.
  */
-export function streamLogs(t: Target, pod: string, container: string, since: string, previous: boolean, maxBytes: number, line: (stamp: string, text: string) => boolean | void): Promise<LogRead> {
-  const args = [pod, "-c", container, "--timestamps", `--since-time=${since}`, ...(previous ? ["--previous"] : [])];
-  checkKubectl("logs", args);
-  return stream("kubectl", [...base(t), "logs", ...args], maxBytes, (raw) => {
-    const space = raw.indexOf(" ");
-    return space > 0 ? line(raw.slice(0, space), raw.slice(space + 1)) : undefined;
+export const streamLogs = <E = never, R = never>(
+  t: Target,
+  pod: string,
+  container: string,
+  since: string,
+  previous: boolean,
+  maxBytes: number,
+  line: (stamp: string, text: string) => Effect.Effect<boolean | void, E, R>,
+): Effect.Effect<LogRead, E, R | ChildProcessSpawner.ChildProcessSpawner> =>
+  Effect.suspend(() => {
+    const args = [pod, "-c", container, "--timestamps", `--since-time=${since}`, ...(previous ? ["--previous"] : [])];
+    checkKubectl("logs", args);
+    return stream("kubectl", [...base(t), "logs", ...args], maxBytes, (raw) => {
+      const space = raw.indexOf(" ");
+      return space > 0 ? line(raw.slice(0, space), raw.slice(space + 1)) : Effect.void;
+    });
   });
-}
 
 export interface Instance {
   readonly id: string;
@@ -87,6 +104,31 @@ export interface Pod {
   readonly running: boolean;
 }
 
+// Tolerant shapes. `field`: absent when missing or of another kind. `object`: no fields when it is not an object.
+// `list`: empty when it is not a list. `text`: a non-empty string. `unknown`: anything, judged later by parse.ts.
+const field = <S extends Schema.Top>(schema: S) => Schema.optional(schema.pipe(Schema.catchDecoding(() => Effect.succeedNone)));
+const object = <F extends Schema.Struct.Fields>(fields: F) => Schema.Struct(fields).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({} as Schema.Struct.Type<F>))));
+const list = <S extends Schema.Top>(item: S) => Schema.Array(item).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some([] as ReadonlyArray<S["Type"]>))));
+const text = field(Schema.NonEmptyString);
+const unknown = Schema.optional(Schema.Unknown);
+/** kubectl's `{ items: [...] }`; text that is not JSON fails the decode. */
+const items = <T,>(item: Schema.Codec<T, unknown>) => {
+  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(object({ items: field(list(item)) })));
+  return (stdout: string): ReadonlyArray<T> => decode(stdout).items ?? [];
+};
+
+const PodItem = object({
+  metadata: field(object({ name: text, uid: text })),
+  spec: field(object({ containers: field(list(object({ name: text, resources: field(object({ limits: field(object({ memory: text })) })) }))) })),
+  status: field(
+    object({
+      phase: unknown,
+      conditions: field(list(object({ type: unknown, status: unknown }))),
+      containerStatuses: field(list(object({ name: unknown, containerID: text, restartCount: unknown, lastState: field(object({ terminated: field(object({ containerID: text })) })) }))),
+    }),
+  ),
+});
+const decodePods = items(PodItem);
 
 /** Memory quantities: "512Mi", "1Gi", "64M", "1048576". */
 export function bytes(quantity: string): number | null {
@@ -99,41 +141,62 @@ export function bytes(quantity: string): number | null {
 /** Pods with each container's current and previous instance, in UID order. Tolerant of missing fields. */
 export function parsePods(stdout: string): Pod[] {
   const pods: Pod[] = [];
-  for (const item of list(rec(JSON.parse(stdout)).items)) {
-    const meta = rec(rec(item).metadata), spec = rec(rec(item).spec), status = rec(rec(item).status);
-    const name = str(meta.name), uid = str(meta.uid);
+  for (const item of decodePods(stdout)) {
+    const name = item.metadata?.name, uid = item.metadata?.uid;
     if (!name || !uid || !NAME.test(name)) continue;
-    const statuses = list(status.containerStatuses).map(rec);
-    const containers = list(spec.containers).map(rec).flatMap((c) => {
-      const cname = str(c.name);
+    const statuses = item.status?.containerStatuses ?? [];
+    const containers = (item.spec?.containers ?? []).flatMap((c) => {
+      const cname = c.name;
       if (!cname || !NAME.test(cname)) return [];
-      const s = statuses.find((x) => x.name === cname) ?? {};
-      const current = str(s.containerID);
-      const previous = str(rec(rec(s.lastState).terminated).containerID);
-      const limit = str(rec(rec(c.resources).limits).memory);
+      const s = statuses.find((x) => x.name === cname);
+      const current = s?.containerID;
+      const previous = s?.lastState?.terminated?.containerID;
+      const limit = c.resources?.limits?.memory;
       return [{
         name: cname,
         instances: [...(previous ? [{ id: previous, previous: true }] : []), ...(current ? [{ id: current, previous: false }] : [])],
         memoryLimit: limit ? bytes(limit) : null,
-        restarts: count(s.restartCount) ?? 0,
+        restarts: count(s?.restartCount) ?? 0,
       }];
     });
-    const ready = list(status.conditions).map(rec).some((c) => c.type === "Ready" && c.status === "True");
-    pods.push({ name, uid, containers, ready, running: status.phase === "Running" });
+    const ready = (item.status?.conditions ?? []).some((c) => c.type === "Ready" && c.status === "True");
+    pods.push({ name, uid, containers, ready, running: item.status?.phase === "Running" });
   }
   return pods.sort((a, b) => (a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0));
 }
 
+const Workload = object({
+  metadata: field(object({ creationTimestamp: unknown })),
+  spec: field(
+    object({
+      template: field(
+        object({
+          metadata: field(object({ annotations: field(object({ "overwatch.dev/revision": text })) })),
+          spec: field(object({ containers: field(list(object({ image: field(Schema.String) }))) })),
+        }),
+      ),
+    }),
+  ),
+});
+const decodeWorkloads = items(Workload);
+
+/** One deployment's or replica set's revision: the template's annotation, else an image tag that is a SHA. */
+function revisionOf(item: typeof Workload.Type): string | null {
+  const template = item.spec?.template;
+  const annotated = template?.metadata?.annotations?.["overwatch.dev/revision"];
+  if (annotated) return annotated;
+  for (const c of template?.spec?.containers ?? []) {
+    const tag = /[:@](?:sha256:)?([0-9a-f]{7,64})$/.exec(c.image ?? "")?.[1];
+    if (tag) return tag;
+  }
+  return null;
+}
+
 /** The running revision: the pod template's `overwatch.dev/revision` annotation, else an image tag that is a SHA. */
 export function parseRevision(stdout: string): string | null {
-  for (const item of list(rec(JSON.parse(stdout)).items)) {
-    const template = rec(rec(rec(item).spec).template);
-    const annotated = str(rec(rec(template.metadata).annotations)["overwatch.dev/revision"]);
-    if (annotated) return annotated;
-    for (const c of list(rec(template.spec).containers)) {
-      const tag = /[:@](?:sha256:)?([0-9a-f]{7,64})$/.exec(String(rec(c).image ?? ""))?.[1];
-      if (tag) return tag;
-    }
+  for (const item of decodeWorkloads(stdout)) {
+    const revision = revisionOf(item);
+    if (revision) return revision;
   }
   return null;
 }
@@ -144,11 +207,10 @@ export function parseRevision(stdout: string): string | null {
  * when the cluster does not say: the caller then knows only the interval between two observations.
  */
 export function parseRollout(stdout: string, revision: string): number | null {
-  const times = list(rec(JSON.parse(stdout)).items).flatMap((item) => {
-    const one = JSON.stringify({ items: [item] });
-    return parseRevision(one) === revision ? [time(rec(rec(item).metadata).creationTimestamp)] : [];
-  });
-  const known = times.filter((t): t is ProviderTime => t !== null);
+  const known = decodeWorkloads(stdout)
+    .filter((item) => revisionOf(item) === revision)
+    .map((item) => time(item.metadata?.creationTimestamp))
+    .filter((t): t is ProviderTime => t !== null);
   return known.length ? Math.max(...known) : null;
 }
 
@@ -161,15 +223,28 @@ export interface KubeEvent {
   readonly at: number | null;
 }
 
+const EventItem = object({
+  metadata: field(object({ uid: text })),
+  series: field(object({ count: unknown, lastObservedTime: unknown })),
+  count: unknown,
+  deprecatedCount: unknown,
+  lastTimestamp: unknown,
+  eventTime: unknown,
+  firstTimestamp: unknown,
+  reason: text,
+  message: field(Schema.String),
+  type: text,
+});
+const decodeEvents = items(EventItem);
+
 export function parseEvents(stdout: string): KubeEvent[] {
-  return list(rec(JSON.parse(stdout)).items).map(rec).flatMap((e) => {
-    const uid = str(rec(e.metadata).uid);
+  return decodeEvents(stdout).flatMap((e) => {
+    const uid = e.metadata?.uid;
     if (!uid) return [];
     // An EventSeries carries its cumulative count in series.count; the legacy field stays at the first value.
-    const series = rec(e.series);
-    const n = Math.max(count(series.count) ?? 0, count(e.count) ?? 0, count(e.deprecatedCount) ?? 0, 1);
-    const at = time(series.lastObservedTime) ?? time(e.lastTimestamp) ?? time(e.eventTime) ?? time(e.firstTimestamp);
-    return [{ uid, count: n, reason: str(e.reason) ?? "Event", message: typeof e.message === "string" ? e.message : "", type: str(e.type) ?? "Normal", at }];
+    const n = Math.max(count(e.series?.count) ?? 0, count(e.count) ?? 0, count(e.deprecatedCount) ?? 0, 1);
+    const at = time(e.series?.lastObservedTime) ?? time(e.lastTimestamp) ?? time(e.eventTime) ?? time(e.firstTimestamp);
+    return [{ uid, count: n, reason: e.reason ?? "Event", message: e.message ?? "", type: e.type ?? "Normal", at }];
   });
 }
 

@@ -6,9 +6,18 @@
  *   probes. A rate limit that asked for longer than Overwatch waits counts as an ordinary failure.
  * A permission failure on one reading (one kind of read refused) is not a source failure at all.
  */
+import { Schema } from "effect";
 import { LIMITS, type Source } from "./config.ts";
 
-export type FailureKind = "signin" | "permission" | "rate" | "unreachable" | "config";
+export const FailureKind = Schema.Literals(["signin", "permission", "rate", "unreachable", "config"]);
+export type FailureKind = typeof FailureKind.Type;
+
+/** A source's read failed: what kind of failure, and the source's own words (cleaned before they are stored). */
+export class SourceFailure extends Schema.TaggedError<SourceFailure>()("SourceFailure", { kind: FailureKind, detail: Schema.String }) {
+  override get message() {
+    return this.detail;
+  }
+}
 
 const SIGNIN = /\b(unauthori[sz]ed|401)\b|must be logged in|token (has )?expired|expired token|invalid_grant|re-?authenticat|credentials? (are|is|were) (invalid|expired)|api key is invalid/i;
 const RATE = /\b429\b|rate.?limit|too many requests/i;

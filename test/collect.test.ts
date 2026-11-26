@@ -2,16 +2,18 @@ import { scratch } from "./scratch.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { Effect } from "effect";
 import { problem, Slice, within } from "../src/collect.ts";
 import { count, num, time } from "../src/parse.ts";
 import { LIMITS, parseConfig } from "../src/config.ts";
 import { backoff, classify } from "../src/failures.ts";
 import { snapshot } from "../src/snapshot.ts";
-import { Store, type Clean } from "../src/store.ts";
+import { type Clean } from "../src/store.ts";
 import { clock } from "../src/clock.ts";
+import { run, withConfig, withStore } from "./effect.ts";
+
+/** A slice's admission, run to its end (the tests' `known` answers at once). */
+const add = (slice: Slice, ...args: Parameters<Slice["add"]>) => Effect.runSync(slice.add(...args));
 
 const source = parseConfig(
   {
@@ -36,7 +38,7 @@ test("a slice admits at most the occurrence limit and folds problems past 500 in
     fc.property(fc.integer({ min: 0, max: 520 }), fc.integer({ min: 1, max: 3 }), (distinct, each) => {
       const slice = new Slice(source.sources[0]!, { from: 0, to: 10 }, []);
       let n = 0;
-      for (let d = 0; d < distinct; d++) for (let e = 0; e < each; e++) slice.add(`k${n++}`, "s", 1, `fp${d}`, `ERROR w${d}`, "error");
+      for (let d = 0; d < distinct; d++) for (let e = 0; e < each; e++) add(slice, `k${n++}`, "s", 1, `fp${d}`, `ERROR w${d}`, "error");
       assert.equal(slice.admitted.length, Math.min(n, LIMITS.occurrencesPerSlice));
       assert.equal([...slice.buckets.keys()].filter((k) => k !== "overflow").length, Math.min(distinct, LIMITS.problemsPerSlice));
       assert.equal(slice.buckets.has("overflow"), distinct > LIMITS.problemsPerSlice);
@@ -48,12 +50,12 @@ test("a slice admits at most the occurrence limit and folds problems past 500 in
 
 test("past the storm limit the count is a lower bound, and a saturated interval admits nothing on replay", () => {
   const slice = new Slice(source.sources[0]!, { from: 0, to: 10 }, []);
-  for (let i = 0; i < LIMITS.occurrencesPerSlice + 7; i++) slice.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
+  for (let i = 0; i < LIMITS.occurrencesPerSlice + 7; i++) add(slice, `k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(slice.admitted.length, LIMITS.occurrencesPerSlice);
   assert.equal(slice.buckets.get("storm")!.inexact, true);
   assert.ok(slice.capped);
   const replay = new Slice(source.sources[0]!, { from: 0, to: 20 }, [{ from: 0, to: 10 }]);
-  for (let i = 0; i < 100; i++) replay.add(`k${i}`, "s", 5, "storm", "ERROR storm", "error");
+  for (let i = 0; i < 100; i++) add(replay, `k${i}`, "s", 5, "storm", "ERROR storm", "error");
   assert.equal(replay.admitted.length, 0);
 });
 
@@ -74,31 +76,37 @@ test("back-off: sign-in suspends on its second refusal; others wait one, two int
   assert.equal(classify("x", 429), "rate");
 });
 
-test("health is quiet only when every expected reading is fresh, measured and no source is failing", () => {
+test("health is quiet only when every expected reading is fresh, measured and no source is failing", async () => {
   const config = parseConfig({ ...JSON.parse(JSON.stringify({ version: 2, apps: { shop: { checkout: "/tmp", environments: { prod: { sources: { pods: { type: "kubernetes", context: "lab", namespace: "shop", selector: "app=shop" } } } } } }, watchers: [{ app: "shop", environment: "prod", every: "1m" }] })), dataDir: "/tmp/x" }, "/tmp/c.json");
   const readings = ["logs", "events", "workloads", "usage"];
-  fc.assert(
-    fc.property(
+  await fc.assert(
+    fc.asyncProperty(
       fc.record({
         states: fc.array(fc.constantFrom("ok", "ok", "capped", "gap", "failed", "absent", "old"), { minLength: 4, maxLength: 4 }),
         failure: fc.constantFrom(null, null, "signin", "unreachable"),
         error: fc.boolean(),
       }),
-      ({ states, failure, error }) => {
-        const store = Store.own(scratch("ow-health-"));
+      async ({ states, failure, error }) => {
         clock.set(10_000_000, 0);
-        store.tx((w) => {
-          readings.forEach((r, i) => {
-            const s = states[i]!;
-            if (s === "absent") return;
-            const at = s === "old" ? 10_000_000 - 4 * 60_000 : 10_000_000 - 1000;
-            w.run("INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES ('shop/prod/pods', ?, ?, ?, ?)", r as Clean, (s === "old" ? "ok" : s) as Clean, at, s === "failed" ? null : at);
-          });
-          w.run("INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended) VALUES ('shop/prod/pods', 0, ?, 1, 0, 0)", failure as Clean | null);
-          if (error) w.run("INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq) VALUES ('inc_1', 'shop', 'prod', 's', 'ERROR x', 'error', 1, 1, 0, 0, 1)");
-        });
-        const health = snapshot(store, config, null, false).environments[0]!.health;
-        store.close();
+        const health = await run(
+          withStore(scratch("ow-health-"), (store) =>
+            Effect.gen(function* () {
+              yield* store.tx((w) =>
+                Effect.gen(function* () {
+                  for (const [i, r] of readings.entries()) {
+                    const s = states[i]!;
+                    if (s === "absent") continue;
+                    const at = s === "old" ? 10_000_000 - 4 * 60_000 : 10_000_000 - 1000;
+                    yield* w.run("INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES ('shop/prod/pods', ?, ?, ?, ?)", r as Clean, (s === "old" ? "ok" : s) as Clean, at, s === "failed" ? null : at);
+                  }
+                  yield* w.run("INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended) VALUES ('shop/prod/pods', 0, ?, 1, 0, 0)", failure as Clean | null);
+                  if (error) yield* w.run("INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq) VALUES ('inc_1', 'shop', 'prod', 's', 'ERROR x', 'error', 1, 1, 0, 0, 1)");
+                }),
+              );
+              return (yield* snapshot(null, false).pipe(withConfig(config))).environments[0]!.health;
+            }),
+          ),
+        );
         const clean = states.every((s) => s === "ok") && failure === null && !error;
         assert.equal(health === "quiet", clean, JSON.stringify({ states, failure, error, health }));
         if (failure === "signin") assert.equal(health, "signed_out");
@@ -112,26 +120,30 @@ test("health is quiet only when every expected reading is fresh, measured and no
 test("the demo stays as seeded for as long as it runs", async () => {
   const { demoConfig, seedDemo, freshen } = await import("../src/demo.ts");
   clock.set(Date.UTC(2026, 10, 1), 5_000_000);
-  const config = demoConfig(0);
-  const store = Store.own(config.dataDir);
-  seedDemo(store, config);
-  const health = () => Object.fromEntries(snapshot(store, config, null, true).environments.map((e) => [e.environment, e.health]));
-  const seeded = health();
-  assert.deepEqual(seeded, { production: "attention", staging: "quiet", qa: "signed_out" });
-  for (let i = 1; i <= 120; i++) {
-    clock.set(Date.UTC(2026, 10, 1) + i * 60_000, 5_000_000 + i * 60_000);
-    freshen(store);
-  }
-  assert.deepEqual(health(), seeded);
-  store.close();
+  const config = await run(demoConfig(0));
+  await run(
+    withStore(config.dataDir, () =>
+      Effect.gen(function* () {
+        yield* seedDemo;
+        const health = Effect.map(snapshot(null, true), (s) => Object.fromEntries(s.environments.map((e) => [e.environment, e.health])));
+        const seeded = yield* health;
+        assert.deepEqual(seeded, { production: "attention", staging: "quiet", qa: "signed_out" });
+        for (let i = 1; i <= 120; i++) {
+          clock.set(Date.UTC(2026, 10, 1) + i * 60_000, 5_000_000 + i * 60_000);
+          yield* freshen;
+        }
+        assert.deepEqual(yield* health, seeded);
+      }).pipe(withConfig(config)),
+    ),
+  );
 });
 
 test("only what is new is charged: replays and saturated records leave room, and problem slots, for a fresh record", () => {
   const stored = new Set(Array.from({ length: LIMITS.occurrencesPerSlice + 1 }, (_, i) => `old${i}`));
-  const slice = new Slice(source.sources[0]!, { from: 0, to: 100 }, [{ from: 50, to: 60 }], (k) => stored.has(k));
-  for (const key of stored) slice.add(key, "s", 10, `fp-${key}`, "ERROR storm", "error");
-  for (let i = 0; i < 10; i++) slice.add(`new-in-saturated${i}`, "s", 55, "fp-sat", "ERROR storm", "error");
-  slice.add("fresh", "s", 70, "fp-fresh", "ERROR fresh", "error");
+  const slice = new Slice(source.sources[0]!, { from: 0, to: 100 }, [{ from: 50, to: 60 }], (k) => Effect.succeed(stored.has(k)));
+  for (const key of stored) add(slice, key, "s", 10, `fp-${key}`, "ERROR storm", "error");
+  for (let i = 0; i < 10; i++) add(slice, `new-in-saturated${i}`, "s", 55, "fp-sat", "ERROR storm", "error");
+  add(slice, "fresh", "s", 70, "fp-fresh", "ERROR fresh", "error");
   assert.deepEqual(slice.admitted.map((a) => a.key), ["fresh"]);
   assert.equal(slice.fresh, 1);
   assert.deepEqual([...slice.buckets.keys()], ["fp-fresh"], "replayed problems do not take distinct-problem slots");
@@ -143,8 +155,8 @@ test("every window is half-open: a record at a slice's end belongs to the next o
     fc.property(fc.integer({ min: 0, max: 1000 }), fc.integer({ min: 1, max: 1000 }), fc.integer({ min: -5, max: 2005 }), (from, length, at) => {
       const to = from + length, next = to + length;
       const a = new Slice(source.sources[0]!, { from, to }, []), b = new Slice(source.sources[0]!, { from: to, to: next }, []);
-      a.add("k", "s", at, "fp", "ERROR x", "error");
-      b.add("k", "s", at, "fp", "ERROR x", "error");
+      add(a, "k", "s", at, "fp", "ERROR x", "error");
+      add(b, "k", "s", at, "fp", "ERROR x", "error");
       assert.equal(a.admitted.length + b.admitted.length, at >= from && at < next ? 1 : 0);
       assert.equal(within({ from, to }, at), at >= from && at < to);
     }),

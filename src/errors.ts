@@ -42,3 +42,18 @@ export const cliExit = (code: number, kind: string, message: string) => new CliE
 
 /** A backup that cannot be written (the target exists, or SQLite refused). */
 export class BackupError extends Schema.TaggedError<BackupError>()("BackupError", { message: Schema.String }) {}
+
+/** OpenCode answered, but refused or could not be read (a 4xx, or a reply of an unknown shape): the work it was for fails. */
+export class PeerError extends Schema.TaggedError<PeerError>()("PeerError", { message: Schema.String }) {}
+
+/** A rule stops a fix attempt in a final state (`state`: blocked, ineligible, stale, refused), with the reason. */
+export class FixStop extends Schema.TaggedError<FixStop>()("FixStop", { state: Schema.String, message: Schema.String }) {}
+
+/** A host step of a fix that did not happen or could not be confirmed: said as it is, never assumed. */
+export class Unresolved extends Schema.TaggedError<Unresolved>()("Unresolved", { message: Schema.String }) {}
+
+/** A newer decision replaced the fix attempt a worker read: it stops without writing. */
+export class Superseded extends Schema.TaggedError<Superseded>()("Superseded", {}) {}
+
+/** launchctl refused a step of installing, removing or restarting the service, or could not say whether it is loaded. */
+export class LaunchdError extends Schema.TaggedError<LaunchdError>()("LaunchdError", { message: Schema.String }) {}

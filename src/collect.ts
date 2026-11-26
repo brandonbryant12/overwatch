@@ -13,17 +13,23 @@
  * interval. A record at a slice's end belongs to the next slice.
  */
 import { statfsSync } from "node:fs";
-import { DEFAULT_WORDS, LIMITS, type Config, type Source, type Words } from "./config.ts";
+import { Cause, Context, Deferred, Effect, Layer, Option, Predicate, Scope, Semaphore } from "effect";
+import { FetchHttpClient, HttpClient } from "effect/http";
+import type { ChildProcessSpawner } from "effect/process";
+import { AppConfig, DEFAULT_WORDS, LIMITS, type Source, type Words } from "./config.ts";
 import { clock } from "./clock.ts";
 import { kubectl, parseEvents, parsePods, parseRevision, parseRollout, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
 import * as datadog from "./datadog.ts";
-import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
+import { backoff, classify, fixFor, SourceFailure, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
-import { Full, type Clean, type Store, type Writer } from "./store.ts";
+import { Full, Store, type Clean, type Writer } from "./store.ts";
 import { answered, sample, sha, time, UNMEASURED, type ProviderTime, type Sample } from "./parse.ts";
 import { afterChange, afterDeploy, announce, groupNow, hourly } from "./inbox.ts";
 import { queueInvestigation } from "./agents.ts";
 import { approvalKey } from "./trial.ts";
+import type { CollectorView } from "./snapshot.ts";
+
+export { SourceFailure };
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -117,9 +123,9 @@ export class Slice {
   readonly source: Source;
   readonly span: Span;
   private readonly saturated: ReadonlyArray<Span>;
-  private readonly known: (key: string) => boolean;
+  private readonly known: (key: string) => Effect.Effect<boolean>;
   private readonly keys = new Set<string>();
-  constructor(source: Source, span: Span, saturated: ReadonlyArray<Span>, known: (key: string) => boolean = () => false) {
+  constructor(source: Source, span: Span, saturated: ReadonlyArray<Span>, known: (key: string) => Effect.Effect<boolean> = () => Effect.succeed(false)) {
     this.source = source;
     this.span = span;
     this.saturated = saturated;
@@ -143,17 +149,22 @@ export class Slice {
     this.buckets.get(this.bucket(fingerprint, title, severity, reading))!.inexact = true;
   }
 
-  /** One occurrence. Past the limit it is not admitted, and its problem's count becomes a lower bound. */
-  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: Severity, reading = "logs", text = title) {
-    if (!within(this.span, at) || this.saturated.some((s) => within(s, at))) return;
-    if (this.keys.has(key) || this.known(key)) return;
-    this.keys.add(key);
-    const bucket = this.bucket(fingerprint, title, severity, reading);
-    if (++this.fresh > LIMITS.occurrencesPerSlice) {
-      this.buckets.get(bucket)!.inexact = true;
-      return;
-    }
-    this.admitted.push({ key, stream, at, bucket, text: text.slice(0, 4000) });
+  /**
+   * One occurrence. Past the limit it is not admitted, and its problem's count becomes a lower bound. Whether the key
+   * is already stored is asked only for a record inside the slice and outside every saturated interval.
+   */
+  add(key: string, stream: string, at: number, fingerprint: string, title: string, severity: Severity, reading = "logs", text = title): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      if (!within(this.span, at) || this.saturated.some((s) => within(s, at))) return;
+      if (this.keys.has(key) || (yield* this.known(key))) return;
+      this.keys.add(key);
+      const bucket = this.bucket(fingerprint, title, severity, reading);
+      if (++this.fresh > LIMITS.occurrencesPerSlice) {
+        this.buckets.get(bucket)!.inexact = true;
+        return;
+      }
+      this.admitted.push({ key, stream, at, bucket, text: text.slice(0, 4000) });
+    });
   }
 
   /**
@@ -179,190 +190,144 @@ export interface Space {
 
 const incidentId = (source: Source, bucket: string) => `inc_${sha(source.app, source.environment, source.id, bucket).slice(0, 32)}`;
 
-export class Collector {
-  private readonly nextMono = new Map<string, number>();
-  private readonly okMono = new Map<string, number>();
+/** What the snapshot and the server read from the collector, and what they can ask of it. */
+export interface CollectorShape {
+  /** One scheduler pass over the work that is due. Passes never overlap: a caller during a pass waits for that one. */
+  readonly pass: Effect.Effect<void>;
+  /** A wake from sleep or a network change: failed sources are probed again after a short delay. */
+  readonly wake: Effect.Effect<void>;
+  /** A measured disk, set by the test descriptor in place of the file system's. */
+  readonly setSpace: (space: Space) => Effect.Effect<void>;
+  /**
+   * Read synchronously by the snapshot, always current: why collection is paused, if it is, and when each reading
+   * last succeeded by the monotonic clock, for freshness while the process lives.
+   */
+  readonly view: CollectorView;
+}
+
+/** Each kind's reader, by type; a kind without one fails closed rather than borrowing another's. */
+type Readers<R> = { readonly [K in Source["kind"]]: (s: Source) => Effect.Effect<void, Full | SourceFailure, R> };
+
+const make = Effect.gen(function* () {
+  const store = yield* Store;
+  const config = yield* AppConfig;
+  const context = yield* Effect.context<Store | AppConfig | ChildProcessSpawner.ChildProcessSpawner | HttpClient.HttpClient>();
+  const scope = yield* Scope.Scope;
+  const lock = yield* Semaphore.make(1);
+
+  const nextMono = new Map<string, number>();
+  const okMono = new Map<string, number>();
   /** Refusals that hold for an endpoint (sign-in, unreachable), within one pass: one failed call, not one per source. */
-  private readonly refused = new Map<string, SourceFailure>();
-  private wakeAt: number | null = null;
-  private override: Space | null = null;
-  private running: Promise<void> | null = null;
-  paused: "disk" | null = null;
+  const refused = new Map<string, SourceFailure>();
+  let wakeAt: number | null = null;
+  let override: Space | null = null;
+  let running: Deferred.Deferred<void> | null = null;
+  let paused: "disk" | null = null;
+  let bounded = false;
 
-  private readonly store: Store;
-  private readonly config: Config;
-  private readonly directory: string;
-  constructor(store: Store, config: Config, directory: string) {
-    this.store = store;
-    this.config = config;
-    this.directory = directory;
-    // Every write, wherever it comes from, is admitted by the same disk check.
-    store.guard = () => {
-      if (!this.room(false)) throw new Full("collection is paused for disk space");
-    };
-  }
-
-  wake() {
-    this.wakeAt = clock.mono() + LIMITS.wakeDelayMs;
-  }
-  setSpace(space: Space) {
-    this.override = space;
-  }
-  /** When each reading last succeeded, by the monotonic clock, for freshness while the process lives. */
-  okAtMono(source: string, reading: string): number | undefined {
-    return this.okMono.get(`${source}|${reading}`);
-  }
-
-  private space(): Space {
-    if (this.override) return this.override;
-    let free = Number.MAX_SAFE_INTEGER;
-    try {
-      const s = statfsSync(this.directory);
-      free = Number(s.bavail) * Number(s.bsize);
-    } catch {
-      // Unknown free space is not a reason to stop.
-    }
-    return { freeBytes: free, dbBytes: this.store.liveBytes() };
-  }
+  const space: Effect.Effect<Space> = Effect.suspend(() => {
+    if (override) return Effect.succeed(override);
+    // Unknown free space is not a reason to stop.
+    const free = Effect.try(() => statfsSync(config.dataDir)).pipe(
+      Effect.map((s) => Number(s.bavail) * Number(s.bsize)),
+      Effect.orElseSucceed(() => Number.MAX_SAFE_INTEGER),
+    );
+    return Effect.all({ freeBytes: free, dbBytes: store.liveBytes });
+  });
 
   /**
    * Whether there is room to admit: the free-space floor and the database budget. Over the budget, `maintain` first
    * makes room in the declared order, and measures again. No room: collection pauses with the reason `disk`.
    */
-  private room(maintain: boolean): boolean {
-    let space = this.space();
-    if (maintain && space.dbBytes > LIMITS.databaseBudgetBytes) {
-      this.store.retain(clock.now(), () => this.space().dbBytes > LIMITS.databaseBudgetBytes);
-      space = this.space();
-    }
-    const ok = space.freeBytes >= LIMITS.freeFloorBytes && space.dbBytes <= LIMITS.databaseBudgetBytes;
-    this.paused = ok ? null : "disk";
-    return ok;
-  }
+  const room = (maintain: boolean) =>
+    Effect.gen(function* () {
+      let measured = yield* space;
+      if (maintain && measured.dbBytes > LIMITS.databaseBudgetBytes) {
+        yield* store.retain(clock.now(), Effect.map(space, (s) => s.dbBytes > LIMITS.databaseBudgetBytes));
+        measured = yield* space;
+      }
+      const ok = measured.freeBytes >= LIMITS.freeFloorBytes && measured.dbBytes <= LIMITS.databaseBudgetBytes;
+      paused = ok ? null : "disk";
+      return ok;
+    });
+
+  // Every write, wherever it comes from, is admitted by the same disk check.
+  yield* store.setGuard(Effect.flatMap(room(false), (ok) => (ok ? Effect.void : Effect.fail(new Full({ message: "collection is paused for disk space" })))));
+  yield* Effect.addFinalizer(() => store.setGuard(null));
 
   /**
    * Whether a source is due. The stored wall-clock time decides, and the monotonic clock bounds it: after a restart
    * the live deadline is rebuilt as at most the delay that was chosen, so a wall clock moved backwards cannot
    * postpone a probe.
    */
-  private due(source: Source): boolean {
-    const row = this.store.get<{ next_ms: number | null; delay_ms: number | null; failure: string | null }>("SELECT next_ms, delay_ms, failure FROM sources WHERE id = ?", source.id);
+  const due = Effect.fnUntraced(function* (source: Source) {
+    const row = yield* store.get<{ next_ms: number | null; delay_ms: number | null; failure: string | null }>("SELECT next_ms, delay_ms, failure FROM sources WHERE id = ?", source.id);
     if (!row || row.next_ms === null) return true;
     if (clock.now() >= row.next_ms) return true;
-    if (!this.nextMono.has(source.id)) this.nextMono.set(source.id, clock.mono() + Math.min(row.next_ms - clock.now(), row.delay_ms ?? source.everyMs));
-    if (clock.mono() >= this.nextMono.get(source.id)!) return true;
-    return row.failure !== null && this.wakeAt !== null && clock.mono() >= this.wakeAt;
-  }
-
-  /** One scheduler pass over the work that is due. Passes never overlap. */
-  pass(): Promise<void> {
-    this.running ??= this.passOnce().finally(() => (this.running = null));
-    return this.running;
-  }
-
-  /** Each kind's reader, exhaustive by type; a kind without one fails closed rather than borrowing another's. */
-  private reader(source: Source): (s: Source) => Promise<unknown> {
-    const readers: { readonly [K in Source["kind"]]: (s: Source) => Promise<unknown> } = { kubernetes: (s) => this.kubernetes(s), datadog: (s) => this.datadog(s) };
-    const read = readers[source.kind];
-    if (!read) throw new Error(`no reader for source kind ${String(source.kind)}`);
-    return read;
-  }
-
-  private bounded = false;
-  private async passOnce() {
-    // Each source's next probe gets its live bound once, from the stored time and delay, counted from when this
-    // process started: a wall clock moved backwards cannot postpone it, and time already elapsed counts.
-    if (!this.bounded) {
-      this.bounded = true;
-      const { now, mono } = clock.start;
-      for (const r of this.store.all<{ id: string; next_ms: number; delay_ms: number | null }>("SELECT id, next_ms, delay_ms FROM sources WHERE next_ms IS NOT NULL"))
-        this.nextMono.set(r.id, mono + Math.min(Math.max(0, r.next_ms - now), r.delay_ms ?? this.config.sources.find((x) => x.id === r.id)?.everyMs ?? 60_000));
-    }
-    const roomy = this.room(true);
-    this.store.reclaim(); // what was freed goes back to the disk a bounded step per pass
-    if (!roomy) return;
-    const woke = this.wakeAt !== null && clock.mono() >= this.wakeAt;
-    this.refused.clear();
-    try {
-      for (const source of this.config.sources) {
-        if (!this.due(source)) continue;
-        try {
-          const earlier = this.refused.get(endpoint(source));
-          if (earlier) throw earlier;
-          await this.reader(source)(source);
-        } catch (error) {
-          if (error instanceof Full) throw error;
-          if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) this.refused.set(endpoint(source), error);
-          this.fail(source, error);
-        }
-      }
-    } catch (error) {
-      if (error instanceof Full) return; // paused: the failure record waits for room like everything else
-      throw error;
-    }
-    if (woke) this.wakeAt = null;
-  }
+    if (!nextMono.has(source.id)) nextMono.set(source.id, clock.mono() + Math.min(row.next_ms - clock.now(), row.delay_ms ?? source.everyMs));
+    if (clock.mono() >= nextMono.get(source.id)!) return true;
+    return row.failure !== null && wakeAt !== null && clock.mono() >= wakeAt;
+  });
 
   /**
    * Where reading starts: the checkpoint, never before the 14-day floor. Older time is the gap [checkpoint, floor).
    * `ordinary` is true for one new ordinary interval: time moved on since the checkpoint, by no more than two polling
    * intervals. A replay of the same window (the clock did not move) and a catch-up after a sleep are not ordinary.
    */
-  private window(source: Source, overlap: number) {
+  const window = Effect.fnUntraced(function* (source: Source, overlap: number) {
     const now = clock.now(), floor = now - LIMITS.catchUpMs;
-    const row = this.store.get<{ checkpoint_ms: number | null }>("SELECT checkpoint_ms FROM sources WHERE id = ?", source.id);
+    const row = yield* store.get<{ checkpoint_ms: number | null }>("SELECT checkpoint_ms FROM sources WHERE id = ?", source.id);
     let start = Math.min(row?.checkpoint_ms ?? now - source.everyMs, now);
     const gap: Span | null = start < floor ? { from: start, to: floor } : null;
     if (gap) start = floor;
-    const saturated = this.store
-      .all<{ from_ms: number; to_ms: number }>("SELECT from_ms, to_ms FROM saturated WHERE source = ?", source.id)
-      .map((s): Span => ({ from: s.from_ms, to: s.to_ms }));
+    const saturated = (yield* store.all<{ from_ms: number; to_ms: number }>("SELECT from_ms, to_ms FROM saturated WHERE source = ?", source.id)).map(
+      (s): Span => ({ from: s.from_ms, to: s.to_ms }),
+    );
     return { now, start, floor, gap, overlap, saturated, ordinary: now - start > 0 && now - start <= 2 * source.everyMs };
-  }
+  });
+  type Window = Effect.Success<ReturnType<typeof window>>;
 
-  private slice(source: Source, w: ReturnType<Collector["window"]>, start: number, end: number) {
-    const known = (key: string) => this.store.get("SELECT 1 FROM occurrences WHERE key = ?", key) !== undefined;
-    return new Slice(source, { from: Math.max(start - w.overlap, w.floor), to: end }, w.saturated, known);
-  }
+  const known = (key: string) => Effect.map(store.get("SELECT 1 FROM occurrences WHERE key = ?", key), (row) => row !== undefined);
+  const slice = (source: Source, w: Window, start: number, end: number) => new Slice(source, { from: Math.max(start - w.overlap, w.floor), to: end }, w.saturated, known);
+
+  const pods = Effect.fnUntraced(function* (t: Target, source: Source) {
+    const listed = yield* kubectl(t, "get", ["pods", "-l", source.selector!, "-o", "json"]);
+    if (listed.code !== 0) return yield* new SourceFailure({ kind: classify(listed.stderr), detail: listed.stderr || `kubectl exited ${listed.code}` });
+    return parsePods(listed.stdout);
+  });
+
+  /** A reading the source refused (permission, configuration) is recorded as failed; any other failure fails the pass. */
+  const refusedReading = (target: Slice, reading: string, stderr: string): Effect.Effect<void, SourceFailure> => {
+    const kind = classify(stderr);
+    if (kind !== "permission" && kind !== "config") return Effect.fail(new SourceFailure({ kind, detail: stderr }));
+    return Effect.sync(() => void target.readings.set(reading, { state: "failed", missed: null }));
+  };
 
   /**
    * Kubernetes, in slices of at most six hours from the checkpoint to now, each committed on its own: a crash or a
    * sleep during catch-up resumes at the next slice. Logs are read for every slice; events, workloads and usage are
    * the cluster's present state and are read with the last one.
    */
-  private async kubernetes(source: Source) {
+  const kubernetes = Effect.fnUntraced(function* (source: Source) {
     const t: Target = { context: source.context!, namespace: source.namespace! };
-    const w = this.window(source, LIMITS.overlapMs.kubernetes);
+    const w = yield* window(source, LIMITS.overlapMs.kubernetes);
     // The canary: the pod list every reading needs. A sign-in failure is one call, not one per pod.
-    let pods = await this.pods(t, source);
+    let listed = yield* pods(t, source);
     let start = w.start, gap = w.gap, stuck = false;
     do {
       const end = Math.min(start + LIMITS.sliceMs, w.now);
-      const slice = this.slice(source, w, start, end);
+      const s = slice(source, w, start, end);
       if (source.readings.includes("logs")) {
-        pods = await this.logs(t, source, slice, pods);
+        listed = yield* logs(t, source, s, listed);
         // Logs that cannot be read keep the checkpoint where it is; the present state is still read.
-        if (slice.readings.get("logs")!.state === "failed") stuck = true;
+        if (s.readings.get("logs")!.state === "failed") stuck = true;
       }
-      if (end === w.now) await this.present(t, source, slice, pods, w.now);
-      this.commit(slice, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, end === w.now ? { ordinary: w.ordinary } : null);
+      if (end === w.now) yield* present(t, source, s, listed, w.now);
+      yield* commit(s, gap, stuck ? null : end, LIMITS.overlapMs.kubernetes, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = stuck ? Math.max(end, w.now - LIMITS.sliceMs) : end;
     } while (start < w.now);
-  }
-
-  private async pods(t: Target, source: Source) {
-    const listed = await kubectl(t, "get", ["pods", "-l", source.selector!, "-o", "json"]);
-    if (listed.code !== 0) throw new SourceFailure(classify(listed.stderr), listed.stderr || `kubectl exited ${listed.code}`);
-    return parsePods(listed.stdout);
-  }
-
-  /** A reading the source refused (permission, configuration) is recorded as failed; any other failure fails the pass. */
-  private refusedReading(slice: Slice, reading: string, stderr: string) {
-    const kind = classify(stderr);
-    if (kind !== "permission" && kind !== "config") throw new SourceFailure(kind, stderr);
-    slice.readings.set(reading, { state: "failed", missed: null });
-  }
+  });
 
   /**
    * One slice of logs. A container's records are kept only if its identity (its current and previous instance) is
@@ -372,11 +337,11 @@ export class Collector {
    * with no instance, or a restarted one with no previous instance to read, is a gap. A line without a readable
    * time cannot be placed and is a gap. Returns the pod list taken after the read.
    */
-  private async logs(t: Target, source: Source, slice: Slice, before: ReadonlyArray<Pod>): Promise<Pod[]> {
+  const logs = Effect.fnUntraced(function* (t: Target, source: Source, s: Slice, before: ReadonlyArray<Pod>) {
     const order: Reading["state"][] = ["ok", "gap", "capped", "failed"], at = answered(clock.now());
     let state: Reading = { state: before.length > LIMITS.podsPerSource ? "capped" : "ok", missed: null, observedMs: at };
-    const worse = (s: Reading["state"]) => {
-      if (order.indexOf(s) > order.indexOf(state.state)) state = s === "failed" ? { state: s, missed: null } : { state: s, missed: null, observedMs: at };
+    const worse = (next: Reading["state"]) => {
+      if (order.indexOf(next) > order.indexOf(state.state)) state = next === "failed" ? { state: next, missed: null } : { state: next, missed: null, observedMs: at };
     };
     type Line = { key: string; stream: string; at: number; fingerprint: string; title: string; severity: "error" | "warn"; text: string };
     const reads: Array<{ uid: string; container: string; identity: string; lines: Line[] }> = [];
@@ -389,295 +354,296 @@ export class Collector {
           const stream = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id);
           const ordinals = new Map<string, number>();
           const seen = new Set<string>();
-          let lastAt = slice.span.from;
-          const read = await streamLogs(t, pod.name, container.name, iso(slice.span.from), instance.previous, LIMITS.bytesPerPodCall, (stamp, text) => {
-            const at = time(stamp);
-            if (at === null) return void worse("gap");
-            if (at < slice.span.from) return;
-            if (at >= slice.span.to) return false;
-            lastAt = at;
-            const p = problem(text, source.words);
-            if (!p) return;
-            const digest = sha(text);
-            const ordinal = ordinals.get(stamp + digest) ?? 0;
-            ordinals.set(stamp + digest, ordinal + 1);
-            const key = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
-            seen.add(key);
-            lines.push({ key, stream, at, ...p, text });
-          });
+          let lastAt = s.span.from;
+          const read = yield* streamLogs(t, pod.name, container.name, iso(s.span.from), instance.previous, LIMITS.bytesPerPodCall, (stamp, text) =>
+            Effect.sync(() => {
+              const at = time(stamp);
+              if (at === null) return void worse("gap");
+              if (at < s.span.from) return;
+              if (at >= s.span.to) return false;
+              lastAt = at;
+              const p = problem(text, source.words);
+              if (!p) return;
+              const digest = sha(text);
+              const ordinal = ordinals.get(stamp + digest) ?? 0;
+              ordinals.set(stamp + digest, ordinal + 1);
+              const key = sha("k8s", source.id, t.context, t.namespace, pod.uid, container.name, instance.id, stamp, digest, ordinal);
+              seen.add(key);
+              lines.push({ key, stream, at, ...p, text });
+            }),
+          );
           if (read.code !== 0) {
             if (instance.previous && /previous terminated container|not found/i.test(read.stderr)) worse("gap");
             else {
-              this.refusedReading(slice, "logs", read.stderr);
+              yield* refusedReading(s, "logs", read.stderr);
               worse("failed");
             }
             continue;
           }
           if (read.capped) worse("capped");
           else if (read.cutTail) worse("gap");
-          const through = read.capped || read.cutTail ? lastAt : slice.span.to;
-          const lost = this.store
-            .all<{ key: string; incident: string }>("SELECT key, incident FROM occurrences WHERE stream = ? AND at_ms >= ? AND at_ms < ?", stream, slice.span.from, through)
-            .filter((r) => !seen.has(r.key));
+          const through = read.capped || read.cutTail ? lastAt : s.span.to;
+          const lost = (yield* store.all<{ key: string; incident: string }>("SELECT key, incident FROM occurrences WHERE stream = ? AND at_ms >= ? AND at_ms < ?", stream, s.span.from, through)).filter(
+            (r) => !seen.has(r.key),
+          );
           if (lost.length) worse("gap");
-          for (const r of lost) if (r.incident) slice.uncertain.add(r.incident);
+          for (const r of lost) if (r.incident) s.uncertain.add(r.incident);
         }
         reads.push({ uid: pod.uid, container: container.name, identity: identity(container), lines });
       }
     }
-    const after = await this.pods(t, source);
+    const after = yield* pods(t, source);
     for (const r of reads) {
       const now = after.find((p) => p.uid === r.uid)?.containers.find((c) => c.name === r.container);
       if (!now || identity(now) !== r.identity) {
         worse("gap");
-        for (const x of r.lines) slice.unsure(x.fingerprint, x.title, x.severity, "logs");
+        for (const x of r.lines) s.unsure(x.fingerprint, x.title, x.severity, "logs");
         continue;
       }
-      for (const x of r.lines) slice.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity, "logs", x.text);
+      for (const x of r.lines) yield* s.add(x.key, x.stream, x.at, x.fingerprint, x.title, x.severity, "logs", x.text);
     }
-    if (slice.capped && state.state === "ok") state = { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: at };
-    slice.readings.set("logs", state);
+    if (s.capped && state.state === "ok") state = { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: at };
+    s.readings.set("logs", state);
     return after;
-  }
+  });
 
   /**
    * What the cluster says now: warning events, the running revision and readiness, memory use against limits. The
    * memory sample is measured only when every container with a limit was measured: one pod cannot speak for another.
    */
-  private async present(t: Target, source: Source, slice: Slice, pods: ReadonlyArray<Pod>, now: number) {
+  const present = Effect.fnUntraced(function* (t: Target, source: Source, s: Slice, listed: ReadonlyArray<Pod>, now: number) {
     if (source.readings.includes("events")) {
-      const r = await kubectl(t, "get", ["events", "-o", "json"]);
-      if (r.code !== 0) this.refusedReading(slice, "events", r.stderr);
+      const r = yield* kubectl(t, "get", ["events", "-o", "json"]);
+      if (r.code !== 0) yield* refusedReading(s, "events", r.stderr);
       else {
         for (const e of parseEvents(r.stdout)) {
           if (e.type !== "Warning") continue;
           const p = problem(`WARN ${e.reason}: ${e.message}`, source.words, "warn")!;
-          slice.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
+          s.counter(sha("k8s-event", source.id, t.context, t.namespace, e.uid), e.count, `event:${e.reason}:${p.fingerprint}`, `${clean(e.reason, 200)}: ${p.title.replace(/^WARN [^:]*: /, "")}`, "warn", "events");
         }
-        slice.readings.set("events", observe(true, answered(now)));
+        s.readings.set("events", observe(true, answered(now)));
       }
     }
     if (source.readings.includes("workloads")) {
-      const r = await kubectl(t, "get", ["deployments", "-l", source.selector!, "-o", "json"]);
-      if (r.code !== 0) this.refusedReading(slice, "workloads", r.stderr);
+      const r = yield* kubectl(t, "get", ["deployments", "-l", source.selector!, "-o", "json"]);
+      if (r.code !== 0) yield* refusedReading(s, "workloads", r.stderr);
       else {
-        slice.revision = parseRevision(r.stdout);
-        slice.readings.set("workloads", observe(!!slice.revision, answered(now)));
+        s.revision = parseRevision(r.stdout);
+        s.readings.set("workloads", observe(!!s.revision, answered(now)));
         // A new revision: ask the cluster when it rolled out (get replicasets, read-only). Never first-seen time.
-        const last = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
-        if (slice.revision && last && last.revision !== slice.revision) {
-          const rs = await kubectl(t, "get", ["replicasets", "-l", source.selector!, "-o", "json"]);
-          if (rs.code === 0) slice.rollout = parseRollout(rs.stdout, slice.revision);
+        const last = yield* store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
+        if (s.revision && last && last.revision !== s.revision) {
+          const rs = yield* kubectl(t, "get", ["replicasets", "-l", source.selector!, "-o", "json"]);
+          if (rs.code === 0) s.rollout = parseRollout(rs.stdout, s.revision);
         }
       }
-      slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: answered(now) });
+      s.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(listed.filter((p) => !p.ready).length), at: answered(now) });
     }
     if (source.readings.includes("usage")) {
-      const r = await kubectl(t, "top", ["pod", "-l", source.selector!, "--containers", "--no-headers"]);
+      const r = yield* kubectl(t, "top", ["pod", "-l", source.selector!, "--containers", "--no-headers"]);
       let worst: number | null = null;
-      if (r.code !== 0) this.refusedReading(slice, "usage", r.stderr);
+      if (r.code !== 0) yield* refusedReading(s, "usage", r.stderr);
       else {
         const rows = parseTop(r.stdout);
-        const limited = pods.flatMap((p) => p.containers.filter((c) => c.memoryLimit).map((c) => ({ pod: p.name, container: c.name, limit: c.memoryLimit! })));
+        const limited = listed.flatMap((p) => p.containers.filter((c) => c.memoryLimit).map((c) => ({ pod: p.name, container: c.name, limit: c.memoryLimit! })));
         const used = limited.map((c) => rows.find((row) => row.pod === c.pod && row.container === c.container)?.memory ?? null);
         if (limited.length && used.every((m) => m !== null)) worst = Math.max(...used.map((m, i) => (100 * m!) / limited[i]!.limit));
-        slice.readings.set("usage", observe(worst !== null, answered(now)));
+        s.readings.set("usage", observe(worst !== null, answered(now)));
       }
-      slice.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: answered(now) });
+      s.metrics.push({ name: MEMORY, reading: "usage", sample: worst === null ? UNMEASURED : sample(Math.round(worst * 10) / 10), at: answered(now) });
     }
-  }
+  });
 
-  private async datadog(source: Source) {
-    const w = this.window(source, LIMITS.overlapMs.datadog);
+  const datadogSource = Effect.fnUntraced(function* (source: Source) {
+    const w = yield* window(source, LIMITS.overlapMs.datadog);
     let start = w.start;
     let gap = w.gap;
     do {
       const end = Math.min(start + LIMITS.sliceMs, w.now);
-      const slice = this.slice(source, w, start, end);
-      try {
+      const s = slice(source, w, start, end);
+      yield* Effect.gen(function* () {
         if (source.readings.includes("logs")) {
           let unplaced = false;
-          const recognised = await datadog.searchLogs(source, slice.span.from, slice.span.to, (log) => {
-            if (log.at === null || log.id === null) return void (unplaced = true); // cannot be placed or counted once
+          const recognised = yield* datadog.searchLogs(source, s.span.from, s.span.to, (log) => {
+            if (log.at === null || log.id === null) return Effect.sync(() => void (unplaced = true)); // cannot be placed or counted once
             const given = /^(error|critical|emergency|alert)$/i.test(log.status) ? "error" : /^warn/i.test(log.status) ? "warn" : undefined;
             const p = problem(given === "error" ? `ERROR ${log.message}` : given === "warn" ? `WARN ${log.message}` : log.message, source.words, given);
-            if (p) slice.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message);
+            return p ? s.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message) : Effect.void;
           });
-          slice.readings.set("logs", slice.capped ? { state: "capped", missed: slice.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
+          s.readings.set("logs", s.capped ? { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
         }
         if (end === w.now && source.readings.includes("monitors")) {
-          const answer = await datadog.monitors(source);
+          const answer = yield* datadog.monitors(source);
           for (const m of answer.monitors) {
             // One incident per monitor across Warn and Alert. Its count is the number of transitions into alerting:
             // an OK that alerts again is counted again; staying in alert, or moving between Warn and Alert, is not.
             const alerting = /^(alert|warn)/i.test(m.state!);
             const stateKey = sha("dd-monitor-alerting", source.id, m.id), countKey = sha("dd-monitor-transitions", source.id, m.id);
-            const was = (this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", stateKey)?.count ?? 0) === 1;
-            const transitions = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", countKey)?.count ?? 0;
-            slice.marks.push({ key: stateKey, count: alerting ? 1 : 0 });
+            const was = ((yield* store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", stateKey))?.count ?? 0) === 1;
+            const transitions = (yield* store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", countKey))?.count ?? 0;
+            s.marks.push({ key: stateKey, count: alerting ? 1 : 0 });
             if (!alerting) continue;
             const severity = /^alert/i.test(m.state!) ? "error" : "warn";
-            slice.counter(countKey, was ? transitions : transitions + 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
+            s.counter(countKey, was ? transitions : transitions + 1, `monitor:${m.id}`, `Monitor ${clean(m.name, 200)}`, severity, "monitors", true);
           }
-          slice.readings.set("monitors", observe(answer.complete, answered(end)));
+          s.readings.set("monitors", observe(answer.complete, answered(end)));
         }
         if (end === w.now && source.readings.includes("metrics")) {
-          const point = await datadog.metric(source, end - source.everyMs, end);
-          slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? answered(end) });
+          const point = yield* datadog.metric(source, end - source.everyMs, end);
+          s.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? answered(end) });
           // Fresh as of the point's own time: an old point returned again is not a new measurement.
-          slice.readings.set("metrics", observe(point !== null, point?.at ?? answered(0)));
-          if (source.capacity) slice.capacity = { at: point?.at ?? answered(end), value: point ? point.value : null, unit: point?.unit ?? null };
+          s.readings.set("metrics", observe(point !== null, point?.at ?? answered(0)));
+          if (source.capacity) s.capacity = { at: point?.at ?? answered(end), value: point ? point.value : null, unit: point?.unit ?? null };
         }
-      } catch (error) {
-        if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
-        throw error;
-      }
-      this.commit(slice, gap, end, LIMITS.overlapMs.datadog, end === w.now ? { ordinary: w.ordinary } : null);
+      }).pipe(Effect.catchTag("HttpFailure", (error) => Effect.fail(new SourceFailure({ kind: classify(error.message, error.status), detail: error.message }))));
+      yield* commit(s, gap, end, LIMITS.overlapMs.datadog, end === w.now ? { ordinary: w.ordinary } : null);
       gap = null;
       start = end;
     } while (start < w.now);
-  }
+  });
 
   /**
    * The slice, in one transaction (admitted by the store's guard). The last slice of a pass closes the pass's
    * interval (`last`); see interval().
    */
-  private commit(slice: Slice, gap: Span | null, checkpoint: number | null, overlap: number, last: { ordinary: boolean } | null) {
-    const source = slice.source;
+  const commit = Effect.fnUntraced(function* (s: Slice, gap: Span | null, checkpoint: number | null, overlap: number, last: { ordinary: boolean } | null) {
+    const source = s.source;
     const now = clock.now();
-    this.store.tx((w) => {
-      const seq = w.event("slice", source.id as Clean, {
-        from: slice.span.from,
-        to: slice.span.to,
-        fresh: slice.fresh,
-        admitted: slice.admitted.length,
-        readings: Object.fromEntries(slice.readings),
-        ordinary: last?.ordinary ?? false,
-      });
-      if (gap) {
-        w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, 'all', ?, ?, 'gap', NULL)", seq, source.id as Clean, gap.from, gap.to);
-        w.event("coverage_gap", source.id as Clean, { from: gap.from, to: gap.to, reason: "older than the 14-day catch-up limit" });
-      }
-      const counts = new Map<string, number>();
-      const firstAt = new Map<string, number>();
-      const recent = new Map<string, Slice["admitted"]>();
-      for (const record of slice.admitted) {
-        const inserted = w.run(
-          "INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms, incident) VALUES (?, ?, ?, ?, ?)",
-          record.key as Clean, source.id as Clean, record.stream as Clean, record.at, incidentId(source, record.bucket) as Clean,
-        ).changes;
-        if (!inserted) continue;
-        counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
-        firstAt.set(record.bucket, Math.min(firstAt.get(record.bucket) ?? Infinity, record.at));
-        hourly(w, incidentId(source, record.bucket), record.at);
-        recent.set(record.bucket, [...(recent.get(record.bucket) ?? []).slice(-(LIMITS.linesPerProblem - 1)), record]);
-      }
-      for (const m of slice.marks)
-        w.run("INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = excluded.count, seen_ms = excluded.seen_ms", m.key as Clean, source.id as Clean, m.count, now);
-      for (const b of slice.baselines) {
-        const before = this.store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", b.key)?.count ?? 0;
-        if (b.count > before) {
-          counts.set(b.bucket, (counts.get(b.bucket) ?? 0) + (b.count - before));
-          hourly(w, incidentId(source, b.bucket), now, b.count - before);
+    yield* store.tx((w) =>
+      Effect.gen(function* () {
+        const seq = yield* w.event("slice", source.id as Clean, {
+          from: s.span.from,
+          to: s.span.to,
+          fresh: s.fresh,
+          admitted: s.admitted.length,
+          readings: Object.fromEntries(s.readings),
+          ordinary: last?.ordinary ?? false,
+        });
+        if (gap) {
+          yield* w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, 'all', ?, ?, 'gap', NULL)", seq, source.id as Clean, gap.from, gap.to);
+          yield* w.event("coverage_gap", source.id as Clean, { from: gap.from, to: gap.to, reason: "older than the 14-day catch-up limit" });
         }
-        w.run(
-          "INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = max(count, excluded.count), seen_ms = excluded.seen_ms",
-          b.key as Clean, source.id as Clean, b.count, now,
-        );
-      }
-      // The latest lines of each problem, for investigations: cleaned by the writer, at most linesPerProblem kept.
-      for (const [bucket, records] of recent) {
-        const id = incidentId(source, bucket);
-        for (const r of records) w.run("INSERT INTO lines (incident, source, at_ms, text) VALUES (?, ?, ?, ?)", id as Clean, source.name as Clean, r.at, r.text as Clean);
-        w.run("DELETE FROM lines WHERE incident = ? AND rowid NOT IN (SELECT rowid FROM lines WHERE incident = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?)", id as Clean, id as Clean, LIMITS.linesPerProblem);
-      }
-      const touched = new Set<string>();
-      for (const [bucket, info] of slice.buckets) {
-        const added = counts.get(bucket) ?? 0;
-        if (added > 0 || info.seen) touched.add(incidentId(source, bucket));
-        if (added === 0 && !info.inexact && !info.seen) continue;
-        const id = incidentId(source, bucket);
-        const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
-        if (added === 0 && !info.inexact && !before) continue;
-        const group = before ? groupNow(this.store, id) : null;
-        incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen, info.seen);
-        // Onset: the provider's time of the first line ever admitted for a new problem.
-        if (!before && firstAt.has(bucket)) w.run("INSERT OR IGNORE INTO onsets (incident, at_ms) VALUES (?, ?)", id as Clean, firstAt.get(bucket)!);
-        afterChange(w, this.store, id, before, added, seq);
-        // A problem's first admission is investigated automatically once the model has passed its trial.
-        if (!before && added > 0 && this.store.meta(approvalKey(this.config)) === "on") queueInvestigation(w, this.store, this.config, id, "automatic");
-        announce(w, this.store, id, group, seq);
-      }
-      for (const id of slice.uncertain) w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
-      // Time a reading did not fully cover: the totals of problems active then are lower bounds from now on.
-      for (const [reading, r] of slice.readings) {
-        if (r.state !== "ok") w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND reading = ? AND active = 1", source.id as Clean, reading as Clean);
-      }
-      if (gap) w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id as Clean);
-      if (slice.capped) w.run("INSERT OR REPLACE INTO saturated (source, reading, from_ms, to_ms) VALUES (?, 'logs', ?, ?)", source.id as Clean, slice.span.from, slice.span.to);
-      const lastSeen = this.store.get<{ ok_ms: number | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = 'workloads'", source.id)?.ok_ms ?? null;
-      for (const [reading, r] of slice.readings) {
-        w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, ?, ?, ?, ?, ?)", seq, source.id as Clean, reading as Clean, slice.span.from, slice.span.to, r.state as Clean, r.missed);
-        w.run(
-          `INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
-          // Both times are the provider's: when it observed (or, failed, when it last refused). Nothing records the
-          // time Overwatch asked, so no consumer can take that for freshness.
-          source.id as Clean, reading as Clean, r.state as Clean, r.state === "failed" ? now : Math.min(now, r.observedMs), r.state === "failed" ? null : Math.min(now, r.observedMs),
-        );
-        if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - r.observedMs));
-      }
-      if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
-      if (slice.revision) this.deploy(w, source, slice.revision, slice.rollout, lastSeen, now);
-      if (slice.capacity && source.capacity) {
-        // A sample carries what it proves: the metric, the configured unit and ceiling, and the provider's own unit.
-        const series = `${sha(source.metric, source.capacity.resource, source.capacity.unit, source.capacity.limit)}:${slice.capacity.unit ?? ""}`;
-        w.run("INSERT INTO samples (source, series, at_ms, value) VALUES (?, ?, ?, ?)", source.id as Clean, series as Clean, slice.capacity.at, slice.capacity.value);
-        w.run("DELETE FROM samples WHERE source = ? AND id NOT IN (SELECT id FROM samples WHERE source = ? ORDER BY id DESC LIMIT 60)", source.id as Clean, source.id as Clean);
-      }
-      if (checkpoint !== null) {
-        const before = this.store.get<{ failure: string | null }>("SELECT failure FROM sources WHERE id = ?", source.id);
-        w.run(
-          `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, NULL, 0, ?, 0, NULL, ?, ?)
-           ON CONFLICT (id) DO UPDATE SET checkpoint_ms = excluded.checkpoint_ms, failure = NULL, streak = 0, next_ms = excluded.next_ms, suspended = 0, fix = NULL,
-             endpoint = excluded.endpoint, delay_ms = excluded.delay_ms`,
-          source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean, source.everyMs,
-        );
-        if (before?.failure) w.event("source_recovered", source.id as Clean, { was: before.failure });
-        w.run("DELETE FROM occurrences WHERE source = ? AND at_ms < ?", source.id as Clean, checkpoint - overlap);
-        w.run("DELETE FROM saturated WHERE source = ? AND to_ms <= ?", source.id as Clean, checkpoint - overlap);
-        w.run("DELETE FROM baselines WHERE source = ? AND seen_ms < ?", source.id as Clean, now - LIMITS.catchUpMs);
-        w.run(
-          "DELETE FROM coverage WHERE source = ? AND state = 'ok' AND id NOT IN (SELECT id FROM coverage WHERE source = ? ORDER BY id DESC LIMIT 200)",
-          source.id as Clean, source.id as Clean,
-        );
-      }
-    });
-    if (checkpoint !== null) this.nextMono.set(source.id, clock.mono() + source.everyMs);
-  }
+        const counts = new Map<string, number>();
+        const firstAt = new Map<string, number>();
+        const recent = new Map<string, Slice["admitted"]>();
+        for (const record of s.admitted) {
+          const inserted = (yield* w.run(
+            "INSERT OR IGNORE INTO occurrences (key, source, stream, at_ms, incident) VALUES (?, ?, ?, ?, ?)",
+            record.key as Clean, source.id as Clean, record.stream as Clean, record.at, incidentId(source, record.bucket) as Clean,
+          )).changes;
+          if (!inserted) continue;
+          counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
+          firstAt.set(record.bucket, Math.min(firstAt.get(record.bucket) ?? Infinity, record.at));
+          yield* hourly(w, incidentId(source, record.bucket), record.at);
+          recent.set(record.bucket, [...(recent.get(record.bucket) ?? []).slice(-(LIMITS.linesPerProblem - 1)), record]);
+        }
+        for (const m of s.marks)
+          yield* w.run("INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = excluded.count, seen_ms = excluded.seen_ms", m.key as Clean, source.id as Clean, m.count, now);
+        for (const b of s.baselines) {
+          const before = (yield* store.get<{ count: number }>("SELECT count FROM baselines WHERE key = ?", b.key))?.count ?? 0;
+          if (b.count > before) {
+            counts.set(b.bucket, (counts.get(b.bucket) ?? 0) + (b.count - before));
+            yield* hourly(w, incidentId(source, b.bucket), now, b.count - before);
+          }
+          yield* w.run(
+            "INSERT INTO baselines (key, source, count, seen_ms) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET count = max(count, excluded.count), seen_ms = excluded.seen_ms",
+            b.key as Clean, source.id as Clean, b.count, now,
+          );
+        }
+        // The latest lines of each problem, for investigations: cleaned by the writer, at most linesPerProblem kept.
+        for (const [bucket, records] of recent) {
+          const id = incidentId(source, bucket);
+          for (const r of records) yield* w.run("INSERT INTO lines (incident, source, at_ms, text) VALUES (?, ?, ?, ?)", id as Clean, source.name as Clean, r.at, r.text as Clean);
+          yield* w.run("DELETE FROM lines WHERE incident = ? AND rowid NOT IN (SELECT rowid FROM lines WHERE incident = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?)", id as Clean, id as Clean, LIMITS.linesPerProblem);
+        }
+        const touched = new Set<string>();
+        for (const [bucket, info] of s.buckets) {
+          const added = counts.get(bucket) ?? 0;
+          if (added > 0 || info.seen) touched.add(incidentId(source, bucket));
+          if (added === 0 && !info.inexact && !info.seen) continue;
+          const id = incidentId(source, bucket);
+          const before = yield* store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
+          if (added === 0 && !info.inexact && !before) continue;
+          const group = before ? yield* groupNow(id) : null;
+          yield* incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen, info.seen);
+          // Onset: the provider's time of the first line ever admitted for a new problem.
+          if (!before && firstAt.has(bucket)) yield* w.run("INSERT OR IGNORE INTO onsets (incident, at_ms) VALUES (?, ?)", id as Clean, firstAt.get(bucket)!);
+          yield* afterChange(w, id, before, added, seq);
+          // A problem's first admission is investigated automatically once the model has passed its trial.
+          if (!before && added > 0 && (yield* store.meta(approvalKey(config))) === "on") yield* queueInvestigation(w, id, "automatic");
+          yield* announce(w, id, group, seq);
+        }
+        for (const id of s.uncertain) yield* w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);
+        // Time a reading did not fully cover: the totals of problems active then are lower bounds from now on.
+        for (const [reading, r] of s.readings) {
+          if (r.state !== "ok") yield* w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND reading = ? AND active = 1", source.id as Clean, reading as Clean);
+        }
+        if (gap) yield* w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id as Clean);
+        if (s.capped) yield* w.run("INSERT OR REPLACE INTO saturated (source, reading, from_ms, to_ms) VALUES (?, 'logs', ?, ?)", source.id as Clean, s.span.from, s.span.to);
+        const lastSeen = (yield* store.get<{ ok_ms: number | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = 'workloads'", source.id))?.ok_ms ?? null;
+        for (const [reading, r] of s.readings) {
+          yield* w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, ?, ?, ?, ?, ?)", seq, source.id as Clean, reading as Clean, s.span.from, s.span.to, r.state as Clean, r.missed);
+          yield* w.run(
+            `INSERT INTO readings (source, reading, state, at_ms, ok_ms) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (source, reading) DO UPDATE SET state = excluded.state, at_ms = excluded.at_ms, ok_ms = coalesce(excluded.ok_ms, ok_ms)`,
+            // Both times are the provider's: when it observed (or, failed, when it last refused). Nothing records the
+            // time Overwatch asked, so no consumer can take that for freshness.
+            source.id as Clean, reading as Clean, r.state as Clean, r.state === "failed" ? now : Math.min(now, r.observedMs), r.state === "failed" ? null : Math.min(now, r.observedMs),
+          );
+          if (r.state !== "failed") okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - r.observedMs));
+        }
+        if (last) yield* interval(w, source, s.readings, s.metrics, touched, last.ordinary, seq, now);
+        if (s.revision) yield* deploy(w, source, s.revision, s.rollout, lastSeen, now);
+        if (s.capacity && source.capacity) {
+          // A sample carries what it proves: the metric, the configured unit and ceiling, and the provider's own unit.
+          const series = `${sha(source.metric, source.capacity.resource, source.capacity.unit, source.capacity.limit)}:${s.capacity.unit ?? ""}`;
+          yield* w.run("INSERT INTO samples (source, series, at_ms, value) VALUES (?, ?, ?, ?)", source.id as Clean, series as Clean, s.capacity.at, s.capacity.value);
+          yield* w.run("DELETE FROM samples WHERE source = ? AND id NOT IN (SELECT id FROM samples WHERE source = ? ORDER BY id DESC LIMIT 60)", source.id as Clean, source.id as Clean);
+        }
+        if (checkpoint !== null) {
+          const before = yield* store.get<{ failure: string | null }>("SELECT failure FROM sources WHERE id = ?", source.id);
+          yield* w.run(
+            `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, ?, NULL, 0, ?, 0, NULL, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET checkpoint_ms = excluded.checkpoint_ms, failure = NULL, streak = 0, next_ms = excluded.next_ms, suspended = 0, fix = NULL,
+               endpoint = excluded.endpoint, delay_ms = excluded.delay_ms`,
+            source.id as Clean, checkpoint, now + source.everyMs, endpoint(source) as Clean, source.everyMs,
+          );
+          if (before?.failure) yield* w.event("source_recovered", source.id as Clean, { was: before.failure });
+          yield* w.run("DELETE FROM occurrences WHERE source = ? AND at_ms < ?", source.id as Clean, checkpoint - overlap);
+          yield* w.run("DELETE FROM saturated WHERE source = ? AND to_ms <= ?", source.id as Clean, checkpoint - overlap);
+          yield* w.run("DELETE FROM baselines WHERE source = ? AND seen_ms < ?", source.id as Clean, now - LIMITS.catchUpMs);
+          yield* w.run(
+            "DELETE FROM coverage WHERE source = ? AND state = 'ok' AND id NOT IN (SELECT id FROM coverage WHERE source = ? ORDER BY id DESC LIMIT 200)",
+            source.id as Clean, source.id as Clean,
+          );
+        }
+      }),
+    );
+    if (checkpoint !== null) nextMono.set(source.id, clock.mono() + source.everyMs);
+  });
 
   /**
    * The one place a pass's interval is recorded, whether it was read or failed: every gauge gets a sample (a failure
    * gives each an unmeasured one) and every active occurrence problem's quiet count moves by quietStep(). Nothing
    * else changes hysteresis or quiet streaks.
    */
-  private interval(w: Writer, source: Source, readings: ReadonlyMap<string, Reading>, samples: Slice["metrics"], touched: ReadonlySet<string>, ordinary: boolean, seq: number, now: number) {
-    for (const m of samples) this.metric(w, source, m, now, seq);
-    const active = this.store.all<{ id: string; reading: string; streak: number }>("SELECT id, reading, streak FROM incidents WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id);
+  const interval = Effect.fnUntraced(function* (w: Writer, source: Source, readings: ReadonlyMap<string, Reading>, samples: Slice["metrics"], touched: ReadonlySet<string>, ordinary: boolean, seq: number, now: number) {
+    for (const m of samples) yield* metric(w, source, m, now, seq);
+    const active = yield* store.all<{ id: string; reading: string; streak: number }>("SELECT id, reading, streak FROM incidents WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id);
     for (const i of active) {
       const state = readings.get(i.reading)?.state;
       if (state === undefined) continue; // not a reading of this pass (a present-state reading on a catch-up slice)
       const next = quietStep(i.streak, { touched: touched.has(i.id), measured: state === "ok", ordinary });
       if (next.quiet) {
-        w.run("UPDATE incidents SET active = 0, streak = 0 WHERE id = ?", i.id as Clean);
-        w.event("quieted", i.id as Clean, { slice: seq });
-      } else if (next.streak !== i.streak) w.run("UPDATE incidents SET streak = ? WHERE id = ?", next.streak, i.id as Clean);
+        yield* w.run("UPDATE incidents SET active = 0, streak = 0 WHERE id = ?", i.id as Clean);
+        yield* w.event("quieted", i.id as Clean, { slice: seq });
+      } else if (next.streak !== i.streak) yield* w.run("UPDATE incidents SET streak = ? WHERE id = ?", next.streak, i.id as Clean);
     }
-  }
+  });
 
   /** One gauge sample through its rule's hysteresis; the breach that opens is counted as one occurrence of its problem. */
-  private metric(w: Writer, source: Source, m: Slice["metrics"][number], now: number, seq: number) {
-    const row = this.store.get<{ value: number; at_ms: number; over: number; under: number; breach: number }>("SELECT * FROM metrics WHERE source = ? AND name = ?", source.id, m.name);
+  const metric = Effect.fnUntraced(function* (w: Writer, source: Source, m: Slice["metrics"][number], now: number, seq: number) {
+    const row = yield* store.get<{ value: number; at_ms: number; over: number; under: number; breach: number }>("SELECT * FROM metrics WHERE source = ? AND name = ?", source.id, m.name);
     if (!m.sample.measured && !row) return;
     const rule = METRIC_RULES.find((r) => r.name === m.name);
     const was = { over: row?.over ?? 0, under: row?.under ?? 0, breach: row?.breach === 1 };
@@ -685,57 +651,139 @@ export class Collector {
     const value = m.sample.measured ? m.sample.value : null;
     if (rule && next.breach && !was.breach) {
       const id = incidentId(source, `metric:${m.name}`);
-      const before = this.store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
-      incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", "gauge", 1, true, now, seq, true);
-      hourly(w, id, now);
-      afterChange(w, this.store, id, before, 1, seq);
-      w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value, over: rule.over });
+      const before = yield* store.get<{ severity: string; active: number }>("SELECT severity, active FROM incidents WHERE id = ?", id);
+      yield* incident(w, source, `metric:${m.name}`, `${m.name} over ${rule.over} for ${rule.samples} samples`, "error", "gauge", 1, true, now, seq, true);
+      yield* hourly(w, id, now);
+      yield* afterChange(w, id, before, 1, seq);
+      yield* w.event("incident", source.id as Clean, { metric: m.name, state: "breach", value, over: rule.over });
     } else if (was.breach && !next.breach) {
-      w.run("UPDATE incidents SET active = 0 WHERE id = ?", incidentId(source, `metric:${m.name}`) as Clean);
-      w.event("incident", source.id as Clean, { metric: m.name, state: "clear", value });
+      yield* w.run("UPDATE incidents SET active = 0 WHERE id = ?", incidentId(source, `metric:${m.name}`) as Clean);
+      yield* w.event("incident", source.id as Clean, { metric: m.name, state: "clear", value });
     }
-    w.run(
+    yield* w.run(
       "INSERT OR REPLACE INTO metrics (source, name, value, at_ms, over, under, breach) VALUES (?, ?, ?, ?, ?, ?, ?)",
       source.id as Clean, m.name as Clean, value ?? row!.value, value === null ? row!.at_ms : m.at, next.over, next.under, next.breach ? 1 : 0,
     );
-  }
+  });
 
   /**
    * A deploy is recorded with its seq when the running revision changes, with when it rolled out: the provider's time
    * when the cluster gives one, else only the interval after the last observation of the previous revision and up to
    * this observation. Onset is judged against that interval (see fixes.ts), never against first-seen time alone.
    */
-  private deploy(w: Writer, source: Source, revision: string, rollout: number | null, lastSeen: number | null, now: number) {
-    const last = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
+  const deploy = Effect.fnUntraced(function* (w: Writer, source: Source, revision: string, rollout: number | null, lastSeen: number | null, now: number) {
+    const last = yield* store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
     if (last?.revision === revision) return;
-    const seq = w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id, rolloutMs: rollout });
-    w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, ?, ?, ?, ?)", seq, source.app as Clean, source.environment as Clean, revision as Clean, (last?.revision ?? null) as Clean | null);
-    if (last) w.run("INSERT INTO rollouts (seq, after_ms, by_ms, exact) VALUES (?, ?, ?, ?)", seq, rollout ?? lastSeen, rollout ?? now, rollout === null ? 0 : 1);
-    afterDeploy(w, this.store, source.app, source.environment, seq, revision);
-  }
+    const seq = yield* w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id, rolloutMs: rollout });
+    yield* w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, ?, ?, ?, ?)", seq, source.app as Clean, source.environment as Clean, revision as Clean, (last?.revision ?? null) as Clean | null);
+    if (last) yield* w.run("INSERT INTO rollouts (seq, after_ms, by_ms, exact) VALUES (?, ?, ?, ?)", seq, rollout ?? lastSeen, rollout ?? now, rollout === null ? 0 : 1);
+    yield* afterDeploy(w, source.app, source.environment, seq, revision);
+  });
 
   /** A failure: the next attempt (and possibly suspension) in one transaction; the checkpoint stays. */
-  private fail(source: Source, error: unknown) {
+  const fail = Effect.fnUntraced(function* (source: Source, error: unknown) {
     const kind: FailureKind = error instanceof SourceFailure ? error.kind : classify(String((error as Error)?.message ?? error));
     const detail = errorText(error instanceof SourceFailure ? error.detail : error, 400);
-    const row = this.store.get<{ streak: number; failure: string | null }>("SELECT streak, failure FROM sources WHERE id = ?", source.id);
+    const row = yield* store.get<{ streak: number; failure: string | null }>("SELECT streak, failure FROM sources WHERE id = ?", source.id);
     const next = backoff(kind, row?.failure ? row.streak : 0, source.everyMs);
     const now = clock.now();
-    this.store.tx((w) => {
-      const seq = w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
-      // A failed pass is still an interval: every reading failed, every gauge unmeasured.
-      const failed = new Map(source.readings.map((r) => [r, { state: "failed" as const, missed: null }]));
-      const gauges = this.store.all<{ name: string }>("SELECT name FROM metrics WHERE source = ?", source.id).map((g) => ({ name: g.name, reading: "", sample: UNMEASURED, at: answered(now) }));
-      this.interval(w, source, failed, gauges, new Set(), false, seq, now);
-      w.run(
-        `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
-           delay_ms = excluded.delay_ms`,
-        source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean, next.delayMs,
+    yield* store.tx((w) =>
+      Effect.gen(function* () {
+        const seq = yield* w.event("source_failed", source.id as Clean, { kind, streak: next.streak, suspended: next.suspended, detail });
+        // A failed pass is still an interval: every reading failed, every gauge unmeasured.
+        const failed = new Map(source.readings.map((r) => [r, { state: "failed" as const, missed: null }]));
+        const gauges = (yield* store.all<{ name: string }>("SELECT name FROM metrics WHERE source = ?", source.id)).map((g) => ({ name: g.name, reading: "", sample: UNMEASURED, at: answered(now) }));
+        yield* interval(w, source, failed, gauges, new Set(), false, seq, now);
+        yield* w.run(
+          `INSERT INTO sources (id, checkpoint_ms, failure, streak, next_ms, suspended, fix, endpoint, delay_ms) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET failure = excluded.failure, streak = excluded.streak, next_ms = excluded.next_ms, suspended = excluded.suspended, fix = excluded.fix,
+             delay_ms = excluded.delay_ms`,
+          source.id as Clean, kind as Clean, next.streak, now + next.delayMs, next.suspended ? 1 : 0, fixFor(kind, source) as Clean, endpoint(source) as Clean, next.delayMs,
+        );
+      }),
+    );
+    nextMono.set(source.id, clock.mono() + next.delayMs);
+  });
+
+  const readers: Readers<Effect.Services<ReturnType<typeof kubernetes>> | Effect.Services<ReturnType<typeof datadogSource>>> = { kubernetes, datadog: datadogSource };
+  const reader = (source: Source) => {
+    const read = readers[source.kind];
+    if (!read) throw new Error(`no reader for source kind ${String(source.kind)}`);
+    return read;
+  };
+
+  /**
+   * One source's read, and on any failure its failure record. A refusal that holds for the endpoint is shared with
+   * the pass's later sources on it. Running out of room (Full) is not a source's failure: it ends the pass.
+   */
+  const readOne = (source: Source) =>
+    Effect.suspend(() => {
+      const earlier = refused.get(endpoint(source));
+      return earlier ? Effect.fail(earlier) : reader(source)(source);
+    }).pipe(
+      Effect.catchCause((cause) => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause as Cause.Cause<never>);
+        const found = Cause.findErrorOption(cause);
+        const error: unknown = Option.isSome(found) ? found.value : Cause.squash(cause);
+        if (Predicate.isTagged(error, "Full")) return Effect.fail(error as Full);
+        if (error instanceof SourceFailure && (error.kind === "signin" || error.kind === "unreachable")) refused.set(endpoint(source), error);
+        return fail(source, error);
+      }),
+    );
+
+  const passOnce = Effect.gen(function* () {
+    // Each source's next probe gets its live bound once, from the stored time and delay, counted from when this
+    // process started: a wall clock moved backwards cannot postpone it, and time already elapsed counts.
+    if (!bounded) {
+      bounded = true;
+      const { now, mono } = clock.start;
+      for (const r of yield* store.all<{ id: string; next_ms: number; delay_ms: number | null }>("SELECT id, next_ms, delay_ms FROM sources WHERE next_ms IS NOT NULL"))
+        nextMono.set(r.id, mono + Math.min(Math.max(0, r.next_ms - now), r.delay_ms ?? config.sources.find((x) => x.id === r.id)?.everyMs ?? 60_000));
+    }
+    const roomy = yield* room(true);
+    yield* store.reclaim(); // what was freed goes back to the disk a bounded step per pass
+    if (!roomy) return;
+    const woke = wakeAt !== null && clock.mono() >= wakeAt;
+    refused.clear();
+    const finished = yield* Effect.gen(function* () {
+      for (const source of config.sources) if (yield* due(source)) yield* readOne(source);
+      return true;
+    }).pipe(Effect.catchTag("Full", () => Effect.succeed(false))); // paused: the failure record waits for room like everything else
+    if (finished && woke) wakeAt = null;
+  }).pipe(Effect.provideContext(context));
+
+  const shape: CollectorShape = {
+    // A pass runs in the collector's own scope, so a caller that stops waiting does not cut it short.
+    pass: Effect.gen(function* () {
+      const current = yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          if (running) return running;
+          const done = yield* Deferred.make<void>();
+          running = done;
+          yield* passOnce.pipe(
+            Effect.onExit((exit) => Effect.andThen(Effect.sync(() => void (running = null)), Deferred.done(done, exit))),
+            Effect.forkIn(scope),
+          );
+          return done;
+        }),
       );
-    });
-    this.nextMono.set(source.id, clock.mono() + next.delayMs);
-  }
+      return yield* Deferred.await(current);
+    }),
+    wake: Effect.sync(() => void (wakeAt = clock.mono() + LIMITS.wakeDelayMs)),
+    setSpace: (next) => Effect.sync(() => void (override = next)),
+    view: {
+      get paused() {
+        return paused;
+      },
+      okAtMono: (source, reading) => okMono.get(`${source}|${reading}`),
+    },
+  };
+  return shape;
+});
+
+/** The collector: reads every due source into slices and commits each. Datadog is reached through the fetch client. */
+export class Collector extends Context.Service<Collector, CollectorShape>()("overwatch/Collector") {
+  static readonly layer = Layer.effect(Collector, make).pipe(Layer.provide(FetchHttpClient.layer));
 }
 
 /**
@@ -743,7 +791,7 @@ export class Collector {
  * problem observed now (`active`) is active again and its quiet count starts over.
  */
 function incident(w: Writer, source: Source, bucket: string, title: string, severity: Severity, reading: string, added: number, exact: boolean, now: number, seq: number, active: boolean, current = false) {
-  w.run(
+  return w.run(
     `INSERT INTO incidents (id, app, environment, source, title, severity, count, exact, first_ms, last_ms, seq, reading, active, streak, first_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
      ON CONFLICT (id) DO UPDATE SET count = count + excluded.count, exact = min(exact, excluded.exact), last_ms = max(last_ms, excluded.last_ms), seq = excluded.seq,
        severity = CASE WHEN ${current ? 1 : 0} = 1 OR excluded.severity = 'error' THEN excluded.severity ELSE severity END,
@@ -751,16 +799,6 @@ function incident(w: Writer, source: Source, bucket: string, title: string, seve
     incidentId(source, bucket) as Clean, source.app as Clean, source.environment as Clean, source.id as Clean, title as Clean, severity as Clean, added, exact ? 1 : 0, now, now, seq,
     reading as Clean, active ? 1 : 0, seq,
   );
-}
-
-export class SourceFailure extends Error {
-  readonly kind: FailureKind;
-  readonly detail: string;
-  constructor(kind: FailureKind, detail: string) {
-    super(detail);
-    this.kind = kind;
-    this.detail = detail;
-  }
 }
 
 /** What a refusal is shared by: a cluster context, or a Datadog site and key. */
