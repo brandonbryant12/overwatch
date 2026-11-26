@@ -68,7 +68,8 @@ Each is one key on the incident in focus, or a button on its row and in its head
 `u` to undo; anything that left the inbox can be found by search and put back from its page.
 
 - **Done** (`d`): "this is dealt with." It comes back if it happens again: "Back: happened again 3 times since you
-  marked it done." Occurrences already in flight (within one polling interval of Done) do not count.
+  marked it done." Occurrences already in flight (within one polling interval of Done) do not count. The count is
+  what the report determines; when a batch spans that interval and its middle is unknown, it says "at least once".
 - **Later** (`l`): "not now." Type until when: `2h`, `2d`, `tomorrow` or `monday` (9:00 your time), `worse` for
   until it gets worse, or nothing for until something changes (a new finding on it, or a deploy in its environment).
   Any Later also comes back if it gets worse: the severity rises, or the rate reaches twice what it was with at least

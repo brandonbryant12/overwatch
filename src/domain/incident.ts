@@ -246,8 +246,10 @@ function comesBack(way: Way, s: Open, cmd: { severity: Severity; at: number; cou
     // Anything up to one polling interval after Done was already in flight.
     const quietUntil = way.at + rule.graceMs;
     if (cmd.at <= quietUntil) return null;
-    const allAfter = (cmd.firstAt ?? cmd.at) > quietUntil;
-    return { cause: "again", reason: allAfter ? `Back: happened again ${times(cmd.count)} since you marked it done.` : "Back: happened again since you marked it done." };
+    // Say exactly what the report determines: it knows its first and last occurrence and how many there were.
+    const first = cmd.firstAt ?? cmd.at;
+    const after = first > quietUntil ? cmd.count : cmd.count <= 2 ? 1 : null;
+    return { cause: "again", reason: after !== null ? `Back: happened again ${times(after)} since you marked it done.` : "Back: happened again at least once since you marked it done." };
   }
   if (severityAbove(cmd.severity, way.severity)) {
     return way._tag === "Never"
