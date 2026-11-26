@@ -116,8 +116,10 @@ bin/overwatch restore --from ~/overwatch-backup.sqlite # with the service stoppe
 ```
 
 Restore checks the backup (its identity, version and integrity) and rebuilds every row inside the existing
-database in one transaction; anything wrong (a foreign file, a future version, an impossible value) is refused with
-exit 5 and the current data is left as it was.
+database in one transaction. Before it commits, the staged rows must satisfy every column constraint, every declared
+reference between tables (a row naming a job, run, finding, evidence or problem that is not there) and the sequence
+high-water mark (no row naming a seq the backup never issued). A copy that fails any of these is refused with exit 5
+and the current data is left as it was. Values that are possible but wrong cannot be detected.
 
 ## Troubleshooting
 
@@ -125,7 +127,6 @@ exit 5 and the current data is left as it was.
 | --- | --- |
 | `serve` or `status` exits 3, "in use by another process" | Another Overwatch (or SQLite program) owns the database. Stop it. The message names the running service's address if it answers. |
 | An environment is `signed_out` | Run the `fix` that `status` shows for the source (your cluster's login command and the `kubectl --context … get pods` check), then wait for the next probe; it resumes by itself. |
-| `paused: "disk"` | Do what `pausedFix` in `status` says: free disk space or move `dataDir`. Nothing is lost meanwhile; the checkpoint waits. |
+| `paused: "disk"` | Either less than 256 MiB is free next to the database, or the database holds more than 1 GiB that age cannot remove. Do what `pausedFix` in `status` says: free disk space or move `dataDir`. Nothing is written meanwhile (collection, failure records, page actions); the checkpoint waits and collection resumes by itself. |
 | An environment is `stale` | A reading has not succeeded for three polling intervals: the service is not running, a read hangs, or the laptop slept. |
-| `paused: "disk"` | Less than 256 MiB is free next to the database. Free space; collection resumes by itself. |
 | `trial` exits 3 | Start `serve` first: the model calls the service's tools. |

@@ -36,7 +36,8 @@ bin/overwatch demo   --config ~/.config/overwatch/config.json   # a seeded, isol
   probed; one cause per failure; "offline" only when several independent endpoints all fail.
 - **The page**: the environments strip, the inbox in four groups whose rows never move under you, Done, Later and
   Never with undo and a reason for everything that comes back, a finder, and one bar that asks about what is in
-  focus. Everything is on the keyboard. It keeps its own clock and says stale or down by itself.
+  focus. Moving, deciding, undoing, finding and asking are on the keyboard (a source is reached by a click or the
+  finder). It keeps its own clock, says stale or down by itself, and ages each environment's measurements too.
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
   cases before any automation is allowed for that model.

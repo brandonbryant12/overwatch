@@ -33,9 +33,21 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 - **One window type.** Every window of event time is a half-open `Span` (`src/collect.ts`): slices, overlap, the
   14-day floor and saturated intervals. Never compare an end with `<=`.
 - **Outside values go through `src/parse.ts`.** `num`, `count`, `time` return null for anything not clearly that
-  kind; null is "not measured" and must stay distinguishable from a measured value all the way to health.
-- **Space is checked before admission.** `Collector.room` checks the free-space floor and the database budget before
-  every commit, and after `Store.retain` has made room in the declared order (never removing cited evidence).
+  kind (finiteness is checked on the value, for every shape). A measurement is a `Sample`, measured or not, built
+  only by `sample()`; hysteresis, health and quiet streaks take that type.
+- **One interval per pass.** `Collector.interval` is the only place gauges and quiet streaks move, for a committed
+  pass and a failed one alike (a failure gives every gauge an unmeasured sample). An interval counts toward Quiet
+  only when it is new, ordinary and fully measured (`quietStep`).
+- **One identity per connection.** `endpoint()` includes every field in `IDENTITY` (context; site, API key and
+  application key); refusals are shared only by equal identities.
+- **One write path.** `Store.tx` runs `Store.guard` before every transaction (the collector installs the disk check),
+  so slices, failure records, deadlines, page actions and tool writes are admitted by the same rule; only maintenance
+  (`expire`, `retain`) bypasses it. Foreign keys are deferred to commit in every transaction.
+- **References are declared.** SQL `REFERENCES` where the database must enforce them (cited evidence: `citations`, kept
+  by a trigger on findings, RESTRICTs deleting it); every reference is also listed once in `REFERENCES`
+  (`src/store.ts`), which restore checks. A new table is covered by adding its line.
+- **Age, then pressure.** `Store.expire` removes by age on every pass; `Store.retain` adds old events under
+  pressure. Neither can remove a finding or its cited evidence.
   `Store.reclaim` frees at most `LIMITS.reclaimBytes` per pass for any page size and truncates the WAL. Never run a
   full `VACUUM` while serving: it copies the whole file and holds the only connection until done.
 - **Schema changes within version 1 are additive.** A new column has a default and an entry in `ADDED`
@@ -64,7 +76,10 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   keyboard map, Later's words, staleness) live in pure modules (`web/model.mjs`, `web/freshness.mjs`) tested by
   `test/page.test.ts`; `web/app.mjs` is the thin DOM around them.
 - A return is decided in the transaction that commits its cause, and only for causes with a later seq than the
-  action. A deadline is a wall time plus a stored delay, bounded on the monotonic clock (`passed` in `src/inbox.ts`).
+  action. Every disposition has one position, `decided_seq` (the action's, undo's or return's event seq, named
+  inside the event by `Writer.next()`); an action given `basisSeq` is refused unless it matches.
+- Freshness the page can compute: environments carry `readings` (when each was measured) and `freshForMs`, and the
+  page ages them against the service's clock as last stated (`serverNow`, `cellHealth`). A deadline is a wall time plus a stored delay, bounded on the monotonic clock (`passed` in `src/inbox.ts`).
 - Look at it: `test/real/screenshots.ts` renders the demo in dark, light, narrow, stale and down.
 
 ## Tests

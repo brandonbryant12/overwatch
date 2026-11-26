@@ -1,5 +1,13 @@
 # Overwatch Design Language
 
+> **Historical implementation paths.** This guide was written for an earlier build (Foldkit, `web/src/`, a build
+> script and `web/dist/`). None of those exist now. The visual guidance (tokens, states, type, spacing, motion, logo,
+> keyboard map) is current and is what the page uses; where this guide names a file or a framework, read the current
+> place instead: tokens in `web/tokens.css`, styles in `web/page.css`, page logic in `web/model.mjs` and
+> `web/freshness.mjs` (tested in `test/page.test.ts`), the DOM in `web/app.mjs`, the logo in `web/logo.svg`. The
+> keyboard map that holds today is in `docs/using.md`.
+
+
 Overwatch is one engineer's personal, all-day command center. It is not a marketing product or a multi-tenant SaaS dashboard. Every screen exists to answer two questions in seconds: **what needs my attention right now?** and **what happens when I prompt on what is in focus?**
 
 ## 1. Visual Direction: Observatory Control Deck
@@ -12,7 +20,7 @@ The visual identity draws from precision technical instruments and nocturnal con
 
 ## 2. Design Tokens (CSS Custom Properties)
 
-All tokens live in `:root` (Night Watch default) and `[data-theme="light"]` (Daylight Chart) in `web/src/style.css`. Every future page and static mock-up uses these exact variable names.
+All tokens live in `:root` (Night Watch default) and `[data-theme="light"]` (Daylight Chart) in `web/src/style.css` (historical; now `web/tokens.css`). Every future page and static mock-up uses these exact variable names.
 
 ### Surfaces & Borders
 
@@ -90,7 +98,7 @@ Committed vector assets (pure hand-authored SVG, zero raster images, zero embedd
 - Favicon (`16px-64px`): `web/src/favicon.svg` (copied to `web/dist/favicon.svg` by `scripts/build-web.ts`)
 - Standalone mark (`128px`): `docs/design/logo-mark.svg`
 - Full geometric lockup (`384x64`): `docs/design/logo-lockup.svg`
-- Inline Foldkit components: `logoMark` and `logoWordmark` in `web/src/icons.ts`
+- Inline Foldkit components (historical): `logoMark` and `logoWordmark` in `web/src/icons.ts`
 
 Usage rules:
 - Keep clear space of at least 25% of the mark's width around the octagon.
@@ -110,7 +118,7 @@ Usage rules:
 
 ## 7. Keyboard Map
 
-All shortcuts are wired declaratively through Foldkit's `Dom.streamFromKeyBindings` and suppressed automatically while typing in inputs (except `Escape`, `Mod+K`, and search palette navigation):
+(Historical wiring; the current map is in `docs/using.md`.) All shortcuts were wired declaratively through Foldkit's `Dom.streamFromKeyBindings` and suppressed automatically while typing in inputs (except `Escape`, `Mod+K`, and search palette navigation):
 
 | Key | Action |
 | --- | --- |

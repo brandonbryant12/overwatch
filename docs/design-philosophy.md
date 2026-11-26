@@ -12,8 +12,10 @@ from a check placed beside a mechanism, because a check can be forgotten, bypass
   out*: counts derived from lists, caps hidden in code, receipts kept apart, a replay crowding out a fresh record.
 - Every window of event time is one half-open interval type. *Rules out*: two slices both claiming a boundary record,
   an overlap reaching into time declared missing.
-- A value from outside is read by one tolerant reader that returns "not measured" as its own value. *Rules out*: a
-  missing value becoming a measured zero, false or epoch.
+- A value from outside is read by one tolerant reader that returns "not measured" as its own value, and a measurement
+  is one type, measured or not. *Rules out*: a missing or overflowing value becoming a measured zero, false or epoch.
+- A rule that must hold for every write lives where every write passes: the admission guard in `Store.tx`, the
+  references in the schema, the one interval function. *Rules out*: a new call site that forgets the rule.
 - Exactness travels with the total: an occurrence records its problem, so a loss found later marks that total a
   lower bound in the same transaction. *Rules out*: an exact total over a window with a known gap.
 - An approval is a fact about the model that earned it, and is keyed by it. *Rules out*: one model's trial
