@@ -98,6 +98,11 @@ export async function peers(world) {
   }
   async function model(s, msg) {
     const id = Object.keys(expected).find((k) => s.title?.includes(k) || msg.text?.includes(k))
+    // Real-work scripts consume the same OpenCode messages and call the service's real MCP.
+    if (p.workScript && !s.title?.startsWith("Overwatch trial ")) {
+      const call = await mcp(p.service, p.token)
+      return p.workScript({ s, msg, tool: (name, args) => call(s.id, name, args) })
+    }
     if (!id) return "doctor answered"
     await delay(50)
     const call = await mcp(p.service, p.token)
@@ -199,6 +204,12 @@ export async function peers(world) {
             },
           ],
         })
+      if (req.method === "GET" && path.startsWith("/session/")) {
+        const sid = path.slice("/session/".length)
+        if (!p.sessions.has(sid)) return send({ message: "unknown UI session" }, 404)
+        res.writeHead(200, { "content-type": "text/html" })
+        return res.end("<title>OpenCode session fixture</title><main>Session ready</main>")
+      }
       if (path === "/api/session/active")
         return send({
           data: Object.fromEntries(
@@ -207,7 +218,7 @@ export async function peers(world) {
         })
       if (path === "/api/session" && req.method === "POST") {
         const id = body.id ?? "ses_" + randomUUID().replaceAll("-", "")
-        if (!p.sessions.has(id)) p.sessions.set(id, { ...body, id, history: [], busy: false })
+        if (!p.sessions.has(id)) p.sessions.set(id, { ...body, id, url: p.url + "/session/" + id, history: [], busy: false })
         return send({ data: p.sessions.get(id) })
       }
       if (path === "/api/session") return send({ data: [...p.sessions.values()], cursor: { next: null } })

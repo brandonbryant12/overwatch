@@ -50,3 +50,14 @@ node --no-warnings --test --test-concurrency=2 accept/m2/*.test.mjs
 ```
 
 Use the shared heavy-command prefix on the iMac. M2 adds no packages. Server tests use the existing temporary rig. The pure module test imports the public page freshness function. Rendered tests start a separate temporary Chrome profile over a debugging pipe. They use the installed system Chrome or CHROME_BIN, and print a skip reason if neither exists. The clock fixture cuts the actual event stream and holds status open while Chrome advances its own timers. Two fixture tests can pass before there is a page. Product tests that first encounter a missing route or module fail there; their later assertions become reachable during implementation.
+
+## Milestone 2 assessment and milestone 3 acceptance
+
+The expanded M1 and M2 suites include the neighbouring cases from the independent page assessment. Run the same release commands above. For a single case use `node --no-warnings --test --test-name-pattern='N07' accept/m1/neighbours.test.mjs`, for example. N20 is the 65,536-byte page variant in storage-edges. The separate owner timing run drives system Chrome and prints elapsed time from keyboard input through visible completion for the demo and a 200-incident, six-environment service.
+
+```sh
+/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=1 accept/m2/owner-timing.mjs
+/Users/brandon/.local/bin/codex-heavy -- node --no-warnings --test --test-concurrency=2 accept/m3/*.test.mjs
+```
+
+M3 is specified ahead of the implementation. The fixtures use the executable, temporary OpenCode and Datadog peers, scripted independent readings through actual MCP calls, a disposable notification executable with an exit-code ledger and system Chrome with an isolated clipboard substitute. Product cases may stop at a missing interface on M2. The fake notifier control can run today. A green control verifies the fixture alone. See the revision 4 interface contract and `docs/plans/m2-independent-assessment.md` for scope, measured results and outstanding owner checks.
