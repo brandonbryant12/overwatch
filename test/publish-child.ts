@@ -1,14 +1,20 @@
 /** One keypress in its own process, for the crash probes in publish.test.ts: the fake host may kill it mid-step. */
+import { Effect } from "effect";
 import { loadConfig } from "../src/config.ts";
-import { Store } from "../src/store.ts";
-import { Tools } from "../src/tools.ts";
 import { Fixes } from "../src/fixes.ts";
 import { keyed } from "../src/inbox.ts";
+import { run, withConfig, withStore } from "./effect.ts";
 
 const [file, id] = process.argv.slice(2) as [string, string];
-const config = loadConfig(file), store = Store.own(config.dataDir);
 process.env.OW_PUBLISHER_PID = String(process.pid);
-const fixes = new Fixes(store, new Tools(store), config, config.dataDir, () => undefined);
-const basis = store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = 'inc_p'")!.decided_seq;
-console.log(JSON.stringify(await keyed(store, "rk_c41d00000000000000000001", fixes.publication(id, basis))));
-store.close();
+const config = await run(loadConfig(file));
+const result = await run(
+  withStore(config.dataDir, (store) =>
+    Effect.gen(function* () {
+      const fixes = yield* Fixes;
+      const basis = (yield* store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = 'inc_p'"))!.decided_seq;
+      return yield* keyed("rk_c41d00000000000000000001", yield* fixes.publication(id, basis));
+    }).pipe(Effect.provide(Fixes.layer), withConfig(config)),
+  ),
+);
+console.log(JSON.stringify(result));

@@ -5,9 +5,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkKubectl, parseEvents, parsePods, parseRevision, parseTop } from "../src/kube.ts";
-import { Store, json, type Clean } from "../src/store.ts";
+import { Effect } from "effect";
+import { json, type Clean } from "../src/store.ts";
 import { Tools } from "../src/tools.ts";
 import { clock } from "../src/clock.ts";
+import { run, withStore } from "./effect.ts";
 
 test("kubectl runs only the listed verbs, resources, flags and value shapes", () => {
   assert.doesNotThrow(() => checkKubectl("get", ["pods", "-l", "app=shop", "-o", "json"]));
@@ -49,28 +51,37 @@ test("an event series counts by its cumulative series count; an event without a 
 });
 
 test("a filing cites only handles delivered to its own attempt, and one valid filing closes the attempt", async () => {
-  const store = Store.own(scratch("ow-tools-"));
-  const tools = new Tools(store);
-  const code = { expected: null, read: null, deployed: false };
-  for (const [run, session] of [["run_aaaaaaaa", "ses_aaaaaaaa"], ["run_bbbbbbbb", "ses_bbbbbbbb"]] as const) {
-    store.tx((w) => {
-      w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq) VALUES (?, 'trial', 'x', 'x', 'running', 1)", `job_${run}` as Clean);
-      w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms) VALUES (?, ?, 1, ?, 'active', 0, ?, 0)", run as Clean, `job_${run}` as Clean, session as Clean, json(code));
-    });
-    tools.contexts.set(run, { telemetry: { pods: [{ at: 0, text: "ERROR payments timeout" }] }, repo: null, deadline: clock.mono() + 300_000 });
-  }
-  const a = (await tools.call("ses_aaaaaaaa", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };
-  const b = (await tools.call("ses_bbbbbbbb", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };
-  const filing = (handles: string[], extra: Record<string, unknown> = {}) => ({
-    verdict: "real", cause: "c", claims: [{ statement: "s", evidence: handles, ...extra }], ruled_out: [], not_checked: [], next_check: "n", impact: "i", affected: [], since: null, status: "s",
-  });
-  await assert.rejects(tools.call("ses_aaaaaaaa", "ow_finding", filing([b.pieces[0]!.handle])), /not delivered/);
-  await assert.rejects(tools.call("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle, b.pieces[0]!.handle])), /not delivered/);
-  await assert.rejects(tools.call("ses_aaaaaaaa", "ow_finding", filing([])), /at least one/);
-  await assert.rejects(tools.call("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle], { quote: "made up" })), /statement and evidence/);
-  await assert.rejects(tools.call("ses_unknown", "ow_finding", filing([a.pieces[0]!.handle])), /no active/);
-  const filed = (await tools.call("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle]))) as { claims: Array<{ pieces: unknown[] }> };
-  assert.deepEqual(filed.claims[0]!.pieces, [a.pieces[0]]);
-  await assert.rejects(tools.call("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle])), /no active/);
-  store.close();
+  await run(
+    withStore(scratch("ow-tools-"), (store) =>
+      Effect.gen(function* () {
+        const tools = yield* Tools;
+        const code = { expected: null, read: null, deployed: false };
+        for (const [runId, session] of [["run_aaaaaaaa", "ses_aaaaaaaa"], ["run_bbbbbbbb", "ses_bbbbbbbb"]] as const) {
+          yield* store.tx((w) =>
+            Effect.gen(function* () {
+              yield* w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq) VALUES (?, 'trial', 'x', 'x', 'running', 1)", `job_${runId}` as Clean);
+              yield* w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms) VALUES (?, ?, 1, ?, 'active', 0, ?, 0)", runId as Clean, `job_${runId}` as Clean, session as Clean, json(code));
+            }),
+          );
+          tools.contexts.set(runId, { telemetry: { pods: [{ at: 0, text: "ERROR payments timeout" }] }, repo: null, deadline: clock.mono() + 300_000 });
+        }
+        const call = (session: string, name: string, args: unknown) => tools.call(session, name, args);
+        const refused = (session: string, name: string, args: unknown, why: RegExp) =>
+          Effect.flip(call(session, name, args)).pipe(Effect.map((e) => assert.match(e.message, why)));
+        const a = (yield* call("ses_aaaaaaaa", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };
+        const b = (yield* call("ses_bbbbbbbb", "ow_telemetry", { source: "pods" })) as { pieces: Array<{ handle: string }> };
+        const filing = (handles: string[], extra: Record<string, unknown> = {}) => ({
+          verdict: "real", cause: "c", claims: [{ statement: "s", evidence: handles, ...extra }], ruled_out: [], not_checked: [], next_check: "n", impact: "i", affected: [], since: null, status: "s",
+        });
+        yield* refused("ses_aaaaaaaa", "ow_finding", filing([b.pieces[0]!.handle]), /not delivered/);
+        yield* refused("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle, b.pieces[0]!.handle]), /not delivered/);
+        yield* refused("ses_aaaaaaaa", "ow_finding", filing([]), /at least one/);
+        yield* refused("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle], { quote: "made up" }), /statement and evidence/);
+        yield* refused("ses_unknown", "ow_finding", filing([a.pieces[0]!.handle]), /no active/);
+        const filed = (yield* call("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle]))) as { claims: Array<{ pieces: unknown[] }> };
+        assert.deepEqual(filed.claims[0]!.pieces, [a.pieces[0]]);
+        yield* refused("ses_aaaaaaaa", "ow_finding", filing([a.pieces[0]!.handle]), /no active/);
+      }).pipe(Effect.provide(Tools.layer)),
+    ),
+  );
 });

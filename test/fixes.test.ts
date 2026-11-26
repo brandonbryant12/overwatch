@@ -11,13 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { Effect } from "effect";
 import { derive, gitAt, verify } from "../src/fixes.ts";
 import { forecast } from "../src/outlook.ts";
 import { parseConfig, type Source } from "../src/config.ts";
-import { Store, type Clean } from "../src/store.ts";
+import { type Clean } from "../src/store.ts";
 import { Tools, Refusal, type Options } from "../src/tools.ts";
 import { clock } from "../src/clock.ts";
 import { time } from "../src/parse.ts";
+import { run, withStore } from "./effect.ts";
 
 /** A bare repository with one file at `previous`, then `base`, and the two commits' IDs. */
 function repo(files: Record<string, string>, changed: Record<string, string | null>, executable: string[] = []) {
@@ -47,11 +49,11 @@ test("class: restoring a setting changes exactly that key to its previous value,
       const after = { ...before, [key]: next };
       const r = repo({ "settings.json": JSON.stringify(before, null, indent) + "\n", "verify.cjs": "1" }, { "settings.json": JSON.stringify(after, null, indent) + "\n" });
       try {
-        const c = await derive(r.git, { id: "fx_p", previous: r.previous, base: r.base }, policy, { kind: "setting", path: "settings.json", key });
-        const text = await r.git.out(["show", `${c.commit}:settings.json`], "show");
+        const c = await run(derive(r.git, { id: "fx_p", previous: r.previous, base: r.base }, policy, { kind: "setting", path: "settings.json", key }));
+        const text = await run(r.git.out(["show", `${c.commit}:settings.json`], "show"));
         assert.equal(text, JSON.stringify(before, null, indent) + "\n");
         assert.deepEqual(c.paths, ["settings.json"]);
-        assert.equal((await r.git.out(["rev-parse", `${c.commit}^1`], "parent")).trim(), r.base); // on the base tip, one commit
+        assert.equal((await run(r.git.out(["rev-parse", `${c.commit}^1`], "parent"))).trim(), r.base); // on the base tip, one commit
       } finally {
         r.done();
       }
@@ -76,7 +78,7 @@ test("class: a candidate that touches anything outside the policy, adds, deletes
       try {
         // Revert the whole change: any part outside the policy refuses the whole candidate.
         const p = { ...policy, paths: kind === "verify-input" ? ["settings.json", "verify.cjs"] : policy.paths, verify: [["node", "verify.cjs"]] };
-        await assert.rejects(derive(r.git, { id: "fx_p", previous: r.previous, base: r.base }, p, { kind: "revert", commit: r.base }));
+        await assert.rejects(run(derive(r.git, { id: "fx_p", previous: r.previous, base: r.base }, p, { kind: "revert", commit: r.base })));
       } finally {
         r.done();
       }
@@ -86,50 +88,63 @@ test("class: a candidate that touches anything outside the policy, adds, deletes
 });
 
 test("class: the fixer's filing is a member of the options code computed, or it is refused and ends the run", async () => {
-  const store = Store.own(scratch("ow-proposal-"));
   clock.set(Date.UTC(2026, 10, 1), 1e6);
   const options: Options = { commits: [{ sha: "a".repeat(40), subject: "x" }, { sha: "b".repeat(40), subject: "y" }], keys: [{ path: "settings.json", key: "timeout" }] };
-  const tools = new Tools(store);
   let n = 0;
-  await fc.assert(
-    fc.asyncProperty(fc.oneof(
-      fc.record({ kind: fc.constantFrom("revert", "setting", "abstain", "patch"), commit: fc.constantFrom("a".repeat(40), "c".repeat(40)), path: fc.constantFrom("settings.json", "other.json"), key: fc.constantFrom("timeout", "retries"), patch: fc.string() }, { requiredKeys: ["kind"] }),
-      fc.dictionary(fc.string({ maxLength: 6 }), fc.jsonValue({ maxDepth: 1 })),
-    ), (input) => {
-      const run = `run_${++n}`, session = `ses_${n}`;
-      store.tx((w) => {
-        const seq = w.event("job", null, {});
-        w.run("INSERT OR IGNORE INTO jobs (id, kind, subject, title, state, created_seq) VALUES ('job_p', 'trial', 'p', 'p', 'running', ?)", seq);
-        w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role) VALUES (?, 'job_p', ?, ?, 'active', 0, '{}', 0, 'fixer')", run as Clean, n, session as Clean);
-      });
-      tools.contexts.set(run, { telemetry: {}, repo: null, deadline: clock.mono() + 60_000, role: "fixer", options });
-      const valid = (input.kind === "abstain" && Object.keys(input).length === 1)
-        || (input.kind === "revert" && Object.keys(input).every((k) => k === "kind" || k === "commit") && options.commits.some((c) => c.sha === (input.commit ?? null)))
-        || (input.kind === "setting" && Object.keys(input).every((k) => ["kind", "path", "key"].includes(k)) && options.keys.some((k) => k.path === input.path && k.key === input.key));
-      return tools.call(session, "ow_proposal", input).then(
-        () => assert.ok(valid, JSON.stringify(input)),
-        (e) => { assert.ok(e instanceof Refusal); assert.ok(!valid || /already/.test(e.message), JSON.stringify(input)); },
-      ).then(() => {
-        const row = store.get<{ refused: string | null }>("SELECT refused FROM proposals WHERE run_id = ?", run);
-        assert.ok(row, "every filing, accepted or refused, is stored and ends the run");
-        assert.equal(row.refused === null, valid);
-        assert.equal(store.get<{ state: string }>("SELECT state FROM runs WHERE id = ?", run)!.state, "terminal");
-      });
-    }),
-    { numRuns: 60 },
+  await run(
+    withStore(scratch("ow-proposal-"), (store) =>
+      Effect.gen(function* () {
+        const tools = yield* Tools;
+        yield* Effect.promise(() =>
+          fc.assert(
+            fc.asyncProperty(fc.oneof(
+              fc.record({ kind: fc.constantFrom("revert", "setting", "abstain", "patch"), commit: fc.constantFrom("a".repeat(40), "c".repeat(40)), path: fc.constantFrom("settings.json", "other.json"), key: fc.constantFrom("timeout", "retries"), patch: fc.string() }, { requiredKeys: ["kind"] }),
+              fc.dictionary(fc.string({ maxLength: 6 }), fc.jsonValue({ maxDepth: 1 })),
+            ), (input) =>
+              Effect.runPromise(
+                Effect.gen(function* () {
+                  const runId = `run_${++n}`, session = `ses_${n}`;
+                  yield* store.tx((w) =>
+                    Effect.gen(function* () {
+                      const seq = yield* w.event("job", null, {});
+                      yield* w.run("INSERT OR IGNORE INTO jobs (id, kind, subject, title, state, created_seq) VALUES ('job_p', 'trial', 'p', 'p', 'running', ?)", seq);
+                      yield* w.run("INSERT INTO runs (id, job_id, attempt, session_id, state, calls, code, started_ms, role) VALUES (?, 'job_p', ?, ?, 'active', 0, '{}', 0, 'fixer')", runId as Clean, n, session as Clean);
+                    }),
+                  );
+                  tools.contexts.set(runId, { telemetry: {}, repo: null, deadline: clock.mono() + 60_000, role: "fixer", options });
+                  const valid = (input.kind === "abstain" && Object.keys(input).length === 1)
+                    || (input.kind === "revert" && Object.keys(input).every((k) => k === "kind" || k === "commit") && options.commits.some((c) => c.sha === (input.commit ?? null)))
+                    || (input.kind === "setting" && Object.keys(input).every((k) => ["kind", "path", "key"].includes(k)) && options.keys.some((k) => k.path === input.path && k.key === input.key));
+                  const outcome = yield* Effect.result(tools.call(session, "ow_proposal", input));
+                  if (outcome._tag === "Success") assert.ok(valid, JSON.stringify(input));
+                  else {
+                    assert.ok(outcome.failure instanceof Refusal);
+                    assert.ok(!valid || /already/.test(outcome.failure.message), JSON.stringify(input));
+                  }
+                  const row = yield* store.get<{ refused: string | null }>("SELECT refused FROM proposals WHERE run_id = ?", runId);
+                  assert.ok(row, "every filing, accepted or refused, is stored and ends the run");
+                  assert.equal(row.refused === null, valid);
+                  assert.equal((yield* store.get<{ state: string }>("SELECT state FROM runs WHERE id = ?", runId))!.state, "terminal");
+                }),
+              ),
+            ),
+            { numRuns: 60 },
+          ),
+        );
+      }).pipe(Effect.provide(Tools.layer)),
+    ),
   );
-  store.close();
 });
 
 test("class: verification runs without network and cannot write outside its checkout", { skip: process.platform !== "darwin" }, async () => {
   const outside = join(tmpdir(), `ow-escape-${process.pid}`);
   const r = repo({ "settings.json": "{}\n" }, { "settings.json": '{"a":1}\n' });
   try {
-    const write = await verify(r.bare, r.base, { ...policy, verify: [["node", "-e", `require('fs').writeFileSync(${JSON.stringify(outside)}, 'x')`]] });
+    const write = await run(verify(r.bare, r.base, { ...policy, verify: [["node", "-e", `require('fs').writeFileSync(${JSON.stringify(outside)}, 'x')`]] }));
     assert.notEqual(write[0]!.exitCode, 0, "wrote outside the checkout");
-    const net = await verify(r.bare, r.base, { ...policy, verify: [["node", "-e", "require('net').connect(80, '1.1.1.1').on('connect', () => process.exit(0)).on('error', () => process.exit(3))"]] });
+    const net = await run(verify(r.bare, r.base, { ...policy, verify: [["node", "-e", "require('net').connect(80, '1.1.1.1').on('connect', () => process.exit(0)).on('error', () => process.exit(3))"]] }));
     assert.notEqual(net[0]!.exitCode, 0, "reached the network");
-    const inside = await verify(r.bare, r.base, { ...policy, verify: [["node", "-e", "require('fs').writeFileSync(require('os').tmpdir() + '/ok', 'x')"]] });
+    const inside = await run(verify(r.bare, r.base, { ...policy, verify: [["node", "-e", "require('fs').writeFileSync(require('os').tmpdir() + '/ok', 'x')"]] }));
     assert.equal(inside[0]!.exitCode, 0, inside[0]!.summary);
   } finally {
     r.done();

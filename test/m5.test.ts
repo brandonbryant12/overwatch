@@ -11,27 +11,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { Store } from "../src/store.ts";
+import { Effect } from "effect";
 import { sweep } from "../src/exec.ts";
 import { forecast } from "../src/outlook.ts";
 import { parseConfig, type Source } from "../src/config.ts";
 import { time } from "../src/parse.ts";
+import { run, withStore } from "./effect.ts";
 
-test("class: a permit is spent once, and only on a call that contains every argument it was minted for", () => {
-  const store = Store.own(scratch("ow-permit-"));
+test("class: a permit is spent once, and only on a call that contains every argument it was minted for", async () => {
   const token = fc.constantFrom("pr", "create", "--repo", "acme/shop", "acme/other", "ow/fix/a", "ow/fix/b", "a".repeat(40), "b".repeat(40), "main");
-  fc.assert(
-    fc.property(fc.uniqueArray(token, { maxLength: 4 }), fc.array(token, { maxLength: 6 }), fc.constantFrom("host", "push"), fc.constantFrom("host", "push"), (bind, args, minted, used) => {
-      const permit = store.permit(minted, "fx_p", {}, bind);
-      const ok = minted === used && bind.every((b) => args.includes(b));
-      if (ok) {
-        permit.spend(used, args);
-        assert.throws(() => permit.spend(used, args), /committed intent/); // once
-      } else assert.throws(() => permit.spend(used, args));
-    }),
-    { numRuns: 200 },
+  await run(
+    withStore(scratch("ow-permit-"), (store) =>
+      Effect.promise(() =>
+        fc.assert(
+          fc.asyncProperty(fc.uniqueArray(token, { maxLength: 4 }), fc.array(token, { maxLength: 6 }), fc.constantFrom("host", "push"), fc.constantFrom("host", "push"), async (bind, args, minted, used) => {
+            const permit = await Effect.runPromise(store.permit(minted, "fx_p", {}, bind));
+            const ok = minted === used && bind.every((b) => args.includes(b));
+            if (ok) {
+              permit.spend(used, args);
+              assert.throws(() => permit.spend(used, args), /committed intent/); // once
+            } else assert.throws(() => permit.spend(used, args));
+          }),
+          { numRuns: 200 },
+        ),
+      ),
+    ),
   );
-  store.close();
 });
 
 test("class: a forecast needs the provider's unit to be the limit's; otherwise no time, with the reason", () => {
@@ -53,15 +58,15 @@ test("class: a forecast needs the provider's unit to be the limit's; otherwise n
   );
 });
 
-test("class: the start-up sweep removes exactly the scratch of processes that no longer run", () => {
+test("class: the start-up sweep removes exactly the scratch of processes that no longer run", async () => {
   const dead = spawnSync(process.execPath, ["-e", "0"]).pid!;
   const prefixes = ["overwatch-demo", "overwatch-trial", "ow-verify", "ow-fix", "ow-pr", "ow-calibration", "ow-calibration-work", "ow-other", "verify"];
   let n = 0;
-  fc.assert(
-    fc.property(fc.array(fc.tuple(fc.constantFrom(...prefixes), fc.constantFrom(dead, process.pid, 1)), { minLength: 1, maxLength: 6 }), (dirs) => {
+  await fc.assert(
+    fc.asyncProperty(fc.array(fc.tuple(fc.constantFrom(...prefixes), fc.constantFrom(dead, process.pid, 1)), { minLength: 1, maxLength: 6 }), async (dirs) => {
       const names = dirs.map(([p, pid]) => `${p}-${pid}-${++n}`);
       for (const name of names) mkdirSync(join(tmpdir(), name));
-      sweep();
+      await run(sweep);
       const left = new Set(readdirSync(tmpdir()));
       dirs.forEach(([p, pid], i) => {
         const orphan = pid === dead && !["ow-other", "verify"].includes(p);
