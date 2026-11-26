@@ -180,6 +180,7 @@ test(
     await finished(x, q.jobId)
     const b = await browser(t, x)
     await b.visit(x.url + "/")
+    await b.wait("document.querySelector('[data-connection=live]')")
     await b.key("/")
     await b.type("checkout")
     await b.wait("!!document.querySelector('[data-result-id]')")
@@ -219,14 +220,16 @@ test("R13 peer outage denies ordinary owner reads including a formerly valid ses
 test("R14 a stopped peer after responder dispatch receives the original question once after restart", async (t) => {
   const x = await service(t),
     held = Promise.withResolvers()
+  let connected = false
   x.p.workScript = async () => {
+    connected = true // the peer has finished its MCP connection for this delivery
     await held.promise
     return "Recorded answer"
   }
   const q = await send(x, "ask", { subject: x.subject, text: "Question receipt", mode: "new" })
   await until(
     x,
-    () => x.p.deliveries.some((d) => d.text.includes("Question receipt")),
+    () => connected && x.p.deliveries.some((d) => d.text.includes("Question receipt")),
     "first delivery missing",
   )
   try {
