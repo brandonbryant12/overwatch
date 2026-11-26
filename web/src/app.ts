@@ -120,6 +120,8 @@ export const Message = defineMessageUnion({
   ClickedRestore: { incidentId: IncidentId },
   /** Shows the rows held behind the "new" lines, and sorts. */
   PressedShowNew: {},
+  /** Another tab stored seen marks: they are merged in, so every tab agrees on what is new. */
+  ReceivedSeen: { seen: Schema.Record(Schema.String, Schema.Number) },
   ToggledGroup: { group: Schema.String },
   ToggledMuted: {},
   ChangedEnvFilter: { filter: EnvFilter },
@@ -257,14 +259,36 @@ const CopyText = Command.define("CopyText", {
     copyToClipboard(text, target, (globalThis as unknown as { navigator?: { clipboard?: Clipboard } }).navigator?.clipboard),
 });
 
+/**
+ * Merges seen marks: for each incident the latest mark wins. Every tab in a browser shares one store, so a tab adds
+ * what it learned to what is stored rather than writing its own copy over another tab's. Bounded to the newest 2,000.
+ */
+export function mergeSeen(stored: Record<string, number>, learned: Record<string, number>): Record<string, number> {
+  const merged: Record<string, number> = { ...stored };
+  for (const [id, at] of Object.entries(learned)) if (!(merged[id]! >= at)) merged[id] = at;
+  return Object.fromEntries(Object.entries(merged).sort((a, b) => b[1] - a[1]).slice(0, 2_000));
+}
+
+const readStoredSeen = (): Record<string, number> => {
+  try {
+    const parsed = JSON.parse((globalThis as unknown as { localStorage?: { getItem(k: string): string | null } }).localStorage?.getItem("overwatch.seen") ?? "{}") as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, number] => typeof entry[1] === "number"))
+      : {};
+  } catch {
+    return {};
+  }
+};
+
 /** Keeps what the owner has looked at in this browser: a convenience, so the page works without it. */
 const SaveSeen = Command.define("SaveSeen", {
-  args: { seen: Schema.String },
+  args: { id: Schema.String, at: Schema.Number },
   messages: [Message.CompletedDomEffect],
-  execute: ({ seen }) =>
+  execute: ({ id, at }) =>
     Effect.sync(() => {
       try {
-        (globalThis as unknown as { localStorage?: { setItem(k: string, v: string): void } }).localStorage?.setItem("overwatch.seen", seen);
+        const merged = mergeSeen(readStoredSeen(), { [id]: at });
+        (globalThis as unknown as { localStorage?: { setItem(k: string, v: string): void } }).localStorage?.setItem("overwatch.seen", JSON.stringify(merged));
       } catch {
         // Private windows and blocked storage: the page still works, it only forgets.
       }
@@ -612,7 +636,7 @@ function focusIncident(model: Model, incidentId: IncidentId): Return {
       mutedOpen: false,
       seen,
     },
-    commands: [ScrollIntoView({ selector: `[data-incident="${incidentId}"]` }), ...(seen !== model.seen ? [SaveSeen({ seen: JSON.stringify(seen) })] : [])],
+    commands: [ScrollIntoView({ selector: `[data-incident="${incidentId}"]` }), ...(item && seen !== model.seen ? [SaveSeen({ id: incidentId, at: item.changedAt })] : [])],
   };
 }
 
@@ -725,6 +749,7 @@ export const update = (model: Model, message: Message): Return =>
     },
     ClickedRestore: ({ incidentId }) => restore(model, incidentId),
     PressedShowNew: () => ({ model: { ...model, layout: layoutOf(model) } }),
+    ReceivedSeen: ({ seen }) => ({ model: { ...model, seen: mergeSeen(model.seen, seen) } }),
     ToggledGroup: ({ group }) => ({ model: { ...model, expanded: { ...model.expanded, [group]: !model.expanded[group] } } }),
     ToggledMuted: () => ({ model: { ...model, mutedOpen: !model.mutedOpen, searchOpen: false, statusOpen: false, shortcutsOpen: false } }),
     ChangedEnvFilter: ({ filter }) => ({ model: { ...model, envFilter: filter } }),
@@ -943,14 +968,14 @@ export const subscriptions = Subscription.make<Model, Message, Services>()((entr
     onDefect: (): Message => Message.FailedRead({ reason: "the connection to the service failed" }),
   }),
   page: Client.IncidentPage.watch({
-    key: (model: Model) => (model.focus ?? "none") as IncidentId,
+    key: (model: Model) => model.focus ?? IncidentId.make("inc_none"),
     isEnabled: (model) => model.focus !== null,
     toMessage: ({ state }): Message => Message.ReceivedPage({ page: Option.getOrNull(state) }),
     onFailure: (error): Message => Message.FailedRead({ reason: String((error as { _tag?: string })._tag ?? error) }),
     onDefect: (): Message => Message.FailedRead({ reason: "the connection to the service failed" }),
   }),
   thread: Client.ThreadPage.watch({
-    key: (model: Model) => (model.focus ? threadIdOf(model.focus) : ThreadId.make("none")),
+    key: (model: Model) => (model.focus ? threadIdOf(model.focus) : ThreadId.make("thr_none")),
     isEnabled: (model) => model.focus !== null,
     toMessage: ({ state }): Message => Message.ReceivedThread({ thread: Option.getOrNull(state) }),
     onFailure: (error): Message => Message.FailedRead({ reason: String((error as { _tag?: string })._tag ?? error) }),
@@ -971,6 +996,26 @@ export const subscriptions = Subscription.make<Model, Message, Services>()((entr
             return listener;
           }),
           (listener) => Effect.sync(() => doc.removeEventListener("visibilitychange", listener)),
+        ),
+      );
+    })(),
+  ),
+  otherTabs: Subscription.persistentEntry(
+    (() => {
+      const win = (globalThis as unknown as { addEventListener?: (t: string, f: (e: { key: string | null }) => void) => void; removeEventListener?: (t: string, f: (e: { key: string | null }) => void) => void }).addEventListener
+        ? (globalThis as unknown as { addEventListener: (t: string, f: (e: { key: string | null }) => void) => void; removeEventListener: (t: string, f: (e: { key: string | null }) => void) => void })
+        : undefined;
+      if (!win || !(globalThis as { document?: unknown }).document) return Stream.empty;
+      return Stream.callback<Message>((queue) =>
+        Effect.acquireRelease(
+          Effect.sync(() => {
+            const listener = (e: { key: string | null }) => {
+              if (e.key === "overwatch.seen") Queue.offerUnsafe(queue, Message.ReceivedSeen({ seen: readStoredSeen() }));
+            };
+            win.addEventListener("storage", listener);
+            return listener;
+          }),
+          (listener) => Effect.sync(() => win.removeEventListener("storage", listener)),
         ),
       );
     })(),
