@@ -43,10 +43,10 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 - **Agents**: investigations by independent readings and a challenger, adjudicated by code; answers to your
   questions where you asked them; "Was this right?" corrections that reach the next investigation; briefs to copy;
   local notifications; and owner tools plus a skill so any OpenCode session of yours can read and act on the inbox.
-- **Fixes**: for an app that opts in, a confirmed problem that began after one deployment can get one draft pull
-  request that reverts one commit of that deployment or restores one setting. A model only selects; code derives
-  the change from Git, checks it, verifies it in isolation (macOS) and opens a draft. It is followed to a release
-  and three quiet intervals; nothing is ever merged by Overwatch.
+- **Fixes**: for an app that opts in, a confirmed problem that began after one deployment gets a verified candidate
+  that reverts one commit of that deployment or restores one setting. A model only selects; code derives the change
+  from Git, checks it and verifies it in isolation (macOS). You see the diff and the verify result; a draft pull
+  request is opened only when you press `Shift-P`. Nothing is ever merged by Overwatch.
 - **Looking ahead**: time left on a capacity metric, shown only when six consistent readings support it; and a
   staging release compared with unchanged production, where a new staging-only problem becomes an inbox item.
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`, `install`, `uninstall`, `restart`.

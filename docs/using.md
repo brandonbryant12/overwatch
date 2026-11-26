@@ -58,7 +58,8 @@ paused for disk space* shows `pausedFix`; an empty inbox says *Nothing needs you
 | `i` | Investigate the problem in focus: independent readings, then a challenger if most say real |
 | `o` | Open in OpenCode: an ordinary session of yours with the focus already named in it |
 | `y` | Was this right? A line for the app's playbook, read by later investigations |
-| `f` | Ask for a fix proposal on the latest investigation (apps that opted in); the answer, a draft or the rule that stops it, appears on the item |
+| `f` | Ask for a fix proposal on the latest investigation (apps that opted in); the verified candidate or the rule that stops it appears on the item |
+| `Shift-P` | Open the verified candidate's draft pull request (it says first what it will push and where) |
 | `b` | Brief: what changed, for you or the team, to edit and copy |
 | `t` | Dark or light |
 | `?` | This list |
@@ -306,8 +307,9 @@ only when asked.
 
 ## Fix proposals
 
-For an app with `fixes` set (see [customizing.md](customizing.md)), a problem can lead to one draft pull request.
-Nothing merges, and no change is written by a model.
+For an app with `fixes` set (see [customizing.md](customizing.md)), Overwatch finds, derives and verifies a fix by
+itself, and shows it to you. A draft pull request is opened only when you press `Shift-P` on that item. Nothing
+merges, and no change is written by a model.
 
 **When.** All of these must hold. The page shows the first one that does not:
 
@@ -324,26 +326,24 @@ Overwatch then tries once by itself for each investigation, and `f` asks for the
 **What.** A fixer session is offered a short list that code computed: the commits of that deployment to revert, and
 the JSON settings in the allowed files whose value differs from the previous deployment. It selects one, or abstains.
 Overwatch builds the change from Git objects on the current tip of the base branch (the base does not have to be the
-deployed commit), checks the whole tree, and runs the app's `verify` commands in a fresh checkout with no network. If
-the revert no longer applies, or the base moves before publication, the candidate is void and says so; `f` asks
-again. A verified change is pushed to `ow/fix/<attempt>` and opened as a draft. The item shows the diff, why it was
-eligible, what verify ran and its result, and the draft's number and state.
+deployed commit), checks the whole tree, and runs the app's `verify` commands in a fresh checkout with no network.
+The result is a **verified candidate** on the item: the diff, why it was eligible, each verify command with its exit
+and what it printed, and one button, *Open draft pull request* (`Shift-P`), with what it will do on the host: "pushes
+branch `ow/fix/<attempt>` and opens a draft pull request against `main` in `<repository>`". A candidate that did not
+verify offers no such button and says which rule stopped it. Nothing has left your laptop yet.
 
-**Publishing, step by step.** Overwatch asks the host whether the branch is protected, pushes the verified commit,
-then looks for its draft and creates it if there is none, and reads each step back: the branch must hold exactly the
-verified commit, and the draft must name this attempt, its base and be a draft. Before each step it checks again that
-you have not declined or put the problem away, that both trials still stand, that the deployment and the base are the
-ones the change was made for, and (before the push) that protection is known to allow it. A step whose answer is
-missing or not exact is shown as such, with the reason and a few retries; after them the attempt is *unresolved* and
-`f` tries again. Every state on the item says what it waits for next.
+**Pressing Shift-P.** While you wait, in order, each step recorded before it runs and checked against the host first:
+the base branch must still be at the commit the candidate was derived on (if it moved, nothing is pushed and `f`
+derives again); branch protection for `ow/fix/<attempt>` is read, and anything but a clear "not protected" stops
+before the push; the verified commit is pushed, never forced, and read back; the draft is looked up and, if there is
+none, created against the repository resolved from your remote, then read back (repository, head commit, base, marker,
+draft). The item then shows the link. If a step fails or cannot be confirmed, it stops there and says what happened
+and what now exists on the host (the branch, a draft, or nothing). Press `Shift-P` again: it checks the host and
+continues, and never makes a second branch or a second pull request. Not pressing it, or putting the item away, is
+how you decline.
 
-**Following it.** Overwatch reads the draft's state at most once a minute. Closed without merging: the problem stays
-open and this finding is not proposed again. Merged: it waits for a deployment in the same environment that contains
-the merge, then for three consecutive fresh, quiet, fully measured intervals (a failed or catch-up interval starts the
-count again); then the attempt says *ready to close*, with that history, and you close the item with Done like any
-other. Nothing closes by itself. If the deployment is replaced by one without the fix, or the problem comes back, it
-goes back to waiting and says why. If you decided first (Done, Later, Never), your decision stands. You can decline an attempt at any time; if something already exists on the host (the
-branch, or the draft), the item says exactly what and how to remove it there.
+**After the link.** Overwatch is done with the pull request. Whether the fix worked shows on the problem itself
+(still occurring, or quiet), and you close it with Done as always. The pull request's own state is one click away.
 
 **The description** stands on its own for a reviewer: the problem, the finding with its votes and the challenger's
 outcome, the evidence quoted with its origin, what was verified and how, and that a model selected the change and

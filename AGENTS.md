@@ -98,13 +98,15 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   path or commit is refused and ends the attempt. `derive()` (`src/fixes.ts`) builds the commit from Git objects on the
   base tip in a private mirror and `check()` judges the whole tree (allowlisted existing regular files, same mode,
   not a verify input or a build, CI, lock or credential file, at most 3 files and 80 lines, 16 KiB).
-- **Publication is gated effects.** Every attempt transition is compare-and-set on its `version`, so the owner's
-  decline (or any newer decision) wins over a worker. Each host step and the push get their permit only from
-  `gate()`, which checks right then: the owner has not stopped or decided, both trial gates stand, the deployment is
-  the one the finding is about, the base tip is the candidate's, and protection is positively known to allow a push.
-  After each effect the host is read back for the exact object (branch head, base, marker, draft); anything else is
-  `unresolved` with a reason and a bounded retry. Only the verified commit is pushed, to `ow/fix/<attempt>`, never
-  forced; nothing merges. Draft text passes `outbound()` (secrets and private paths) as a final document.
+- **Publication is one owner keypress.** The worker stops at a `verified` candidate; nothing is pushed, opened,
+  followed or retried in the background. `POST /v2/fixes/:id/publish` (keyed and fenced by `basisSeq`) checks in its
+  own transaction that the problem is not put away, both trial gates stand and the deployment is the finding's; then
+  `publish()` runs the host steps while the owner waits, each with its intent and a permit bound to its exact
+  arguments committed first (`intent()`), reconciling from the host before acting: base tip, branch, protection read
+  positively, a push of the verified commit never forced, draft lookup, creation, read-back. A failure stops there with
+  what exists on the host; the next keypress continues and never makes a second branch or pull request. Draft text
+  passes `outbound()` (secrets and private paths) as a final document. Contract: revision 7 of
+  `docs/plans/simple-core-interfaces.md`.
 - **A green verify means something.** The verifier and every file it imports come from the base (a change touching
   one is refused); `sandbox-exec` runs it deny-by-default: no network, reads only of the system, the program's
   installation and the checkout, writes only in the checkout and its temporary folder; links are never followed. A

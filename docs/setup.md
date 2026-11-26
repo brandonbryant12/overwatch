@@ -175,9 +175,10 @@ that has them.
 
 ## 6. Opt an app in to fix proposals (optional)
 
-Overwatch can open a **draft** pull request for a confirmed problem that began after one deployment: the revert of
-one commit of that deployment, or one JSON setting restored to its previous value. A model only selects among options
-Overwatch computed; Overwatch derives the change from Git, checks it and verifies it. It never merges.
+Overwatch can propose a fix for a confirmed problem that began after one deployment: the revert of one commit of that
+deployment, or one JSON setting restored to its previous value. A model only selects among options Overwatch computed;
+Overwatch derives the change from Git, checks it and verifies it by itself, and shows you the verified candidate. A
+draft pull request is opened only when you press `Shift-P` on that item. It never merges.
 
 **Requirements.** `git` 2.40 or newer (for `git merge-tree --merge-base`), and `gh` signed in to the host of the
 app's remote (`gh auth status`) from a terminal where the service's PATH finds it. The app's checkout must have the
@@ -189,8 +190,8 @@ rule covers `ow/fix/*`, and that your base branch is protected as usual.
 (`/usr/bin/sandbox-exec`) with a deny-by-default profile: no network; reads only of the system folders, the
 verify program's own installation, that checkout and its temporary folder; writes only inside the checkout and that
 folder; one process group at a time, 60 s per command and 180 s in all. The verifier and every file it imports come
-from the base: a change that touches one is refused. Without `sandbox-exec`, verification fails closed and no draft is
-published; the item says why. A fork on another system has to supply an OS-enforced equivalent with the same
+from the base: a change that touches one is refused. Without `sandbox-exec`, verification fails closed and no candidate is
+verified; the item says why. A fork on another system has to supply an OS-enforced equivalent with the same
 guarantees (no network, no reads or writes outside the checkout and the program's installation, a killable process
 group), for example
 a rootless container or `bwrap` on Linux, as `verify()` in `src/fixes.ts`.
