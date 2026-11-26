@@ -119,6 +119,37 @@ export function shownHealth(health, connection) {
   return connection === "live" ? health : "unknown";
 }
 
+/**
+ * The service's wall clock as the page can know it: the last time the service stated it (a snapshot's or a
+ * heartbeat's atMs), plus the page's own monotonic time since. `anchor` is { atMs, monoMs }.
+ */
+export function serverNow(anchor, monoMs) {
+  return anchor ? anchor.atMs + Math.max(0, monoMs - anchor.monoMs) : null;
+}
+
+/**
+ * An environment's cell, aged on the page's own clock: the snapshot says when each expected reading was last
+ * measured and how long that stays fresh; once any has gone old the cell is stale, however live the connection.
+ * A live transport never certifies a fresh measurement.
+ */
+export function cellHealth(env, connection, now) {
+  if (connection !== "live") return "unknown";
+  if (env.health === "signed_out" || env.health === "stale" || now === null || !Array.isArray(env.readings)) return env.health;
+  const old = env.readings.some((r) => r.okMs === null || now - r.okMs > env.freshForMs);
+  return old ? "stale" : env.health;
+}
+
+/** The line that holds back changes: arrivals (new or returned rows) ask for attention; moves only say so. */
+export function pendingLabel({ arrivals, moved }) {
+  const parts = [];
+  if (arrivals.length) parts.push(`${arrivals.length} new`);
+  if (moved.length) parts.push(`${moved.length} moved`);
+  return { text: parts.join(" · "), attention: arrivals.length > 0, count: arrivals.length + moved.length };
+}
+
+/** How long a row must hold focus before it counts as looked at. */
+export const SEEN_AFTER_MS = 1500;
+
 export const HEALTH_LABEL = {
   quiet: "Checked and quiet",
   attention: "Needs a look",

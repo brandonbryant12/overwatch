@@ -44,6 +44,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .connection[data-connection="down"] .pulse { background: transparent; border: 1.5px solid var(--state-suspended); }
 @keyframes breathe { 0% { box-shadow: 0 0 0 0 var(--state-ok-border); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
 
+.spacer { flex: 1; }
 .find {
   flex: 1; max-width: 560px; margin: 0 auto; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 8px 0 12px;
   border: 1px solid var(--border-hairline); border-radius: var(--radius-md); background: var(--bg-well); color: var(--ink-muted);
@@ -123,6 +124,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
   animation: arrive var(--dur-med) var(--ease-out);
 }
 .pending[hidden] { display: none; }
+.pending.moves { border-color: var(--border-strong); background: transparent; color: var(--ink-secondary); font-weight: 500; animation: none; }
 @keyframes arrive { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 .groups { overflow-y: auto; flex: 1; padding-bottom: var(--space-6); scrollbar-gutter: stable; }
 .group-head {
@@ -154,6 +156,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .sev-error .sev { color: var(--state-error); }
 .sev-warn .sev { color: var(--state-warn); }
 .sev-info .sev { color: var(--state-active); }
+.toast, .title, .incident h2, .environment h2, .chip, .why, .back-note, .way-note, .result b, .sheet-subject, .request-text, .finding p { overflow-wrap: anywhere; }
 .title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--ink-primary); }
 .row.unseen .title { font-weight: 600; }
 .row.unseen .title::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--accent); vertical-align: 2px; }
@@ -183,7 +186,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .empty-inbox b { color: var(--ink-primary); font-size: var(--text-md); }
 
 /* ------------------------------------------------------------ stage */
-.stage { grid-area: stage; overflow-y: auto; min-height: 0; padding: var(--space-6) clamp(var(--space-5), 4vw, 56px); }
+.stage { grid-area: stage; overflow-y: auto; overflow-x: hidden; min-width: 0; min-height: 0; padding: var(--space-6) clamp(var(--space-5), 4vw, 56px); }
 .overview { max-width: 560px; margin: 8vh auto 0; display: grid; justify-items: center; text-align: center; gap: 10px; }
 .overview h2 { margin: 8px 0 0; font-size: 1.5rem; letter-spacing: -0.02em; font-weight: 650; }
 .overview p { margin: 0; color: var(--ink-secondary); max-width: 52ch; }
@@ -223,6 +226,14 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .axis { display: flex; justify-content: space-between; color: var(--ink-muted); font-size: var(--text-sm); }
 .note { color: var(--ink-muted); font-size: var(--text-sm); margin: 8px 0 0; }
 .note.bound { color: var(--state-warn); }
+.back { display: none; }
+.subject-link { cursor: pointer; text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.sources li[data-subject] { cursor: pointer; }
+.sources li[data-subject]:hover { border-color: var(--accent-border); }
+.requests { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.request { display: grid; grid-template-columns: 14px 1fr; gap: 4px 10px; align-items: center; padding: 10px 14px; border: 1px solid var(--state-active-border); border-radius: var(--radius-md); background: var(--state-active-surface); }
+.request-state { grid-column: 2; color: var(--state-active); font-size: var(--text-sm); }
+.request.completed .orbit, .request.parked .orbit { animation: none; border-top-color: var(--state-active-border); }
 .history { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border-strong); }
 .history li { position: relative; display: flex; justify-content: space-between; gap: 16px; padding: 6px 0 6px 18px; font-size: var(--text-sm); color: var(--ink-secondary); }
 .history li::before { content: ""; position: absolute; left: -4px; top: 13px; width: 7px; height: 7px; border-radius: 50%; background: var(--bg-canvas); border: 1.5px solid var(--border-strong); }
@@ -251,7 +262,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round
 .dock { grid-area: dock; padding: 12px clamp(var(--space-5), 4vw, 56px) 16px; border-top: 1px solid var(--border-hairline); background: var(--bg-deck); margin: 0; }
 .dock.locked { border-top-color: var(--accent-border); box-shadow: 0 -1px 0 var(--accent-border); }
 .dock-meta { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 8px; font-size: var(--text-sm); color: var(--ink-muted); min-height: 1.5em; }
-.chip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dock-meta, .dock-row, .deck, .incident, .environment { min-width: 0; }
 .dock.locked .chip { color: var(--ink-primary); }
 .reticle { color: var(--accent); margin-right: 6px; }
 .route { white-space: nowrap; }
@@ -333,6 +345,9 @@ body[data-link="down"] .groups, body[data-link="down"] .stage { opacity: 0.55; f
   .keys { grid-template-columns: 1fr; }
   .dock { padding: 10px var(--space-4) 12px; }
   .route { display: none; }
+  .groups { padding-bottom: 120px; }
+  .back { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 14px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); border: 1px solid var(--border-strong); background: var(--bg-elevated); font-weight: 560; }
+  .stage[data-focus-id] { padding-bottom: 120px; }
   .dock { position: sticky; bottom: 0; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

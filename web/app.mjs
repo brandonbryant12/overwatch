@@ -10,12 +10,27 @@ const $ = (s, root = document) => root.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const sample = () => ({ wallMs: Date.now(), monoMs: performance.now() });
 
+const remembered = (() => {
+  try {
+    return JSON.parse(localStorage.getItem("ow-groups") ?? "null");
+  } catch {
+    return null;
+  }
+})();
+
 const state = {
   snap: null,
   last: null,
+  /** The service's clock as last stated (a snapshot or heartbeat), against the page's monotonic clock. */
+  anchor: null,
   connection: "unknown",
   shown: null,
-  collapsed: { needsYou: false, new: false, working: true, quiet: true },
+  collapsed: { needsYou: false, new: false, working: true, quiet: true, ...(remembered && typeof remembered === "object" ? remembered : {}) },
+  sending: false,
+  seenTimer: 0,
+  detailSeq: 0,
+  sheetBasis: null,
+  results: null,
   focus: null,
   detail: null,
   actions: [],
@@ -41,24 +56,30 @@ async function call(path, body, headers = {}) {
 function apply(snap) {
   if (state.snap && snap.seq < state.snap.seq) return;
   state.snap = snap;
+  if (!state.anchor || snap.atMs >= state.anchor.atMs) state.anchor = { atMs: snap.atMs, monoMs: performance.now() };
   if (!state.shown) state.shown = m.freeze(snap.inbox);
   render();
-  if (state.focus && !state.focus.startsWith("env:") && !state.focus.startsWith("src:")) {
-    const row = incident(state.focus);
-    if (row && state.detail?.incident?.id === row.id && state.detail.incident.lastSeq !== row.lastSeq) loadDetail(state.focus);
-  }
+  // Anything committed since the open detail was read may belong to it (a question, a finding, a return).
+  if (isIncident(state.focus) && snap.seq > state.detailSeq) loadDetail(state.focus);
 }
 
-function heard() {
+function heard(e) {
   state.last = sample();
+  try {
+    const at = JSON.parse(e?.data ?? "null")?.atMs;
+    if (typeof at === "number" && (!state.anchor || at >= state.anchor.atMs)) state.anchor = { atMs: at, monoMs: performance.now() };
+  } catch {
+    // A heartbeat without a time still says the service is there.
+  }
   tick();
 }
 
 function connect() {
   const stream = new EventSource("/v2/changes");
   const onSnap = (e) => {
-    heard();
+    state.last = sample();
     apply(JSON.parse(e.data));
+    tick();
   };
   stream.addEventListener("snapshot", onSnap);
   stream.addEventListener("change", onSnap);
@@ -79,8 +100,13 @@ function tick() {
   if (next !== state.connection) {
     state.connection = next;
     render();
-  } else renderConnection();
+  } else {
+    renderConnection();
+    renderStrip(); // measurements age on this clock too, whatever the transport says
+  }
 }
+
+const serverNow = () => m.serverNow(state.anchor, performance.now());
 
 // ---------------------------------------------------------------- lookups
 
@@ -149,7 +175,7 @@ function renderStrip() {
   }
   strip.innerHTML = s.environments
     .map((e) => {
-      const h = m.shownHealth(e.health, state.connection);
+      const h = m.cellHealth(e, state.connection, serverNow());
       const errors = s.incidents.filter((i) => i.app === e.app && i.environment === e.environment && i.active && i.severity === "error").length;
       const detail = h === "attention" ? `${errors} active error${errors === 1 ? "" : "s"}` : h === "unknown" ? "until the service answers" : h === "signed_out" ? "sign in again" : h === "stale" ? "readings are old" : h === "partial" ? "not every reading" : "every reading fresh";
       return `<button type="button" class="env ${h}${state.focus === e.subject ? " focused" : ""}" data-env="${esc(e.environment)}" data-app="${esc(e.app)}" data-health="${h}" data-subject="${esc(e.subject)}">
@@ -200,11 +226,12 @@ function renderGroups() {
     el.innerHTML = `<div class="loading"><span class="bar"></span><span class="bar"></span><span class="bar"></span></div>`;
     return;
   }
-  const pending = m.staged(state.shown, s.inbox);
+  const pending = m.pendingLabel(m.staged(state.shown, s.inbox));
   const pend = $("[data-pending]");
   pend.dataset.pendingCount = String(pending.count);
   pend.hidden = pending.count === 0;
-  pend.innerHTML = `${pending.count} new <kbd>r</kbd>`;
+  pend.classList.toggle("moves", !pending.attention);
+  pend.innerHTML = `${esc(pending.text)} <kbd>r</kbd>`;
   const total = m.GROUPS.reduce((n, g) => n + state.shown[g].length, 0);
   if (total === 0) {
     el.innerHTML = `<div class="empty-inbox"><svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="18"/><path d="M16 24.5l5.5 5.5L32.5 19"/></svg><b>Nothing needs you</b><span>New problems appear here as they are counted. The strip above says what was checked.</span></div>`;
@@ -231,12 +258,15 @@ function renderStage() {
     return;
   }
   stage.dataset.focusId = f;
-  if (f.startsWith("env:")) return void (stage.innerHTML = environmentView(f));
+  if (f.startsWith("env:")) return void (stage.innerHTML = back + environmentView(f));
+  if (f.startsWith("src:")) return void (stage.innerHTML = back + sourceView(f));
   const d = state.detail?.incident?.id === f ? state.detail : null;
   const i = incident(f) ?? d?.incident;
   if (!i) return void (stage.innerHTML = `<div class="stage-empty"><b>Loading…</b></div>`);
-  stage.innerHTML = incidentView(i, d);
+  stage.innerHTML = back + incidentView(i, d);
 }
+
+const back = `<button type="button" class="back" data-back>← Inbox</button>`;
 
 function overview() {
   const s = state.snap;
@@ -267,6 +297,7 @@ function incidentView(i, d) {
     : "";
   const back = i.returned && !i.way ? `<div class="back-note"><b>${esc(m.RETURN_LABEL[i.returned.code] ?? "Back")}</b>${esc(i.returned.reason)}</div>` : "";
   const history = (d?.history ?? []).slice(-12).reverse().map((e) => `<li class="ev ev-${esc(e.kind)}"><span class="ev-kind">${esc(eventText(e))}</span><time>${m.ago(e.atMs, now)}</time></li>`).join("");
+  const requests = (d?.requests ?? []).map((r) => `<li class="request ${esc(r.state)}"><span class="orbit" aria-hidden="true"></span><span class="request-text">${esc(r.text)}</span><span class="request-state">${r.state === "queued" ? "queued, waiting for an agent" : esc(r.state)}</span></li>`).join("");
   const findings = (d?.findings ?? []).map((f) => `<article class="finding ${esc(f.verdict)}">
       <header><b>${esc({ real: "Real", not_real: "Not real", unsure: "Unsure" }[f.verdict] ?? f.verdict)}</b><span>${esc(f.body?.cause ?? "")}</span></header>
       ${(f.claims ?? []).map((c) => `<p>${esc(c.statement)}</p>${(c.pieces ?? []).map((p) => `<pre class="evidence"><span class="handle">${esc(p.handle)}</span>${esc(p.text)}</pre>`).join("")}`).join("")}
@@ -293,6 +324,7 @@ function incidentView(i, d) {
       <div class="axis"><span>24h ago</span><span>now</span></div>
       ${i.exact ? "" : `<p class="note bound">The total is a lower bound: part of the time was not fully read (a gap, a cap, or lines that rotated away).</p>`}
     </section>
+    ${requests ? `<section class="panel"><h3>Questions</h3><ul class="requests">${requests}</ul><p class="note">Agents answer from milestone 3; until then a question waits here.</p></section>` : ""}
     ${findings ? `<section class="panel"><h3>Findings</h3>${findings}</section>` : ""}
     <section class="panel"><h3>History</h3>${history ? `<ol class="history">${history}</ol>` : `<p class="note">Loading history…</p>`}</section>
   </article>`;
@@ -317,14 +349,31 @@ function environmentView(subject) {
   const s = state.snap;
   const e = s.environments.find((x) => x.subject === subject);
   if (!e) return `<div class="stage-empty"><b>Unknown environment</b></div>`;
-  const h = m.shownHealth(e.health, state.connection);
+  const h = m.cellHealth(e, state.connection, serverNow());
   const sources = s.sources.filter((x) => x.app === e.app && x.environment === e.environment);
   const coverage = s.coverage.filter((c) => sources.some((x) => x.id === c.source)).slice(-12).reverse();
   const metrics = s.metrics.filter((x) => sources.some((y) => y.id === x.source));
   return `<article class="environment ${h}">
     <header class="incident-head"><span class="glyph">${GLYPH[h] ?? GLYPH.unknown}</span><div><h2>${esc(e.app)} / ${esc(e.environment)}</h2><div class="meta"><span>${esc(m.HEALTH_LABEL[h])}</span>${e.excluded.length ? `<span>not measured here: ${esc(e.excluded.join(", "))}</span>` : ""}</div></div></header>
-    <section class="panel"><h3>Sources</h3><ul class="sources">${sources.map((x) => `<li class="${x.failure ? "failing" : ""}"><b>${esc(x.id)}</b><span>${x.failure ? `${esc(causeTitle({ kind: x.failure }))}${x.suspended ? " · suspended, probing every five minutes" : ""}` : x.checkpointMs ? `read through ${m.ago(x.checkpointMs, s.atMs)}` : "not read yet"}</span>${x.fix ? `<code>${esc(x.fix)}</code>` : ""}</li>`).join("")}</ul></section>
+    <section class="panel"><h3>Sources</h3><ul class="sources">${sources.map((x) => `<li class="${x.failure ? "failing" : ""}" data-subject="${esc(x.subject)}"><b class="subject-link">${esc(x.id)}</b><span>${x.failure ? `${esc(causeTitle({ kind: x.failure }))}${x.suspended ? " · suspended, probing every five minutes" : ""}` : x.checkpointMs ? `read through ${m.ago(x.checkpointMs, s.atMs)}` : "not read yet"}</span>${x.fix ? `<code>${esc(x.fix)}</code>` : ""}</li>`).join("")}</ul></section>
     ${metrics.length ? `<section class="panel"><h3>Gauges</h3><ul class="gauges">${metrics.map((x) => `<li class="${x.breach ? "breach" : ""}"><span>${esc(x.name)}</span><b>${esc(x.value)}</b>${x.breach ? "<em>over its limit</em>" : ""}</li>`).join("")}</ul></section>` : ""}
+    <section class="panel"><h3>Coverage</h3><ol class="history">${coverage.map((c) => `<li class="cov cov-${esc(c.state)}"><span class="ev-kind">${esc(c.reading)}: ${esc(c.state)}${c.missed ? ` (${c.missed} missed)` : ""}</span><time>${m.ago(c.toMs, s.atMs)}</time></li>`).join("") || "<li>Nothing read yet</li>"}</ol></section>
+  </article>`;
+}
+
+function sourceView(subject) {
+  const s = state.snap;
+  const x = s.sources.find((y) => y.subject === subject);
+  if (!x) return `<div class="stage-empty"><b>Unknown source</b></div>`;
+  const e = s.environments.find((y) => y.app === x.app && y.environment === x.environment);
+  const coverage = s.coverage.filter((c) => c.source === x.id).slice(-12).reverse();
+  const readings = (e?.readings ?? []).filter((r) => r.source === x.id);
+  const now = serverNow();
+  return `<article class="environment source">
+    <header class="incident-head"><span class="glyph">${x.failure ? GLYPH.signed_out : GLYPH.quiet}</span><div><h2>${esc(x.id)}</h2>
+      <div class="meta"><span>${esc(x.kind)}</span><span>${x.failure ? esc(causeTitle({ kind: x.failure })) : x.checkpointMs ? `read through ${m.ago(x.checkpointMs, s.atMs)}` : "not read yet"}</span>${x.suspended ? "<span>suspended, probing every five minutes</span>" : ""}</div></div></header>
+    ${x.fix ? `<div class="back-note"><b>Repair</b><code>${esc(x.fix)}</code></div>` : ""}
+    <section class="panel"><h3>Readings</h3><ul class="gauges">${readings.map((r) => `<li class="${r.state === "ok" ? "" : "breach"}"><span>${esc(r.reading)}</span><b>${esc(r.state ?? "never read")}</b><em>${r.okMs === null ? "never measured" : `measured ${m.ago(r.okMs, now ?? s.atMs)}`}</em></li>`).join("")}</ul></section>
     <section class="panel"><h3>Coverage</h3><ol class="history">${coverage.map((c) => `<li class="cov cov-${esc(c.state)}"><span class="ev-kind">${esc(c.reading)}: ${esc(c.state)}${c.missed ? ` (${c.missed} missed)` : ""}</span><time>${m.ago(c.toMs, s.atMs)}</time></li>`).join("") || "<li>Nothing read yet</li>"}</ol></section>
   </article>`;
 }
@@ -357,10 +406,12 @@ async function setFocus(subject) {
   state.focus = subject;
   state.target = null;
   state.key = null;
+  clearTimeout(state.seenTimer);
   if (isIncident(subject)) {
     if (state.detail?.incident?.id !== subject) state.detail = null;
     loadDetail(subject);
-    markSeen(subject);
+    // Seen means looked at: focus held for a moment, not passed over on the way to something else.
+    state.seenTimer = setTimeout(() => state.focus === subject && markSeen(subject), m.SEEN_AFTER_MS);
   }
   render();
   scrollFocused();
@@ -373,8 +424,10 @@ async function setFocus(subject) {
 
 async function loadDetail(id) {
   try {
+    const seq = state.snap?.seq ?? 0;
     const d = await call("items/" + encodeURIComponent(id));
     if (state.focus !== id) return;
+    state.detailSeq = Math.max(state.detailSeq, seq);
     state.detail = { ...d, incident: { ...d.incident } };
     renderStage();
     renderDock();
@@ -404,12 +457,13 @@ function toast(text, kind = "") {
   toast.timer = setTimeout(() => (t.className = "toast"), 3200);
 }
 
-async function wayOut(body) {
+async function wayOut(body, basis = incident(state.focus)?.decidedSeq) {
   const id = state.focus;
   if (!isIncident(id) || down()) return;
   const before = rows();
   try {
-    const res = await call(`items/${encodeURIComponent(id)}/action`, body);
+    // The decision is bound to the state the owner was shown: if it changed since, the service refuses it.
+    const res = await call(`items/${encodeURIComponent(id)}/action`, { ...body, ...(basis === undefined ? {} : { basisSeq: basis }) });
     state.actions.push({ id, seq: res.action.seq });
     state.shown = m.without(state.shown, id);
     const next = m.after(before, id, id);
@@ -418,7 +472,11 @@ async function wayOut(body) {
     if (next && next !== id) setFocus(next);
     else render();
   } catch (e) {
-    toast(e.message, "error");
+    if (e.status === 409) {
+      toast("This changed since you looked (another tab or a return). Look again, then decide.", "error");
+      loadDetail(id);
+      render();
+    } else toast(e.message, "error");
   }
 }
 
@@ -455,6 +513,7 @@ function sheet(kind) {
   const i = incident(state.focus);
   if (!i || down()) return;
   state.overlay = kind;
+  state.sheetBasis = i.decidedSeq;
   const later = kind === "later";
   $("[data-overlay]").innerHTML = `<div class="backdrop" data-close></div>
     <form class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" data-sheet="${kind}">
@@ -478,12 +537,14 @@ function submitSheet(form) {
   if (form.dataset.sheet === "later") {
     const body = m.later(input.value, Date.now());
     if (body.error) return void ($("[data-sheet-error]", form).textContent = body.error);
+    const basis = state.sheetBasis;
     close();
-    wayOut(body);
+    wayOut(body, basis);
   } else {
     const reason = input.value.trim();
+    const basis = state.sheetBasis;
     close();
-    wayOut({ action: "never", ...(reason ? { reason } : {}) });
+    wayOut({ action: "never", ...(reason ? { reason } : {}) }, basis);
   }
 }
 
@@ -506,20 +567,25 @@ function openSearch(q = "") {
   if (q) runSearch(q);
 }
 
-async function runSearch(q) {
+async function runSearch(q, cursor = null) {
   const list = $("[data-results]");
   if (!list) return;
   if (!q.trim()) return void (list.innerHTML = "");
   try {
-    const { items } = await call("search?q=" + encodeURIComponent(q));
+    const { items, nextCursor } = await call("search?q=" + encodeURIComponent(q) + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
     if (state.overlay !== "search" || $("[data-search]")?.value !== q) return;
-    list.innerHTML = items.length
+    state.results = { q, nextCursor };
+    $("[data-more]")?.remove();
+    const html = items.length || cursor
       ? items.map((r, n) => {
           const i = incident(r.id);
           const where = i ? (i.way ? `put away: ${WAY_LABEL[i.way.kind]}` : m.GROUP_LABEL[i.group] ?? "") : "";
-          return `<li class="result${n === 0 ? " selected" : ""}" data-result-id="${esc(r.id)}" role="option"><b>${esc(r.title)}</b><span class="where">${esc(where)}</span>${r.excerpt.trim() === r.title.trim() ? "" : `<span class="excerpt">${esc(r.excerpt)}</span>`}</li>`;
+          return `<li class="result${n === 0 && !cursor ? " selected" : ""}" data-result-id="${esc(r.id)}" role="option"><b>${esc(r.title)}</b><span class="where">${esc(where)}</span>${r.excerpt.trim() === r.title.trim() ? "" : `<span class="excerpt">${esc(r.excerpt)}</span>`}</li>`;
         }).join("")
       : `<li class="no-results">Nothing matches “${esc(q)}”</li>`;
+    const more = nextCursor ? `<li class="more" data-more role="option">More results <kbd>↓</kbd></li>` : "";
+    if (cursor) list.insertAdjacentHTML("beforeend", html + more);
+    else list.innerHTML = html + more;
   } catch (e) {
     list.innerHTML = `<li class="no-results">${esc(e.message)}</li>`;
   }
@@ -529,6 +595,8 @@ function moveResult(delta) {
   const all = [...document.querySelectorAll("[data-result-id]")];
   if (!all.length) return;
   const i = all.findIndex((x) => x.classList.contains("selected"));
+  // Moving past the last result loads the next page: every match can be reached.
+  if (delta > 0 && i === all.length - 1 && state.results?.nextCursor) return void runSearch(state.results.q, state.results.nextCursor);
   all[i]?.classList.remove("selected");
   const next = all[Math.min(all.length - 1, Math.max(0, i + delta))];
   next.classList.add("selected");
@@ -557,9 +625,11 @@ function help() {
 async function submitPrompt(newSession) {
   const input = $("[data-prompt]");
   const text = input.value.trim();
-  if (!text || down()) return;
+  if (!state.focus) return openSearch(text);
+  // One draft, one request: a second Enter while the first is on its way is ignored.
+  if (!text || down() || state.sending) return;
   const subject = state.focus;
-  if (!subject) return openSearch(text);
+  state.sending = true;
   try {
     // One key per draft, kept until it is accepted, so a retry can never queue the same prompt twice.
     if (!state.key || state.key.subject !== subject) {
@@ -567,13 +637,17 @@ async function submitPrompt(newSession) {
       state.key = { subject, value: t.requestKey };
     }
     const result = await call("ask", { subject, text, mode: newSession ? "new" : "auto" }, { "Idempotency-Key": state.key.value });
-    input.value = "";
+    // A late reply clears only the draft it answered, never what was typed since.
+    if (input.value.trim() === text) input.value = "";
     state.key = null;
     autosize(input);
+    if (state.focus === subject && isIncident(subject)) loadDetail(subject);
     toast(result.target.mode === "new" ? "Queued for an agent. Agents answer from milestone 3." : "Added to the queued request.", "ok");
     call("focus?subject=" + encodeURIComponent(subject)).then((t) => ((state.target = t), renderDock()), () => undefined);
   } catch (e) {
     toast(e.message, "error");
+  } finally {
+    state.sending = false;
   }
 }
 
@@ -616,7 +690,7 @@ document.addEventListener("keydown", (e) => {
     case "worse": return wayOut({ action: "later", when: "worse" });
     case "undo": return undo();
     case "refresh": return refresh();
-    case "prompt": return $("[data-prompt]").focus();
+    case "prompt": return state.focus ? $("[data-prompt]").focus() : openSearch();
     case "theme": return theme();
     case "help": return help();
   }
@@ -625,18 +699,28 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("click", (e) => {
   const t = e.target instanceof Element ? e.target : null;
   if (!t) return;
+  if (t.closest("[data-back]")) {
+    state.focus = null;
+    render();
+    return window.scrollTo({ top: 0 });
+  }
   const env = t.closest("[data-env]");
   if (env) return setFocus(env.dataset.subject);
+  const subject = t.closest("[data-subject]");
+  if (subject) return setFocus(subject.dataset.subject);
+  if (t.closest("[data-more]") && state.results?.nextCursor) return runSearch(state.results.q, state.results.nextCursor);
   const r = t.closest("[data-item-id]");
   if (r) return setFocus(r.dataset.itemId);
   const toggle = t.closest("[data-toggle]");
   if (toggle) {
     state.collapsed[toggle.dataset.toggle] = !state.collapsed[toggle.dataset.toggle];
+    try {
+      localStorage.setItem("ow-groups", JSON.stringify(state.collapsed));
+    } catch {}
     return renderGroups();
   }
   if (t.closest("[data-pending]")) return refresh();
   if (t.closest("[data-close]")) return close();
-  if (t.closest("[data-open-search]")) return openSearch();
   if (t.closest("[data-theme-toggle]")) return theme();
   if (t.closest("[data-help]")) return help();
   const result = t.closest("[data-result-id]");

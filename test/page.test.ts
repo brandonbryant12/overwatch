@@ -56,3 +56,32 @@ test("Later's words", () => {
   assert.ok(m.later("soonish", now).error);
   assert.equal(m.shownHealth("quiet", "stale"), "unknown");
 });
+
+test("class: what waits behind the line is counted once, and only arrivals ask for attention", () => {
+  const ids = fc.uniqueArray(fc.constantFrom("a", "b", "c", "d", "e", "f"), { maxLength: 6 });
+  const groups = (list: string[], pick: number[]) => Object.fromEntries(m.GROUPS.map((g: string, i: number) => [g, list.filter((_, n) => pick[n] === i)]));
+  fc.assert(
+    fc.property(ids, fc.array(fc.integer({ min: 0, max: 3 }), { minLength: 6, maxLength: 6 }), ids, fc.array(fc.integer({ min: 0, max: 3 }), { minLength: 6, maxLength: 6 }), (a, pa, b, pb) => {
+      const shown = m.freeze({ groups: groups(a, pa) });
+      const s = m.staged(shown, { groups: groups(b, pb) });
+      const label = m.pendingLabel(s);
+      assert.equal(label.count, s.arrivals.length + s.moved.length);
+      assert.equal(label.attention, s.arrivals.length > 0);
+      assert.equal(/new/.test(label.text), s.arrivals.length > 0);
+      assert.ok(s.arrivals.every((id: string) => !a.includes(id)));
+    }),
+  );
+});
+
+test("class: a cell is never shown as measured once any expected reading is older than it stays fresh", () => {
+  const health = fc.constantFrom("quiet", "attention", "partial", "stale", "signed_out");
+  fc.assert(
+    fc.property(health, fc.constantFrom("live", "stale", "down", "unknown"), fc.array(fc.option(fc.integer({ min: 0, max: 1000 }), { nil: null }), { minLength: 1, maxLength: 4 }), fc.integer({ min: 0, max: 2000 }), (h, connection, ages, now) => {
+      const env = { health: h, freshForMs: 300, readings: ages.map((a) => ({ okMs: a === null ? null : now - a })) };
+      const shown = m.cellHealth(env, connection, now);
+      if (connection !== "live") assert.equal(shown, "unknown");
+      else if (ages.some((a) => a === null || a > 300) && h !== "signed_out") assert.equal(shown, "stale");
+      if (shown === "quiet") assert.ok(connection === "live" && ages.every((a) => a !== null && a <= 300));
+    }),
+  );
+});
