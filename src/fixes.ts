@@ -119,6 +119,7 @@ class Unresolved extends Error {}
 
 export class Fixes extends Crew {
   private busy = false;
+  private again = false;
   private readonly followed = new Set<string>();
 
   /** POST /v2/items/:id/fix: one attempt per (problem, investigation, deployment, policy); a durable decision either way. */
@@ -217,9 +218,12 @@ export class Fixes extends Crew {
    * follow published drafts. Runs in the background; passes never overlap it.
    */
   tick() {
-    if (this.busy) return;
+    if (this.busy) return void (this.again = true); // a pass that arrives mid-work runs once it ends, never dropped
     this.busy = true;
-    void this.work().catch((e) => this.log(`fixes: ${errorText(e)}`)).finally(() => (this.busy = false));
+    void this.work().catch((e) => this.log(`fixes: ${errorText(e)}`)).finally(() => {
+      this.busy = false;
+      if (this.again) (this.again = false), this.tick();
+    });
   }
 
   private async work() {
