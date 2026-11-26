@@ -128,6 +128,8 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         const fixes = yield* Fixes;
         const trial = yield* Trial;
         const empty = yield* emptyFolder(config.dataDir);
+        /** The services a long-lived response stream reads after its handler has returned. */
+        const services = yield* Effect.context<Store | AppConfig>();
         const current = snapshot(collector.view, true);
         /** The state after a decision: taken once the decision is written, so it includes it. */
         const decided = (action: { seq: number | null }) => Effect.map(current, (s) => ({ ...s, action }));
@@ -176,7 +178,7 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         );
         yield* router.add("GET", "/v2/changes", () =>
           Effect.map(current, (s) =>
-            HttpServerResponse.stream(Stream.concat(Stream.make(frame("snapshot", s, s.seq)), Stream.merge(changes, heartbeats)).pipe(Stream.encodeText), {
+            HttpServerResponse.stream(Stream.concat(Stream.make(frame("snapshot", s, s.seq)), Stream.merge(changes, heartbeats)).pipe(Stream.encodeText, Stream.provideContext(services)), {
               contentType: "text/event-stream",
               headers: { "cache-control": "no-store", connection: "keep-alive" },
             }),

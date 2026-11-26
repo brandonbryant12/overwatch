@@ -129,7 +129,7 @@ const status = Command.make("status", {}, () =>
           Effect.flatMap((r) => r.json),
           Effect.timeout("5 seconds"),
           Effect.catch(() => Effect.fail(cliExit(3, "unavailable", `the service at ${url} did not answer`))),
-        )) as Snapshot)
+        )) as unknown as Snapshot)
       : yield* Effect.scoped(Effect.flatMap(own(c), (store) => snapshot(null, false).pipe(Effect.provideService(Store, store), Effect.provide(AppConfig.layer(c)))));
     yield* out(s, humanStatus(s));
   }),
