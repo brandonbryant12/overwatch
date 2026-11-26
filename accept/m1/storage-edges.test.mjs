@@ -99,6 +99,19 @@ for (const page of [4096, 16384, 65536]) test("reclaim is positive and bounded t
   assert.ok(first - size() > freed || inspect()[1] === 0)
 })
 
+test("A20 changing pressure across a restart does not overspend an 8 KiB page reclaim budget", async t => {
+  const { x, size, inspect } = await storageFixture(t, 8192, "incremental")
+  const first = size()
+  await x.start(); await x.control("space", {freeBytes: 1, dbBytes: first})
+  await x.poll(); await x.stop()
+  const middle = size()
+  assert.ok(first - middle <= 16 * 1024 ** 2)
+  await x.start(); await x.control("space", {freeBytes: 2 ** 30, dbBytes: middle})
+  await x.poll(); await x.stop()
+  assert.ok(middle - size() <= 16 * 1024 ** 2)
+  assert.ok(first > size() || inspect()[1] === 0)
+})
+
 test("persistent pressure after compaction pauses growth and leaves the checkpoint alone", async t => {
   const x = await rig(t)
   await x.start()

@@ -165,6 +165,7 @@ export async function peers(world) {
           }
           const from = Date.parse(body.filter.from),
             to = Date.parse(body.filter.to)
+          if (w.ddLogEnvelope) return send(w.ddLogEnvelope)
           const rows = (w.ddLogs ?? []).filter((x) => Date.parse(x.time) >= from && Date.parse(x.time) <= to)
           const start = Number(body.page?.cursor ?? 0),
             end = start + 2
@@ -181,7 +182,7 @@ export async function peers(world) {
         if (path.endsWith("/query"))
           return send({
             status: "ok",
-            series: [{ metric: "shop.errors", pointlist: [[Number(u.searchParams.get("to")) * 1000, "ddValue" in w ? w.ddValue : 1]] }],
+            series: [{ metric: "shop.errors", pointlist: [[w.ddPointTime ?? Number(u.searchParams.get("to")) * 1000, "ddValue" in w ? w.ddValue : 1]] }],
           })
         if (path.endsWith("/validate")) return send({ valid: true })
       }

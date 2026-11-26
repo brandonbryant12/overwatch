@@ -70,7 +70,7 @@ export async function browser(t, x) {
     await wait("location.href===" + JSON.stringify(url) + " && document.readyState!=='loading'", "navigation")
   }
   const key = async key => {
-    const named = { Enter: [13, "Enter"], Escape: [27, "Escape"], "/": [191, "Slash"] }
+    const named = { Tab: [9, "Tab"], Enter: [13, "Enter"], Escape: [27, "Escape"], "/": [191, "Slash"] }
     const [windowsVirtualKeyCode, code] = named[key] ?? [key.toUpperCase().charCodeAt(0), "Key" + key.toUpperCase()]
     const fields = { key, code, windowsVirtualKeyCode }
     const text = key === "Enter" ? "\r" : key.length === 1 ? key : ""

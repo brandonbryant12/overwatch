@@ -7,6 +7,7 @@
  * real OpenCode with its own temporary HOME, config, data, cache and state, then `overwatch trial` and `overwatch
  * doctor` through it. Nothing outside the temporary directory is read or written.
  */
+import assert from "node:assert/strict";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
@@ -29,6 +30,10 @@ const prompts: string[] = [];
 type Msg = { role: string; content?: unknown; tool_calls?: unknown };
 const text = (m: Msg) => (typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map((c: { text?: string }) => c.text ?? "").join("") : "");
 const provider = createServer(async (req, res) => {
+  if (req.url?.startsWith("/registry/")) {
+    res.writeHead(200).end("{}");
+    return;
+  }
   let raw = "";
   for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw) as { messages: Msg[]; tools?: Array<{ function?: { name: string } }> };
@@ -110,7 +115,7 @@ else { console.error("stub"); process.exit(1); }
 `, { mode: 0o755 });
 symlinkSync(binary, join(stubs, "opencode"));
 const PATH = [stubs, dirname(process.execPath), "/usr/bin", "/bin"].join(":");
-const env = { ...process.env, PATH, OPENCODE_PASSWORD: ocPassword, OW_MCP_TOKEN: token, HOME: join(root, "home"), TMPDIR: join(root, "tmp") };
+const env = { ...process.env, npm_config_registry: `http://127.0.0.1:${providerPort}/registry`, PATH, OPENCODE_PASSWORD: ocPassword, OW_MCP_TOKEN: token, HOME: join(root, "home"), TMPDIR: join(root, "tmp") };
 const service = spawn(bin, ["serve", "--config", config, "--json"], { env: { ...env, OW_TEST_FD: "3" }, stdio: ["ignore", "pipe", "pipe", "pipe"] });
 service.stderr!.on("data", (b) => log.push(`overwatch: ${b}`));
 const ready = JSON.parse(String((await once(service.stdout!, "data"))[0]).split("\n")[0]!) as { url: string };
@@ -151,6 +156,8 @@ try {
   const trial = await cli("trial");
   console.log("trial exit", trial.code, trial.err.slice(0, 500));
   console.log(trial.out.slice(0, 3000));
+  assert.equal(trial.code, 0);
+  assert.equal(JSON.parse(trial.out).correct, 5);
   const auth = { authorization: "Basic " + Buffer.from(`opencode:${ocPassword}`).toString("base64") };
   for (const path of ["/api/agent", "/api/mcp", "/api/skill"])
     for (const query of ["", `?location[directory]=${encodeURIComponent(join(root, "store", "empty"))}`]) {
@@ -174,13 +181,21 @@ try {
   console.log("investigation 1", JSON.stringify({ state: done1.state, verdict: done1.result?.verdict, counts: done1.result?.counts, challenge: done1.result?.challenge?.outcome, observed: done1.result?.observed }));
   const asked = await api("ask", { subject: incident.id, text: "When did the timeouts start?", mode: "auto" }, await keyFor(incident.id));
   const answered = await wait(async () => { const j = await api("jobs/" + asked.jobId); return j.turns?.at(-1)?.state === "answered" || j.turns?.at(-1)?.state === "failed" ? j : null; });
+  assert.equal(done1.result.verdict, "real");
+  assert.equal(done1.result.challenge.outcome, "upheld");
+  assert.equal(answered.turns.at(-1).state, "answered");
   console.log("question", JSON.stringify(answered.turns.at(-1)));
   const guidance = "Check the payments provider status page first";
   console.log("correction", JSON.stringify(await api(`items/${incident.id}/corrections`, { jobId: first.jobId, text: guidance }, await keyFor(incident.id))));
   const before = prompts.length;
   const second = await api(`items/${incident.id}/investigate`, {}, await keyFor(incident.id));
   const done2 = await wait(async () => { const j = await api("jobs/" + second.jobId); return ["completed", "parked"].includes(j.state) && j; });
-  console.log("investigation 2", JSON.stringify({ state: done2.state, verdict: done2.result?.verdict, guidanceInReaderPrompts: prompts.slice(before).filter((p) => /Reading \d/.test(p)).every((p) => p.includes(guidance)) }));
+  const readers = prompts.slice(before).filter((p) => /Reading \d/.test(p));
+  const slots = new Set(readers.map((p) => /Reading (\d)/.exec(p)?.[1]));
+  assert.deepEqual([...slots].sort(), ["1", "2", "3"]);
+  assert.ok(readers.every((p) => p.includes(guidance)));
+  assert.equal(done2.result?.verdict, "real");
+  console.log("investigation 2", JSON.stringify({ state: done2.state, verdict: done2.result.verdict, guidedReaderSlots: slots.size }));
   const doctor = await cli("doctor");
   console.log("doctor exit", doctor.code);
   for (const c of (JSON.parse(doctor.out || "{}").checks ?? []) as Array<{ id: string; ok: boolean; detail: string }>) console.log(`  ${c.ok ? "ok  " : "FAIL"} ${c.id}: ${c.detail}`);

@@ -2,6 +2,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { rig, stamp } from "../m1/rig.mjs"
+import { finished, send, model, until } from "../m3/rig.mjs"
 import { browser, binary } from "./chrome.mjs"
 
 async function fleet(x) {
@@ -12,7 +13,7 @@ async function fleet(x) {
   for (const [i, environment] of ["prod", "qa", "stage", "test", "load", "canary"].entries()) {
     const e = environments[environment] = structuredClone(template)
     e.sources.pods.namespace = environment
-    e.sources.pods.readings = ["logs"]
+    e.sources.pods.readings = ["logs", "workloads"]
     x.cfg.watchers.push({ app: "shop", environment, every: "1m" })
     namespaceLines[environment] = Array.from({ length: 33 + Number(i < 2) }, (_, j) => {
       const label = String.fromCharCode(97 + Math.floor(j / 26), 97 + j % 26)
@@ -20,13 +21,51 @@ async function fleet(x) {
     })
   }
   x.world({ namespaceLines }); x.save(); await x.start(); await x.poll()
+  const ids = (await x.status()).incidents.map((i) => i.id)
+  const start = (id) => send(x, "items/" + id + "/investigate", {}, 202, id)
+  for (const [index, votes] of [
+    ["real", "real", "real"],
+    ["real", "not_real", "real"],
+    ["ramble", "unsure", "not_real"],
+    ["not_real", "not_real", "not_real"],
+  ].entries()) {
+    model(x, votes)
+    await finished(x, (await start(ids[index])).jobId)
+  }
+  x.p.workScript = async () => ""
+  const parked = await send(
+    x,
+    "ask",
+    { subject: ids[4], text: "No response fixture", mode: "new" },
+    200,
+    ids[4],
+  )
+  assert.equal((await finished(x, parked.jobId)).state, "parked")
+  const hold = Promise.withResolvers()
+  x.p.workScript = async () => {
+    await hold.promise
+    return "Fixture complete"
+  }
+  await start(ids[5])
+  await start(ids[6])
+  await until(
+    x,
+    async () => {
+      const states = (await x.status()).jobs.map((j) => j.state)
+      return ["queued", "running", "completed", "parked"].every((s) => states.includes(s))
+    },
+    "did not reach all queue states",
+  )
+  return hold
+
 }
 const focus = "document.querySelector('[data-focus-id]')?.dataset.focusId"
 const count = "document.querySelectorAll('[data-item-id]').length"
 for (const kind of ["demo", "fleet"]) test("owner keyboard timings, " + kind, { skip: !binary }, async t => {
   const x = await rig(t)
-  if (kind === "demo") await x.start("demo")
-  else await fleet(x)
+  const hold=kind === "fleet" ? await fleet(x) : null
+  if (!hold) await x.start("demo")
+  if (hold) t.after(()=>hold.resolve())
   const b = await browser(t, x)
   await b.cmd("Emulation.setDeviceMetricsOverride", { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false })
   await b.visit(x.url + "/"); await b.wait("document.querySelector('[data-connection=live]')")
@@ -59,8 +98,25 @@ for (const kind of ["demo", "fleet"]) test("owner keyboard timings, " + kind, { 
     await b.key("p"); await b.type("Explain the onset"); await b.key("Enter")
     await b.wait("document.querySelector('[data-toast]').innerText.includes('Queued')")
   })
-  await b.key("Escape"); await b.key("b")
-  t.diagnostic("brief editor present: " + await b.evaluate("!!document.querySelector('[data-brief-text]')"))
+  await b.key("Escape")
+  await b.evaluate(
+    "Object.defineProperty(navigator,'clipboard',{value:{writeText:async text=>window.copied=text}});true",
+  )
+  await time("brief open, edit and copy", async () => {
+    await b.key("b")
+    await b.wait("document.querySelector('[data-brief-text]')?.value.includes('What changed')")
+    await b.key("Tab")
+    assert.ok(await b.evaluate("document.activeElement.matches('[data-brief-text]')"))
+    await b.type("Owner edit. ")
+    const expected = await b.evaluate("document.activeElement.value")
+    assert.ok(expected.includes("Owner edit. "))
+    await b.key("Tab")
+    await b.key("Tab")
+    assert.ok(await b.evaluate("document.activeElement.matches('[data-brief-copy]')"))
+    await b.key("Enter")
+    await b.wait("window.copied===" + JSON.stringify(expected))
+  })
+  await b.key("Escape")
   await b.evaluate("document.querySelector('[data-toggle=working]').click()")
   await b.visit(x.url + "/"); await b.wait("document.querySelector('[data-connection=live]')")
   t.diagnostic("Working expanded after reload: " + await b.evaluate("document.querySelector('[data-toggle=working]').getAttribute('aria-expanded')"))
