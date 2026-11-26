@@ -60,13 +60,13 @@ const pods = Array.from({ length: state.pods ?? 1 }, (_, i) => {
     },
     status: {
       phase: "Running",
-      conditions: [{ type: "Ready", status: "True" }],
+      conditions: [{ type: "Ready", status: state.ready === false ? "False" : "True" }],
       containerStatuses: [
         {
           name: "api",
           ready: true,
           restartCount: restart,
-          containerID: "containerd://" + id + "-" + restart,
+          containerID: state.missingIdentity ? undefined : "containerd://" + id + "-" + restart,
           lastState: restart
             ? { terminated: { containerID: "containerd://" + id + "-" + (restart - 1), exitCode: 0 } }
             : {},
@@ -100,12 +100,17 @@ else if (verb === "get" && res.startsWith("event")) json({ items: state.events ?
 else if (verb === "get") json({ items: [] })
 else if (verb === "top") {
   if (state.usageFailure) fail(state.usageFailure)
-  if (!state.emptyUsage) console.log(pods.map((p) => p.metadata.name + " api 100m 64Mi").join("\n"))
+  if (!state.emptyUsage) console.log(pods.slice(0, state.usagePods ?? pods.length)
+    .map((p) => p.metadata.name + " api 100m " + (state.memory ?? "64Mi")).join("\n"))
 } else if (verb === "logs") {
   const idx = Number(res.match(/(\d+)$/)?.[1] ?? 0),
     from = Date.parse(option("--since-time")) || 0
   const emit = (stamp, text) => {
     if (Date.parse(stamp) >= from) fs.writeSync(1, stamp + " " + text + "\n")
+  }
+  if (state.failSince === from) fail("network unreachable")
+  if (state.restartDuringLogs) {
+    fs.writeFileSync(path.join(root, "world.json"), JSON.stringify({ ...state, restartDuringLogs: false, restart: (state.restart ?? 0) + 1 }))
   }
   const previous = args.includes("--previous") || args.includes("-p")
   for (const [stamp, text, pod = 0] of (previous ? state.previous : state.lines) ?? [])

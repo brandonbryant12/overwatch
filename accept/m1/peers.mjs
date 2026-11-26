@@ -143,7 +143,9 @@ export async function peers(world) {
         res.end(JSON.stringify(body))
       }
       const w = world()
-      if (path.startsWith("/registry")) return send({ ok: true })
+      if (path.startsWith("/registry")) return send({ ok: true }, w.registryStatus ?? 200)
+      if (path.startsWith("/api/") && !path.startsWith("/api/v") && w.ocPassword &&
+          req.headers.authorization !== "Basic " + Buffer.from("opencode:" + w.ocPassword).toString("base64")) return send({}, 401)
       if (path.startsWith("/api/v")) {
         if (w.ddFailure) return send({ errors: ["fixture " + w.ddFailure] }, w.ddFailure)
         if (path.includes("logs/events/search")) {
@@ -173,7 +175,7 @@ export async function peers(world) {
         if (path.endsWith("/query"))
           return send({
             status: "ok",
-            series: [{ metric: "shop.errors", pointlist: [[Number(u.searchParams.get("to")) * 1000, 1]] }],
+            series: [{ metric: "shop.errors", pointlist: [[Number(u.searchParams.get("to")) * 1000, "ddValue" in w ? w.ddValue : 1]] }],
           })
         if (path.endsWith("/validate")) return send({ valid: true })
       }
@@ -189,7 +191,7 @@ export async function peers(world) {
               id: "ow-investigator",
               permissions: [
                 { action: "*", resource: "*", effect: "deny" },
-                ...["ow_telemetry", "ow_history", "ow_code_search", "ow_code_read", "ow_finding"].map(
+                ...(w.noAgentTools ? [] : ["ow_telemetry", "ow_history", "ow_code_search", "ow_code_read", "ow_finding"]).map(
                   (n) => ({ action: "ow_" + n, resource: "*", effect: "allow" }),
                 ),
               ],

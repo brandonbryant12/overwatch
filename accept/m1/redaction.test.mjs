@@ -99,9 +99,13 @@ test(
       assertClean(fs.readFileSync(f).toString("latin1"))
     x.inspect((db) => {
       const tables = db.prepare("select name from sqlite_schema where type='table'").all()
-      for (const { name } of tables) {
+      const selects = tables.map(({ name }) => {
         const quoted = '"' + name.replaceAll('"', '""') + '"'
-        for (const row of db.prepare("select * from " + quoted).iterate())
+        return db.prepare("select * from " + quoted)
+      })
+      // Keep the statements reachable until their iterators have finished on Node 23.11.
+      for (const select of selects) {
+        for (const row of select.iterate())
           assertClean(JSON.stringify(row, (_, v) => (typeof v === "bigint" ? String(v) : v)))
       }
     })
