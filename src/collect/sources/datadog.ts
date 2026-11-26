@@ -166,7 +166,7 @@ export const datadogLogsSource: SourceType = {
     const indexes = Array.isArray(config.indexes) ? config.indexes.map(String) : undefined;
     const max = typeof config.maxLogs === "number" ? config.maxLogs : 5000;
     const { events, capped, undated } = await searchLogs(context, query, indexes, window.from, window.to, max);
-    const groups = new Map<string, { base: Omit<Signal, "occurrences" | "total">; occurrences: Occurrence[]; total: number }>();
+    const groups = new Map<string, { base: Omit<Signal, "occurrences">; occurrences: Occurrence[] }>();
     for (const event of events) {
       const message = redactText(event.message, { maxBytes: 400 });
       const key = `log:${event.service}:${normalizeMessage(message)}`;
@@ -182,14 +182,12 @@ export const datadogLogsSource: SourceType = {
           url: `${appUrl(context.options)}/logs?query=${encodeURIComponent(query)}&from_ts=${window.from}&to_ts=${window.to}`,
         },
         occurrences: [],
-        total: 0,
       };
-      entry.total++;
-      if (entry.occurrences.length < 200) entry.occurrences.push({ at: event.at, id: event.id });
+      entry.occurrences.push({ at: event.at, id: event.id });
       groups.set(key, entry);
     }
     return {
-      signals: [...groups.values()].map((g) => ({ ...g.base, occurrences: g.occurrences, total: g.total })),
+      signals: [...groups.values()].map((g) => ({ ...g.base, occurrences: g.occurrences })),
       samples: [],
       notes: [
         ...(capped ? [`${context.name}: more than ${max} logs between ${iso(window.from)} and ${iso(window.to)}; only the first ${max} were grouped`] : []),
@@ -255,7 +253,6 @@ export const datadogMonitorsSource: SourceType = {
         title: `${m.name.slice(0, 100)} is ${m.state}`,
         severity: stateKey(m.state) === "warn" ? "warn" : "error",
         occurrences: Number.isFinite(m.modified) ? [{ at: m.modified, id: `${m.id}:${m.modified}` }] : [],
-        total: 1,
         state: true,
         sample: `monitor ${m.id} "${m.name}" ${m.state} since ${Number.isFinite(m.modified) ? iso(m.modified) : "unknown"}: ${redactText(m.query, { maxBytes: 300 })}`,
         query: m.query,

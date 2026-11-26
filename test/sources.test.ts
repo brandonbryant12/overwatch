@@ -155,7 +155,7 @@ describe("kubernetes source", () => {
     expect(byKind("event")).toHaveLength(1);
     expect(byKind("event")[0]!.occurrences).toEqual([{ at: Date.parse("2026-11-25T11:30:00Z"), id: "e1:3" }]);
     expect(byKind("log")).toHaveLength(1);
-    expect(byKind("log")[0]!.total).toBe(2);
+    expect(byKind("log")[0]!.occurrences.length).toBe(2);
     expect(byKind("pod").map((s) => s.title)).toEqual(["api container OOMKilled (exit 137)"]);
     const samples = Object.fromEntries(result.samples.map((s) => [s.metric, s.value]));
     expect(samples).toMatchObject({ not_ready_pods: 0, cpu_pct_of_limit: 90, node_memory_pct_of_allocatable: 75, quota_limits_memory_pct: 75 });
@@ -195,7 +195,7 @@ describe("datadog sources", () => {
     const result = await datadogLogsSource.collect(config.apps["shop-api"]!.environments.production!.sources.errors!, { window: WINDOW, final: true }, ctx);
     expect(bodies[0].filter).toEqual({ query: "service:shop-api status:error", from: "2026-11-25T10:00:00Z", to: "2026-11-25T12:00:00Z", indexes: ["main"] });
     expect(bodies).toHaveLength(2);
-    expect(result.signals.map((s) => [s.total, s.occurrences.map((o) => o.id)])).toEqual([
+    expect(result.signals.map((s) => [s.occurrences.length, s.occurrences.map((o) => o.id)])).toEqual([
       [2, ["l1", "l2"]],
       [1, ["l3"]],
     ]);

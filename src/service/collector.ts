@@ -269,7 +269,8 @@ export async function runWatcher(ports: CollectorPorts, watcher: WatcherConfig, 
     for (const s of fresh) byFingerprint.set(fingerprint(s), [...(byFingerprint.get(fingerprint(s)) ?? []), s]);
     const reports: SignalReport[] = [];
     for (const [fp, group] of byFingerprint) {
-      const total = group.reduce((sum, s) => sum + s.total, 0);
+      // The count is what was listed and not counted before; an ongoing condition counts once per poll.
+      const total = group.reduce((sum, s) => sum + (s.state ? 1 : s.occurrences.length), 0);
       const stateSignal = group.some((s) => s.state);
       if (!stateSignal && total < watcher.minCount) continue;
       const newest = Math.max(...group.flatMap((s) => s.occurrences.map((o) => o.at)), stateSignal ? now : 0);

@@ -182,7 +182,7 @@ describe("kubernetes: many pods do not stall a watcher", () => {
     const result = await kubernetesSource.collect(sources.pods!, { window: WINDOW, final: false }, ctx);
     expect(stats.logs).toBe(12);
     expect(stats.maxInFlight).toBe(config.concurrency.sourceCalls);
-    expect(result.signals.find((s) => s.kind === "log")!.total).toBe(12);
+    expect(result.signals.find((s) => s.kind === "log")!.occurrences.length).toBe(12);
     expect(result.notes).toEqual([]);
   });
 
@@ -201,7 +201,7 @@ describe("kubernetes: many pods do not stall a watcher", () => {
     const result = await kubernetesSource.collect(sources.pods!, { window: WINDOW, final: false }, ctx);
     expect(stats.logs).toBeGreaterThan(0);
     expect(stats.logs).toBeLessThan(12);
-    expect(result.signals.find((s) => s.kind === "log")!.total).toBe(stats.logs);
+    expect(result.signals.find((s) => s.kind === "log")!.occurrences.length).toBe(stats.logs);
     expect(result.notes.join("\n")).toContain(`logs of ${12 - stats.logs} of 12 pods`);
     expect(result.notes.join("\n")).toContain("ran out of time; raise timeouts.slice");
   });
@@ -222,7 +222,7 @@ describe("kubernetes: many pods do not stall a watcher", () => {
     const { exec } = cluster({ podCount: 1, logs: (pod) => ({ code: 1, killed: true, stdout: `[pod/${pod}/api] 2026-11-25T11:00:00Z ERROR payment 42 timed out\n[pod/${pod}/api] 2026-11-25T11:0` }) });
     const ctx = sourceContext(runtime(config, { exec }), "shop-api", "production", "pods", new AbortController().signal);
     const result = await kubernetesSource.collect(sources.pods!, { window: WINDOW, final: false }, ctx);
-    expect(result.signals.find((s) => s.kind === "log")!.total).toBe(1);
+    expect(result.signals.find((s) => s.kind === "log")!.occurrences.length).toBe(1);
     expect(result.notes[0]).toContain("were cut short");
   });
 

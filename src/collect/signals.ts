@@ -19,9 +19,11 @@ export interface Signal {
   readonly key: string;
   readonly title: string;
   readonly severity: "info" | "warn" | "error";
+  /**
+   * Every occurrence in the window, never a capped sample: a signal's count is how many are listed (one per poll for a
+   * `state` signal), and de-duplication judges each one. Only `sample` is for showing.
+   */
   readonly occurrences: ReadonlyArray<Occurrence>;
-  /** Occurrence count, which can exceed `occurrences.length` when a source caps what it lists. */
-  readonly total: number;
   /** A redacted, quotable line. */
   readonly sample?: string;
   /** How to see the same thing again: a query or command. */
@@ -78,8 +80,7 @@ export function dedupe(
       (o.id !== undefined && o.at >= prior.lastAt - overlapMs && !prior.recent.some((r) => r.id === o.id));
     const kept = signal.occurrences.filter(isNew);
     if (kept.length === 0) continue;
-    const uncounted = Math.max(0, signal.total - signal.occurrences.length);
-    fresh.push({ ...signal, occurrences: kept, total: kept.length + uncounted });
+    fresh.push({ ...signal, occurrences: kept });
 
     const lastAt = Math.max(prior?.lastAt ?? -Infinity, ...kept.map((o) => o.at));
     const recent = [
@@ -108,8 +109,7 @@ export function mergeSignals(signals: ReadonlyArray<Signal>): Signal[] {
     }
     merged.set(fp, {
       ...signal,
-      occurrences: [...prior.occurrences, ...signal.occurrences].slice(-500),
-      total: prior.total + signal.total,
+      occurrences: [...prior.occurrences, ...signal.occurrences],
       sample: signal.sample ?? prior.sample,
     });
   }

@@ -69,8 +69,7 @@ export const commandSource: SourceType = {
         key,
         title: String(s.title ?? s.key).slice(0, 120),
         severity: s.severity === "info" || s.severity === "warn" ? s.severity : "error",
-        occurrences: [...(prior?.occurrences ?? []), occurrence].slice(-200),
-        total: (prior?.total ?? 0) + 1,
+        occurrences: [...(prior?.occurrences ?? []), occurrence],
         ...(s.sample ? { sample: redactText(String(s.sample), { maxBytes: 400 }) } : {}),
         ...(s.state === true ? { state: true } : {}),
       });

@@ -120,22 +120,22 @@ const signal = (overrides: Partial<Signal> = {}): Signal => ({
   title: "timeout calling payments",
   severity: "error",
   occurrences: [{ at: 1000, id: "a" }],
-  total: 1,
+
   ...overrides,
 });
 
 describe("overlap de-duplication", () => {
   test("occurrences re-read in the overlap are not counted twice", () => {
-    const first = dedupe([signal({ occurrences: [{ at: 1000, id: "a" }, { at: 2000, id: "b" }], total: 2 })], {}, 500);
-    expect(first.fresh[0]!.total).toBe(2);
-    const again = dedupe([signal({ occurrences: [{ at: 2000, id: "b" }, { at: 3000, id: "c" }], total: 2 })], first.seen, 500);
+    const first = dedupe([signal({ occurrences: [{ at: 1000, id: "a" }, { at: 2000, id: "b" }] })], {}, 500);
+    expect(first.fresh[0]!.occurrences.length).toBe(2);
+    const again = dedupe([signal({ occurrences: [{ at: 2000, id: "b" }, { at: 3000, id: "c" }] })], first.seen, 500);
     expect(again.fresh[0]!.occurrences.map((o) => o.id)).toEqual(["c"]);
-    expect(again.fresh[0]!.total).toBe(1);
+    expect(again.fresh[0]!.occurrences.length).toBe(1);
   });
 
   test("a late arrival inside the overlap with a new ID still counts once", () => {
     const first = dedupe([signal({ occurrences: [{ at: 2000, id: "b" }] })], {}, 500);
-    const late = dedupe([signal({ occurrences: [{ at: 1800, id: "late" }, { at: 2000, id: "b" }], total: 2 })], first.seen, 500);
+    const late = dedupe([signal({ occurrences: [{ at: 1800, id: "late" }, { at: 2000, id: "b" }] })], first.seen, 500);
     expect(late.fresh[0]!.occurrences.map((o) => o.id)).toEqual(["late"]);
     expect(dedupe([signal({ occurrences: [{ at: 1800, id: "late" }] })], late.seen, 500).fresh).toEqual([]);
   });

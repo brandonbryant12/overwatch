@@ -51,7 +51,7 @@ export const githubCiSource: SourceType = {
       const at = Date.parse(run.createdAt);
       return at >= window.from && at < window.to;
     });
-    const groups = new Map<string, { signal: Omit<Signal, "occurrences" | "total">; occurrences: Occurrence[] }>();
+    const groups = new Map<string, { signal: Omit<Signal, "occurrences">; occurrences: Occurrence[] }>();
     for (const run of runs) {
       const key = `ci:${run.workflowName}`;
       const entry = groups.get(key) ?? {
@@ -71,7 +71,7 @@ export const githubCiSource: SourceType = {
       groups.set(key, entry);
     }
     return {
-      signals: [...groups.values()].map((g) => ({ ...g.signal, occurrences: g.occurrences, total: g.occurrences.length })),
+      signals: [...groups.values()].map((g) => ({ ...g.signal, occurrences: g.occurrences })),
       samples: [],
       notes: [],
     };

@@ -518,12 +518,12 @@ export function parseLogLine(line: string): { at: number; message: string; conta
   return { at, message, ...(prefixed ? { container: prefixed[1]! } : {}) };
 }
 
-type Group = { signal: Omit<Signal, "occurrences" | "total">; occurrences: Occurrence[]; total: number };
+type Group = { signal: Omit<Signal, "occurrences">; occurrences: Occurrence[] };
 
-function group(into: Map<string, Group>, key: string, base: Omit<Signal, "occurrences" | "total">, occurrence: Occurrence) {
-  const entry = into.get(key) ?? { signal: base, occurrences: [], total: 0 };
-  entry.total++;
-  if (entry.occurrences.length < 200) entry.occurrences.push(occurrence);
+/** Every occurrence is kept: what is counted never depends on how many are kept to show. */
+function group(into: Map<string, Group>, key: string, base: Omit<Signal, "occurrences">, occurrence: Occurrence) {
+  const entry = into.get(key) ?? { signal: base, occurrences: [] };
+  entry.occurrences.push(occurrence);
   into.set(key, entry);
 }
 
@@ -758,14 +758,14 @@ async function collect(
     }
   }
 
-  const signals: Signal[] = [...groups.values()].map((g) => ({ ...g.signal, occurrences: g.occurrences, total: g.total }));
+  const signals: Signal[] = [...groups.values()].map((g) => ({ ...g.signal, occurrences: g.occurrences }));
   if (!final) return { ...emptyResult, signals, notes };
 
   // Current state, read once per run.
   const now = window.to;
   const state_ = (key: string, kind: string, title: string, sample: string, query: string) => {
     if (signals.some((s) => s.key === key)) return;
-    signals.push({ source: context.name, kind, key, title: title.slice(0, 120), severity: "error", occurrences: [], total: 1, state: true, sample, query });
+    signals.push({ source: context.name, kind, key, title: title.slice(0, 120), severity: "error", occurrences: [], state: true, sample, query });
   };
   if (state.workloads.note) notes.push(`${context.name}: ${state.workloads.note}`);
   if (pods.length === 0 && workloads.length === 0) {
