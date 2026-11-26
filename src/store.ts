@@ -170,6 +170,51 @@ export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: Readonl
     columns: ["incident", "source", "at_ms", "text"],
   },
   {
+    // When a problem was first observed, by the provider's own time (a log line's timestamp): its onset.
+    name: "onsets",
+    ddl: `CREATE TABLE onsets (incident TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)`,
+    columns: ["incident", "at_ms"],
+  },
+  {
+    // When a deploy rolled out: the provider's rollout time when it gives one (exact), else the interval between the
+    // last observation of the previous revision and the first of this one. Keyed by the deploy's seq.
+    name: "rollouts",
+    ddl: `CREATE TABLE rollouts (seq INTEGER PRIMARY KEY, after_ms INTEGER, by_ms INTEGER NOT NULL, exact INTEGER NOT NULL CHECK (exact IN (0,1)))`,
+    columns: ["seq", "after_ms", "by_ms", "exact"],
+  },
+  {
+    // Measured used capacity by the provider's time, per series (metric, unit and ceiling); a null value is a gap.
+    name: "samples",
+    ddl: `CREATE TABLE samples (id INTEGER PRIMARY KEY, source TEXT NOT NULL, series TEXT NOT NULL, at_ms INTEGER NOT NULL, value REAL)`,
+    columns: ["id", "source", "series", "at_ms", "value"],
+  },
+  {
+    // A staging release compared with unchanged production over two aligned intervals.
+    name: "comparisons",
+    ddl: `CREATE TABLE comparisons (id TEXT PRIMARY KEY, app TEXT NOT NULL, staging_revision TEXT NOT NULL, production_revision TEXT, start_seq INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending','regression','no_signal','unknown','same_release')), reason TEXT, staging_count INTEGER, production_count INTEGER,
+      data TEXT NOT NULL CHECK (json_valid(data)), incident TEXT)`,
+    columns: ["id", "app", "staging_revision", "production_revision", "start_seq", "state", "reason", "staging_count", "production_count", "data", "incident"],
+    json: ["data"],
+  },
+  {
+    // A fix attempt: one per (problem, investigation, reviewed revision, policy). Its intents are written before any
+    // outside step: the candidate before verification, the head and branch before any ref changes.
+    name: "fixes",
+    ddl: `CREATE TABLE fixes (id TEXT PRIMARY KEY, incident TEXT NOT NULL, job_id TEXT NOT NULL, app TEXT NOT NULL, environment TEXT NOT NULL, origin TEXT NOT NULL,
+      state TEXT NOT NULL, reason TEXT, previous TEXT, deployed TEXT, base TEXT, candidate TEXT, head TEXT, diff TEXT, run_id TEXT,
+      data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL)`,
+    columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq"],
+    json: ["data"],
+  },
+  {
+    // What a fixer session selected: one proposal per run, final once stored.
+    name: "proposals",
+    ddl: `CREATE TABLE proposals (run_id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)), refused TEXT)`,
+    columns: ["run_id", "body", "refused"],
+    json: ["body"],
+  },
+  {
     name: "findings",
     ddl: `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')),
       claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`,
@@ -194,10 +239,12 @@ CREATE INDEX IF NOT EXISTS incidents_place ON incidents (app, environment);
 CREATE INDEX IF NOT EXISTS hourly_age ON hourly (hour);
 CREATE INDEX IF NOT EXISTS jobs_subject ON jobs (subject, state);
 CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms);
-CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq);`;
+CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq);
+CREATE INDEX IF NOT EXISTS samples_series ON samples (source, id);
+CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id);`;
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
-const ADDED_TABLES = new Set(["origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
+const ADDED_TABLES = new Set(["onsets", "rollouts", "samples", "comparisons", "fixes", "proposals", "origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
 
 /** Rules kept by the database itself; created with the schema and on open of an older file. */
 const TRIGGERS = `CREATE TRIGGER IF NOT EXISTS findings_cite AFTER INSERT ON findings BEGIN

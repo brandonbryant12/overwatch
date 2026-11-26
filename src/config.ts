@@ -57,7 +57,19 @@ export interface Source {
   readonly metric?: string;
   /** The app's problem words: literal whole words per class (`problemPatterns`), else the defaults. */
   readonly words: Words;
+  /** A Datadog metric that measures used capacity against a fixed ceiling, for time left. */
+  readonly capacity?: { readonly resource: "disk" | "memory" | "quota"; readonly unit: "bytes" | "units"; readonly limit: number };
 }
+
+/** An app's opt-in to fix proposals: the Git names, the exact files a fix may touch, and the trusted verify commands. */
+export interface Fixes {
+  readonly remote: string;
+  readonly base: string;
+  readonly paths: ReadonlyArray<string>;
+  readonly verify: ReadonlyArray<ReadonlyArray<string>>;
+}
+/** Files a fix may never touch, whatever the allowlist says: build, dependency, CI, hooks and credential files. */
+export const FORBIDDEN = /(^|\/)(\.git|\.github|\.gitlab-ci\.yml|\.circleci|\.husky|\.buildkite)(\/|$)|(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|Gemfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|requirements[^/]*\.txt|poetry\.lock|Pipfile(\.lock)?|pyproject\.toml|Makefile|Dockerfile|Jenkinsfile|[^/]*\.gradle(\.kts)?|pom\.xml|\.env[^/]*|[^/]*\.(pem|key|p12)|credentials[^/]*|\.npmrc)$/;
 
 /** Literal whole words that make a line an error or a warning; an empty list disables the class. */
 export interface Words {
@@ -80,7 +92,7 @@ export interface Config {
   readonly mcpToken: string | null;
   readonly opencode: { readonly url: string | null; readonly model: string | null; readonly password: string | null };
   readonly readings: number;
-  readonly apps: Readonly<Record<string, { readonly checkout: string; readonly words: Words }>>;
+  readonly apps: Readonly<Record<string, { readonly checkout: string; readonly words: Words; readonly fixes?: Fixes; readonly promotion?: { readonly staging: string; readonly production: string } }>>;
   readonly watchers: ReadonlyArray<Watcher>;
   readonly sources: ReadonlyArray<Source>;
 }
@@ -130,10 +142,10 @@ export function parseConfig(raw: unknown, file: string): Config {
   const oc = root.opencode === undefined ? {} : keys(root.opencode, "config.opencode", ["url", "model", "password"]);
   if (oc.url !== undefined && !/^https?:\/\//.test(text(oc.url, "config.opencode.url"))) throw new ConfigError("config.opencode.url must be an http(s) URL");
 
-  const apps: Record<string, { checkout: string; words: Words }> = {};
+  const apps: Record<string, { checkout: string; words: Words; fixes?: Fixes; promotion?: { staging: string; production: string } }> = {};
   const envSources = new Map<string, Source[]>();
   for (const [app, appValue] of Object.entries(keys(root.apps, "config.apps", Object.keys(isObject(root.apps) ? root.apps : {})))) {
-    const a = keys(appValue, `apps.${app}`, ["checkout", "environments", "problemPatterns"], ["checkout", "environments"]);
+    const a = keys(appValue, `apps.${app}`, ["checkout", "environments", "problemPatterns", "fixes", "promotion"], ["checkout", "environments"]);
     const patterns = a.problemPatterns === undefined ? {} : keys(a.problemPatterns, `apps.${app}.problemPatterns`, ["error", "warn"]);
     const words = (k: "error" | "warn") => {
       if (patterns[k] === undefined) return DEFAULT_WORDS[k];
@@ -142,14 +154,19 @@ export function parseConfig(raw: unknown, file: string): Config {
         throw new ConfigError(`apps.${app}.problemPatterns.${k} must be a list of at most 50 nonempty words without spaces`);
       return list as string[];
     };
-    apps[app] = { checkout: path(text(a.checkout, `apps.${app}.checkout`)), words: { error: words("error"), warn: words("warn") } };
+    apps[app] = { checkout: path(text(a.checkout, `apps.${app}.checkout`)), words: { error: words("error"), warn: words("warn") }, ...(a.fixes === undefined ? {} : { fixes: fixes(a.fixes, `apps.${app}.fixes`) }) };
+    if (a.promotion !== undefined) {
+      const p = keys(a.promotion, `apps.${app}.promotion`, ["staging", "production"], ["staging", "production"]);
+      apps[app]!.promotion = { staging: text(p.staging, `apps.${app}.promotion.staging`), production: text(p.production, `apps.${app}.promotion.production`) };
+      if (p.staging === p.production) throw new ConfigError(`apps.${app}.promotion names the same environment twice`);
+    }
     for (const [environment, envValue] of Object.entries(keys(a.environments, `apps.${app}.environments`, Object.keys(isObject(a.environments) ? a.environments : {})))) {
       const e = keys(envValue, `apps.${app}.environments.${environment}`, ["sources"], ["sources"]);
       const list: Source[] = [];
       for (const [name, sourceValue] of Object.entries(keys(e.sources, `apps.${app}.environments.${environment}.sources`, Object.keys(isObject(e.sources) ? e.sources : {})))) {
         const where = `apps.${app}.environments.${environment}.sources.${name}`;
         if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/.test(name)) throw new ConfigError(`${where}: a source name is letters, digits, "-" and "_"`);
-        const s = keys(sourceValue, where, ["type", "context", "namespace", "selector", "readings", "baseUrl", "apiKey", "appKey", "query", "metric"], ["type"]);
+        const s = keys(sourceValue, where, ["type", "context", "namespace", "selector", "readings", "baseUrl", "apiKey", "appKey", "query", "metric", "capacity"], ["type"]);
         const kind = s.type;
         if (kind !== "kubernetes" && kind !== "datadog") throw new ConfigError(`${where}.type must be "kubernetes" or "datadog"`);
         const all: ReadonlyArray<string> = READINGS[kind];
@@ -158,14 +175,23 @@ export function parseConfig(raw: unknown, file: string): Config {
           throw new ConfigError(`${where}.readings must list some of: ${all.join(", ")}`);
         const common = { id: `${app}/${environment}/${name}`, app, environment, name, kind: kind as "kubernetes" | "datadog", everyMs: 0, readings: chosen as string[], excluded: all.filter((r) => !chosen.includes(r)), checkout: apps[app].checkout, words: apps[app].words };
         if (kind === "kubernetes") {
-          for (const k of ["baseUrl", "apiKey", "appKey", "query", "metric"]) if (s[k] !== undefined) throw new ConfigError(`${where}.${k} is a Datadog setting`);
+          for (const k of ["baseUrl", "apiKey", "appKey", "query", "metric", "capacity"]) if (s[k] !== undefined) throw new ConfigError(`${where}.${k} is a Datadog setting`);
           list.push({ ...common, context: text(s.context, `${where}.context`), namespace: text(s.namespace, `${where}.namespace`), selector: text(s.selector, `${where}.selector`) });
         } else {
           for (const k of ["context", "namespace", "selector"]) if (s[k] !== undefined) throw new ConfigError(`${where}.${k} is a Kubernetes setting`);
           const baseUrl = text(s.baseUrl ?? "https://api.datadoghq.com", `${where}.baseUrl`).replace(/\/+$/, "");
           if (!/^https:\/\//.test(baseUrl) && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(baseUrl)) throw new ConfigError(`${where}.baseUrl must use https`);
           if ((chosen as string[]).includes("metrics") && s.metric === undefined) throw new ConfigError(`${where}.metric is required when metrics is read`);
-          list.push({ ...common, baseUrl, apiKey: secretRef(s.apiKey, `${where}.apiKey`), appKey: secretRef(s.appKey, `${where}.appKey`), query: text(s.query, `${where}.query`), ...(s.metric !== undefined ? { metric: text(s.metric, `${where}.metric`) } : {}) });
+          let capacity: Source["capacity"];
+          if (s.capacity !== undefined) {
+            const c = keys(s.capacity, `${where}.capacity`, ["resource", "unit", "limit"], ["resource", "unit", "limit"]);
+            if (!(chosen as string[]).includes("metrics")) throw new ConfigError(`${where}.capacity needs the metrics reading`);
+            if (!["disk", "memory", "quota"].includes(c.resource as string)) throw new ConfigError(`${where}.capacity.resource is disk, memory or quota`);
+            if (!["bytes", "units"].includes(c.unit as string)) throw new ConfigError(`${where}.capacity.unit is bytes or units`);
+            if (typeof c.limit !== "number" || !Number.isFinite(c.limit) || c.limit <= 0) throw new ConfigError(`${where}.capacity.limit is a positive number`);
+            capacity = { resource: c.resource as "disk", unit: c.unit as "bytes", limit: c.limit };
+          }
+          list.push({ ...common, baseUrl, apiKey: secretRef(s.apiKey, `${where}.apiKey`), appKey: secretRef(s.appKey, `${where}.appKey`), query: text(s.query, `${where}.query`), ...(s.metric !== undefined ? { metric: text(s.metric, `${where}.metric`) } : {}), ...(capacity ? { capacity } : {}) });
         }
       }
       envSources.set(`${app}/${environment}`, list);
@@ -189,6 +215,13 @@ export function parseConfig(raw: unknown, file: string): Config {
     if (everyMs < LIMITS.minEveryMs) throw new ConfigError(`watchers[${i}].every is ${everyMs / 1000}s; the shortest polling interval is 60s`);
     watchers.push({ app: String(w.app), environment: String(w.environment), everyMs, sources: list.map((s) => ({ ...s, everyMs })) });
   });
+  for (const [app, a] of Object.entries(apps)) {
+    if (!a.promotion) continue;
+    const every = (env: string) => watchers.find((w) => w.app === app && w.environment === env)?.everyMs;
+    const [st, pr] = [every(a.promotion.staging), every(a.promotion.production)];
+    if (st === undefined || pr === undefined) throw new ConfigError(`apps.${app}.promotion must name two watched environments of ${app}`);
+    if (st !== pr) throw new ConfigError(`apps.${app}.promotion: ${a.promotion.staging} and ${a.promotion.production} must be polled at the same interval`);
+  }
   return {
     file: resolve(file),
     dataDir: path(typeof root.dataDir === "string" ? root.dataDir : join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "overwatch")),
@@ -204,6 +237,28 @@ export function parseConfig(raw: unknown, file: string): Config {
     watchers,
     sources: watchers.flatMap((w) => w.sources),
   };
+}
+
+/** `apps.<app>.fixes`: exact repository-relative files that are not build, dependency, CI or credential files, and argv lists. */
+function fixes(value: unknown, where: string): Fixes {
+  const f = keys(value, where, ["remote", "base", "paths", "verify"], ["remote", "base", "paths", "verify"]);
+  const name = (v: unknown, k: string) => {
+    const t = text(v, `${where}.${k}`);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$/.test(t) || t.includes("..")) throw new ConfigError(`${where}.${k} must be a Git name`);
+    return t;
+  };
+  const paths = f.paths;
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > 10) throw new ConfigError(`${where}.paths must list 1 to 10 files`);
+  for (const p of paths)
+    if (typeof p !== "string" || !/^[A-Za-z0-9._][A-Za-z0-9._/-]{0,200}$/.test(p) || p.split("/").includes("..") || p.endsWith("/") || FORBIDDEN.test(p))
+      throw new ConfigError(`${where}.paths: ${String(p)} is not an exact repository-relative file a fix may change`);
+  const verify = f.verify;
+  if (!Array.isArray(verify) || verify.length === 0 || verify.length > 4) throw new ConfigError(`${where}.verify must list 1 to 4 commands`);
+  for (const argv of verify) {
+    if (!Array.isArray(argv) || argv.length === 0 || argv.some((a) => typeof a !== "string" || !a || a.length > 500)) throw new ConfigError(`${where}.verify: each command is a list of nonempty strings`);
+    if (argv.some((a) => paths.includes(a))) throw new ConfigError(`${where}.verify: a verify input cannot also be a file a fix may change`);
+  }
+  return { remote: name(f.remote, "remote"), base: name(f.base, "base"), paths: paths as string[], verify: verify as string[][] };
 }
 
 export function loadConfig(file: string): Config {

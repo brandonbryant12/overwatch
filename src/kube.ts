@@ -193,6 +193,20 @@ export function parseRevision(stdout: string): string | null {
   return null;
 }
 
+/**
+ * When a revision rolled out, by the provider: the creation time of the replica set whose pod template carries that
+ * revision (`get replicasets`), else the deployment's Progressing condition when it names the new replica set. Null
+ * when the cluster does not say: the caller then knows only the interval between two observations.
+ */
+export function parseRollout(stdout: string, revision: string): number | null {
+  const times = list(rec(JSON.parse(stdout)).items).flatMap((item) => {
+    const one = JSON.stringify({ items: [item] });
+    return parseRevision(one) === revision ? [time(rec(rec(item).metadata).creationTimestamp)] : [];
+  });
+  const known = times.filter((t): t is number => t !== null);
+  return known.length ? Math.max(...known) : null;
+}
+
 export interface KubeEvent {
   readonly uid: string;
   readonly count: number;

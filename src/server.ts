@@ -24,6 +24,7 @@ import { doctor } from "./doctor.ts";
 import { secret } from "./exec.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
+import { compare, comparisons, forecasts } from "./outlook.ts";
 import { Full, trace, type Store } from "./store.ts";
 import { Refusal, Tools } from "./tools.ts";
 import { emptyFolder, reconcile, Trial } from "./trial.ts";
@@ -59,6 +60,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
     await reconcile(store, config, trial.driving).catch((e) => options.log(`reconcile: ${errorText(e)}`));
     if (options.collect) await collector.pass();
     try {
+      if (options.collect) compare(store, config);
       store.expire(clock.now());
       deadlines(store);
       if (options.collect) agents.tick(); // the demo contacts nothing
@@ -135,6 +137,7 @@ export async function serve(store: Store, config: Config, options: { scheduler: 
       if (jobRoute && req.method === "GET") return reply(200, agents.job(decodeURIComponent(jobRoute[1]!)));
       if (req.method === "POST" && path === "/v2/open") return reply(200, await agents.open(String(body.subject ?? ""), key(req)));
       if (req.method === "GET" && path === "/v2/notifications") return reply(200, agents.notifications());
+      if (req.method === "GET" && path === "/v2/outlook") return reply(200, { forecasts: forecasts(store, config), comparisons: comparisons(store, config) });
       const retry = /^\/v2\/notifications\/([^/]+)\/retry$/.exec(path);
       if (retry && req.method === "POST") return reply(200, agents.retry(decodeURIComponent(retry[1]!), key(req)));
       if (req.method === "GET" && path === "/v2/brief") {

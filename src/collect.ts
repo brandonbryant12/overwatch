@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { statfsSync } from "node:fs";
 import { DEFAULT_WORDS, LIMITS, type Config, type Source, type Words } from "./config.ts";
 import { clock } from "./clock.ts";
-import { kubectl, parseEvents, parsePods, parseRevision, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
+import { kubectl, parseEvents, parsePods, parseRevision, parseRollout, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
 import * as datadog from "./datadog.ts";
 import { backoff, classify, fixFor, type FailureKind } from "./failures.ts";
 import { clean, errorText } from "./redact.ts";
@@ -112,6 +112,10 @@ export class Slice {
   readonly uncertain = new Set<string>();
   fresh = 0;
   revision: string | null = null;
+  /** The provider's rollout time of `revision`, when the cluster says it. */
+  rollout: number | null = null;
+  /** A used-capacity sample (null value: not measured), by the provider's time. */
+  capacity: { at: number; value: number | null } | null = null;
   readonly source: Source;
   readonly span: Span;
   private readonly saturated: ReadonlyArray<Span>;
@@ -461,6 +465,12 @@ export class Collector {
       else {
         slice.revision = parseRevision(r.stdout);
         slice.readings.set("workloads", observe(!!slice.revision, now));
+        // A new revision: ask the cluster when it rolled out (get replicasets, read-only). Never first-seen time.
+        const last = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
+        if (slice.revision && last && last.revision !== slice.revision) {
+          const rs = await kubectl(t, "get", ["replicasets", "-l", source.selector!, "-o", "json"]);
+          if (rs.code === 0) slice.rollout = parseRollout(rs.stdout, slice.revision);
+        }
       }
       slice.metrics.push({ name: NOT_READY, reading: "workloads", sample: sample(pods.filter((p) => !p.ready).length), at: now });
     }
@@ -518,6 +528,7 @@ export class Collector {
           slice.metrics.push({ name: point?.name ?? `${source.metric} (${source.metric})`, reading: "metrics", sample: point ? sample(point.value) : UNMEASURED, at: point?.at ?? end });
           // Fresh as of the point's own time: an old point returned again is not a new measurement.
           slice.readings.set("metrics", observe(point !== null, point?.at ?? 0));
+          if (source.capacity) slice.capacity = { at: point?.at ?? end, value: point ? point.value : null };
         }
       } catch (error) {
         if (error instanceof datadog.HttpFailure) throw new SourceFailure(classify(error.message, error.status), error.message);
@@ -543,12 +554,14 @@ export class Collector {
         fresh: slice.fresh,
         admitted: slice.admitted.length,
         readings: Object.fromEntries(slice.readings),
+        ordinary: last?.ordinary ?? false,
       });
       if (gap) {
         w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, 'all', ?, ?, 'gap', NULL)", seq, source.id as Clean, gap.from, gap.to);
         w.event("coverage_gap", source.id as Clean, { from: gap.from, to: gap.to, reason: "older than the 14-day catch-up limit" });
       }
       const counts = new Map<string, number>();
+      const firstAt = new Map<string, number>();
       const recent = new Map<string, Slice["admitted"]>();
       for (const record of slice.admitted) {
         const inserted = w.run(
@@ -557,6 +570,7 @@ export class Collector {
         ).changes;
         if (!inserted) continue;
         counts.set(record.bucket, (counts.get(record.bucket) ?? 0) + 1);
+        firstAt.set(record.bucket, Math.min(firstAt.get(record.bucket) ?? Infinity, record.at));
         hourly(w, incidentId(source, record.bucket), record.at);
         recent.set(record.bucket, [...(recent.get(record.bucket) ?? []).slice(-(LIMITS.linesPerProblem - 1)), record]);
       }
@@ -589,6 +603,8 @@ export class Collector {
         if (added === 0 && !info.inexact && !before) continue;
         const group = before ? groupNow(this.store, id) : null;
         incident(w, source, bucket, info.title, info.severity, info.reading, added, !info.inexact, now, seq, added > 0 || info.seen, info.seen);
+        // Onset: the provider's time of the first line ever admitted for a new problem.
+        if (!before && firstAt.has(bucket)) w.run("INSERT OR IGNORE INTO onsets (incident, at_ms) VALUES (?, ?)", id as Clean, firstAt.get(bucket)!);
         afterChange(w, this.store, id, before, added, seq);
         // A problem's first admission is investigated automatically once the model has passed its trial.
         if (!before && added > 0 && this.store.meta(approvalKey(this.config)) === "on") queueInvestigation(w, this.store, this.config, id, "automatic");
@@ -601,6 +617,7 @@ export class Collector {
       }
       if (gap) w.run("UPDATE incidents SET exact = 0 WHERE source = ? AND active = 1 AND reading <> 'gauge'", source.id as Clean);
       if (slice.capped) w.run("INSERT OR REPLACE INTO saturated (source, reading, from_ms, to_ms) VALUES (?, 'logs', ?, ?)", source.id as Clean, slice.span.from, slice.span.to);
+      const lastSeen = this.store.get<{ ok_ms: number | null }>("SELECT ok_ms FROM readings WHERE source = ? AND reading = 'workloads'", source.id)?.ok_ms ?? null;
       for (const [reading, r] of slice.readings) {
         w.run("INSERT INTO coverage (seq, source, reading, from_ms, to_ms, state, missed) VALUES (?, ?, ?, ?, ?, ?, ?)", seq, source.id as Clean, reading as Clean, slice.span.from, slice.span.to, r.state as Clean, r.missed);
         w.run(
@@ -613,7 +630,12 @@ export class Collector {
         if (r.state !== "failed") this.okMono.set(`${source.id}|${reading}`, clock.mono() - Math.max(0, now - r.observedMs));
       }
       if (last) this.interval(w, source, slice.readings, slice.metrics, touched, last.ordinary, seq, now);
-      if (slice.revision) this.deploy(w, source, slice.revision);
+      if (slice.revision) this.deploy(w, source, slice.revision, slice.rollout, lastSeen, now);
+      if (slice.capacity && source.capacity) {
+        const series = sha(source.metric, source.capacity.resource, source.capacity.unit, source.capacity.limit);
+        w.run("INSERT INTO samples (source, series, at_ms, value) VALUES (?, ?, ?, ?)", source.id as Clean, series as Clean, slice.capacity.at, slice.capacity.value);
+        w.run("DELETE FROM samples WHERE source = ? AND id NOT IN (SELECT id FROM samples WHERE source = ? ORDER BY id DESC LIMIT 60)", source.id as Clean, source.id as Clean);
+      }
       if (checkpoint !== null) {
         const before = this.store.get<{ failure: string | null }>("SELECT failure FROM sources WHERE id = ?", source.id);
         w.run(
@@ -679,12 +701,17 @@ export class Collector {
     );
   }
 
-  /** A deploy is recorded with its seq when the running revision changes. */
-  private deploy(w: Writer, source: Source, revision: string) {
+  /**
+   * A deploy is recorded with its seq when the running revision changes, with when it rolled out: the provider's time
+   * when the cluster gives one, else only the interval after the last observation of the previous revision and up to
+   * this observation. Onset is judged against that interval (see fixes.ts), never against first-seen time alone.
+   */
+  private deploy(w: Writer, source: Source, revision: string, rollout: number | null, lastSeen: number | null, now: number) {
     const last = this.store.get<{ revision: string }>("SELECT revision FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", source.app, source.environment);
     if (last?.revision === revision) return;
-    const seq = w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id });
+    const seq = w.event("deploy", `${source.app}/${source.environment}` as Clean, { revision, previous: last?.revision ?? null, source: source.id, rolloutMs: rollout });
     w.run("INSERT INTO deploys (seq, app, environment, revision, previous) VALUES (?, ?, ?, ?, ?)", seq, source.app as Clean, source.environment as Clean, revision as Clean, (last?.revision ?? null) as Clean | null);
+    if (last) w.run("INSERT INTO rollouts (seq, after_ms, by_ms, exact) VALUES (?, ?, ?, ?)", seq, rollout ?? lastSeen, rollout ?? now, rollout === null ? 0 : 1);
     afterDeploy(w, this.store, source.app, source.environment, seq, revision);
   }
 

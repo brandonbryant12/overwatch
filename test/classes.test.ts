@@ -174,6 +174,10 @@ test("class: a restored copy that breaks any declared reference is refused whole
         w.run("INSERT INTO messages (id, run_id, purpose) VALUES ('msg_x', 'run_x', 'prompt')");
         w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES ('e_x', 'run_x', 'ses_x', 'pods', 'p', 1)");
         w.run("INSERT INTO origins (handle, origin) VALUES ('e_x', 'telemetry')");
+        w.run("INSERT INTO onsets (incident, at_ms) VALUES ('inc_1', 0)");
+        w.run("INSERT INTO comparisons (id, app, staging_revision, start_seq, state, data, incident) VALUES ('cmp_x', 'shop', 'a', 1, 'regression', '{}', 'inc_1')");
+        w.run("INSERT INTO proposals (run_id, body) VALUES ('run_x', '{}')");
+        w.run("INSERT INTO fixes (id, incident, job_id, app, environment, origin, state, run_id, seq) VALUES ('fx_x', 'inc_1', 'job_x', 'shop', 'prod', 'manual', 'blocked', 'run_x', 1)");
         w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES ('f_x', 'run_x', 'unsure', '[]', '{}', '{}')");
         w.run("INSERT INTO occurrences (key, source, stream, at_ms, incident) VALUES ('k', 's', 's', 0, 'inc_1')");
         w.run("INSERT INTO hourly (incident, hour, count) VALUES ('inc_1', 1, 1)");
