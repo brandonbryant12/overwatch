@@ -34,7 +34,7 @@ import { DEFAULT_COME_BACK, Incident, NoteChange, ReportSignal } from "../domain
 import { API_VERSION, handlers, Overwatch, OverwatchApi } from "../domain/model.ts";
 import { CompleteRun, FailRun, MarkRunSent, NudgeRun, Run } from "../domain/run.ts";
 import { SearchStore } from "../domain/search.ts";
-import { INBOX, Inbox, IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
+import { IncidentPage, PendingRuns, RUNS } from "../domain/views.ts";
 import { ConfigureWatcher, NoteResumed, NoteSuspended, RecordDeploy, RecordGap, Watcher } from "../domain/watcher.ts";
 import { layerSqlite, SqliteHost } from "../host/sqlite.ts";
 import { CapacityRow, CheckpointRow, CodeBasisRow, CodeRow, MetricStateRow, WatcherRunRow } from "./rows.ts";
@@ -195,14 +195,6 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
               yield* watchers.send(ref, new NoteResumed({ source: note.source, connection: note.connection, at: note.at }), { commandId });
               return;
           }
-        }),
-      ),
-    /** Every incident in the inbox view, whatever its way out. */
-    inbox: () =>
-      run(
-        Effect.gen(function* () {
-          const views = yield* Inbox;
-          return Option.match(yield* views.get(INBOX), { onNone: () => [], onSome: (v) => v.items });
         }),
       ),
     pendingRuns: () =>
@@ -440,33 +432,43 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps = {}
     );
     await bringBackOnDeploy();
   };
-  /** A deploy in an environment brings back its incidents deferred until something changes, saying which deploy. */
+  /**
+   * A deploy is told to every incident in its environment, with when it was recorded; each incident decides from its own
+   * history whether it was deferred until a change before then. Which incidents are in the environment comes from the
+   * journal (written in the same commit), never from a view that may lag. The cursor only says which deploys were told.
+   */
   const bringBackOnDeploy = async () => {
     const deploys = await read((db) => {
       const state = db.prepare("SELECT position FROM projections WHERE name = 'changes'").get() as { position: number } | undefined;
-      const rows = db.prepare("SELECT position, stream, data FROM journal WHERE position > ? AND type = 'DeployObserved' ORDER BY position").all(state?.position ?? 0) as Array<{ position: number; stream: string; data: string }>;
+      const rows = db
+        .prepare("SELECT position, stream, data, at FROM journal WHERE position > ? AND type = 'DeployObserved' ORDER BY position")
+        .all(state?.position ?? 0) as Array<{ position: number; stream: string; data: string; at: number }>;
       const end = (db.prepare("SELECT max(position) AS p FROM journal").get() as { p: number | null }).p ?? 0;
       return { rows, end };
     });
-    if (deploys.rows.length) {
-      const items = await domain.inbox();
-      for (const row of deploys.rows) {
-        const watcher = options.watchers.find((w) => w.id === row.stream.slice(row.stream.indexOf("/") + 1));
-        if (!watcher) continue;
-        const deploy = JSON.parse(row.data) as { revisions: string[] };
-        const waiting = items.filter((i) => i.app === watcher.app && i.environment === watcher.environment && i.disposition === "later" && i.way?.waitsFor === "change");
-        for (const item of waiting) {
-          await run(
-            Effect.gen(function* () {
-              const incidents = yield* Incident;
-              yield* incidents.send(
-                Incident.ref(item.incidentId),
-                new NoteChange({ cause: "deploy", reason: `Back: a deploy in ${watcher.environment} (now running ${deploy.revisions.join(", ").slice(0, 120)}).` }),
-                { commandId: `change_${item.incidentId}_${row.position}` },
-              );
-            }),
-          );
-        }
+    for (const row of deploys.rows) {
+      const watcher = options.watchers.find((w) => w.id === row.stream.slice(row.stream.indexOf("/") + 1));
+      if (!watcher) continue;
+      const deploy = JSON.parse(row.data) as { revisions: string[] };
+      const incidents = await read(
+        (db) =>
+          (
+            db
+              .prepare("SELECT DISTINCT stream FROM journal WHERE type = 'IncidentOpened' AND json_extract(data, '$.app') = ? AND json_extract(data, '$.environment') = ?")
+              .all(watcher.app, watcher.environment) as Array<{ stream: string }>
+          ).map((r) => r.stream.slice(r.stream.indexOf("/") + 1)),
+      );
+      for (const id of incidents) {
+        await run(
+          Effect.gen(function* () {
+            const incidents = yield* Incident;
+            yield* incidents.send(
+              Incident.ref(IncidentId.make(id)),
+              new NoteChange({ cause: "deploy", at: row.at, reason: `Back: a deploy in ${watcher.environment} (now running ${deploy.revisions.join(", ").slice(0, 120)}).` }),
+              { commandId: `change_${id}_${row.position}` },
+            );
+          }),
+        );
       }
     }
     await atomically((db) =>

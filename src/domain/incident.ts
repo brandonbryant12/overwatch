@@ -175,10 +175,14 @@ export class WakeDeferred extends Domain.Command("WakeDeferred", {
   events: [IncidentCameBack],
 }, { description: "The time an incident was deferred to has come." }) {}
 
-/** Something changed in the incident's environment (a deploy). Brings back an incident deferred until a change. */
+/**
+ * Something changed in the incident's environment (a deploy), at `at`. Every incident in the environment is told; each
+ * decides from its own history: only a Later until a change that was already in force at `at` comes back. A deploy
+ * told late, or one told before the deferral it raced, is judged by when it happened, not when it arrived.
+ */
 export class NoteChange extends Domain.Command("NoteChange", {
   target: IncidentId,
-  input: { cause: Schema.Literals(["deploy"]), reason: Schema.String },
+  input: { cause: Schema.Literals(["deploy"]), reason: Schema.String, at: Schema.Number },
   events: [IncidentCameBack],
 }, { description: "Something changed in the incident's environment." }) {}
 
@@ -338,7 +342,7 @@ export class Incident extends Domain.Aggregate("Incident", {
     NoteChange: (s, cmd, ctx) => {
       if (s._tag !== "Open") return [];
       const way = wayOf(s);
-      if (way?._tag !== "Later" || way.waitsFor !== "change") return [];
+      if (way?._tag !== "Later" || way.waitsFor !== "change" || way.at > cmd.at) return [];
       return [new IncidentCameBack({ at: nowMs(ctx), cause: cmd.cause, reason: redactText(cmd.reason, { maxBytes: 300 }) })];
     },
     RecordFinding: (s, cmd, ctx) => {
