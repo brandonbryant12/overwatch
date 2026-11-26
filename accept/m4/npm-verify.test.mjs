@@ -5,9 +5,39 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 import { ledger, scenario } from "./rig.mjs"
 
+// An application-owned npm test entry point for a clean Git archive with vendored packages.
+// Populate the ordinary Node module search path in private scratch, using only committed inputs.
+const offlineRunner = `
+const fs = require("node:fs")
+const os = require("node:os")
+const path = require("node:path")
+const { spawnSync } = require("node:child_process")
+const deps = fs.mkdtempSync(path.join(os.tmpdir(), "fixture-deps-"))
+try {
+  for (const entry of ["vendor", "package.json", "package-lock.json"]) {
+    fs.cpSync(entry, path.join(deps, entry), { recursive: true })
+  }
+  const install = spawnSync(process.execPath, [
+    process.env.npm_execpath, "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund",
+  ], { cwd: deps, stdio: "inherit" })
+  if (install.status !== 0) process.exitCode = install.status ?? 1
+  else {
+    const run = spawnSync(process.execPath, ["check.cjs"], {
+      env: { ...process.env, NODE_PATH: path.join(deps, "node_modules") }, stdio: "inherit",
+    })
+    process.exitCode = run.status ?? 1
+  }
+} finally {
+  fs.rmSync(deps, { recursive: true, force: true })
+}
+`
+
 // A small offline npm tree. The application needs the validator, which uses the scalar package.
 // Track the tarballs and lockfile just as an application may vendor its packages for offline CI.
-test("the documented npm verify works, or identifies the unavailable prerequisite and its repair", async (t) => {
+for (const [label, prepareDeps] of [
+  ["the documented npm verify works, or identifies the unavailable prerequisite and its repair", false],
+  ["npm test can prepare its locked dependencies offline in verifier scratch", true],
+]) test(label, async (t) => {
   const { x, end } = await scenario(t, {
     setup: {
       stable(x, put) {
@@ -50,13 +80,14 @@ test("the documented npm verify works, or identifies the unavailable prerequisit
             name: "fixture-shop",
             private: true,
             version: "1.0.0",
-            scripts: { test: "node check.cjs" },
+            scripts: { test: prepareDeps ? "node verify-offline.cjs" : "node check.cjs" },
             dependencies: {
               "fixture-validator": "file:vendor/fixture-validator.tgz",
               "fixture-scalar": "file:vendor/fixture-scalar.tgz",
             },
           }),
         )
+        if (prepareDeps) put("verify-offline.cjs", offlineRunner)
         put(".gitignore", "node_modules/\n")
         put(
           "check.cjs",
@@ -85,6 +116,9 @@ test("the documented npm verify works, or identifies the unavailable prerequisit
     },
   })
   t.diagnostic(JSON.stringify({ state: end.state, reason: end.reason, verification: end.verification }))
+  await x.stop()
+  assert.deepEqual(fs.readdirSync(x.dir("tmp")).filter(name => name.startsWith("ow-verify-")), [])
+  if (prepareDeps) assert.equal(end.state, "draft", JSON.stringify(end.verification))
   if (end.state === "draft") {
     assert.equal(end.verification[0].exitCode, 0)
     assert.equal(ledger(x).length, 1)

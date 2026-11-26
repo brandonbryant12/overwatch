@@ -100,6 +100,14 @@ try {
   assert.equal(audit("build: every column").status, 0)
   assert.equal(audit("build: the request key").status, 0)
   console.log("typecheck, column declarations, keyed-router build check: passed")
+  const declared = 'columns:["related_case","owner_case"]'
+  const missing = 'columns:["related_case"]'
+  change("src/store.ts", declared, missing)
+  const columnCheck = audit("build: every column")
+  assert.equal(columnCheck.status, 1)
+  assert.match(columnCheck.stdout, /review_links has an undeclared or missing column/)
+  console.log("undeclared owner_case: rejected by the column check")
+  change("src/store.ts", missing, declared)
   fs.writeFileSync(
     file("src/review-adapter.ts"),
     'import {spawn} from "node:child_process"; export const unused = spawn;\n',
