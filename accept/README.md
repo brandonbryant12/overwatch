@@ -89,3 +89,5 @@ node accept/m4/setup.mjs
 ```
 
 The timed fleet has 200 real fixture problems across six watched namespaces. A Chrome response fixture adds display examples of every fix, forecast and comparison state. The write routes, search, focus, queue and clipboard checks still exercise the real page and service. The native and publication tests separately exercise the states a verifier or host actually produced. The installation exercise clones the assessed revision and runs the guide examples with an isolated home and launchctl ledger.
+
+The release glob includes the explicit macOS isolation-unavailable and 5,500-line budget controls in `m4/platform.test.mjs`. To check the setup guide's role count and doctor exit-code promise separately, run `node --no-warnings --test --test-concurrency=1 accept/guide-contract.test.mjs`.
