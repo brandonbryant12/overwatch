@@ -16,6 +16,7 @@ import { bounded, clock } from "./clock.ts";
 import { type ApiError, apiError, PeerError, Unavailable } from "./errors.ts";
 import { effect, run as exec } from "./exec.ts";
 import { afterFinding, announce, groupNow, label, passed, type Plan } from "./inbox.ts";
+import { buildHandoff } from "./lens.ts";
 import { after, emptyFolder, type OpenCode, OpenCodeClient } from "./opencode.ts";
 import { clean, errorText } from "./redact.ts";
 import { type Full, json, type Clean, Store, type Writer, sql } from "./store.ts";
@@ -24,9 +25,9 @@ import { type Code, type RunContext, Tools } from "./tools.ts";
 /** Sessions actively driven at once, across the trial, readings, challengers, answers and the fixer. */
 export const SLOTS = 2;
 
-/** The session slots every agent session shares: a semaphore of `SLOTS` permits. */
+/** The session slots every agent session shares: a semaphore of `config.opencode.concurrency` permits (default 2). */
 export class Slots extends Context.Service<Slots, Semaphore.Semaphore>()("overwatch/Slots") {
-  static readonly layer = Layer.effect(Slots, Semaphore.make(SLOTS));
+  static readonly layer = Layer.effect(Slots, Effect.flatMap(Effect.serviceOption(AppConfig), (c) => Semaphore.make(c._tag === "Some" ? c.value.opencode.concurrency : SLOTS)));
 }
 
 /** Waits for a free session slot around one piece of work. */
@@ -136,7 +137,7 @@ export const converse = Effect.fn("converse")(function* (emptyDir: string, t: Ta
   }
   return { runId, filed: false, reason, tries, nudges }; });
 
-const START = ["the telemetry", "the change that was deployed", "a harmless explanation"];
+const START = ["the telemetry", "the change that was deployed", "a harmless explanation", "latency and resource saturation", "recent commits and config drift"];
 
 interface WorkRow { id: string; job_id: string; kind: "reading" | "challenge" | "answer"; slot: number | null; priority: number; state: string; tries: number; ask_key: string | null; run_id: string | null; reason: string | null; seq: number }
 interface JobRow { id: string; kind: string; subject: string; state: string; inputs: string | null; result: string | null; created_seq: number }
@@ -496,10 +497,10 @@ export class Agents extends Context.Service<Agents, AgentsShape>()("overwatch/Ag
           let made: { url: string | null } | undefined;
           if (!(yield* oc.exists(intent.sessionId)))
             made = yield* oc.createSession(yield* store.permit("peer", null, { subject, handoff: intent.sessionId }), { id: intent.sessionId, title: `Overwatch: ${clean(what, 120)}`, agent: null, model: config.opencode.model, directory: emptyDir });
-          if (!(yield* oc.messages(intent.sessionId)).some((m) => m.id === intent.message))
-            yield* oc.prompt(yield* store.permit("peer", null, { subject, handoff: intent.message }), intent.sessionId, {
-              id: intent.message,
-              text: `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.`,});
+          if (!(yield* oc.messages(intent.sessionId)).some((m) => m.id === intent.message)) {
+            const rich = yield* buildHandoff(subject).pipe(Effect.map((h) => h.prompt), Effect.orElseSucceed(() => `Overwatch focus: ${subject} (${clean(what, 200)}). Read it with ow_get {"id": "${subject}"}; search with ow_search. Ask the owner before any way out with ow_act.`));
+            yield* oc.prompt(yield* store.permit("peer", null, { subject, handoff: intent.message }), intent.sessionId, { id: intent.message, text: rich });
+          }
           if (!(yield* oc.exists(intent.sessionId))) return yield* new PeerError({ message: "the session is not there" });
           const url = made?.url ?? `${oc.url}/session/${intent.sessionId}`;
           yield* store.tx((w) => Effect.gen(function* () {

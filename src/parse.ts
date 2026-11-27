@@ -4,6 +4,18 @@
  * become a measured zero, false or epoch.
  */
 import { createHash } from "node:crypto";
+import { Effect, Option, Schema } from "effect";
+
+/** Tolerant Schema combinators shared by kubectl and Datadog decoders. */
+export const sField = <S extends Schema.Top>(schema: S) => Schema.optional(schema.pipe(Schema.catchDecoding(() => Effect.succeedNone)));
+export const sObj = <F extends Schema.Struct.Fields>(fields: F) => Schema.Struct(fields).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({} as Schema.Struct.Type<F>))));
+export const sList = <S extends Schema.Top>(item: S) => Schema.Array(item).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some([] as ReadonlyArray<S["Type"]>))));
+export const sText = sField(Schema.NonEmptyString);
+export const sUnknown = Schema.optional(Schema.Unknown);
+export const sDecode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
+  const run = Schema.decodeUnknownOption(schema);
+  return (value: unknown): S["Type"] | undefined => Option.getOrUndefined(run(value));
+};
 
 /** JSON text as a value, or undefined when it is not JSON. */
 export const parseJson = (text: string): unknown => { try { return JSON.parse(text); } catch { return undefined; } };

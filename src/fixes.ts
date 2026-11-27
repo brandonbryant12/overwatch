@@ -78,7 +78,7 @@ export const admission = Effect.fnUntraced(function* (incident: string, jobId: s
   if (gates) return halt("blocked", gates);
   const r = job.result ? (JSON.parse(job.result) as { verdict: string; observed: boolean; planned: number; counts: Record<string, number>; challenge: { outcome: string | null } | null }) : null;
   if (job.state !== "completed" || !r) return halt("ineligible", "the investigation has not finished");
-  if (r.planned !== 3 || r.counts.real !== 3) return halt("ineligible", `a fix needs three of three real readings; this one had ${r.counts.real ?? 0} of ${r.planned}`);
+  if (r.planned < 3 || r.counts.real !== r.planned) return halt("ineligible", `a fix needs at least three unanimous real readings; this one had ${r.counts.real ?? 0} of ${r.planned}`);
   if (r.challenge?.outcome !== "upheld") return halt("ineligible", "the challenger did not uphold it");
   if (!r.observed) return halt("ineligible", "it was not observed in telemetry (code only)");
   if (!inc.active || inc.way) return halt("ineligible", inc.way ? "the problem has been put away" : "the problem is no longer active");
@@ -291,6 +291,8 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
                   Effect.andThen(set(w, current, "verify_failed", failedBecause(failed), {}, { verification: results }), w.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, 'off')", fixGateKey(config, current.app) as Clean)));
               }
               yield* update(r, "verified", null, { head: r.candidate }, { verification: results, repo: (yield* repository(r.app)).name });
+              // Opt-in human-on-the-loop: open a draft PR automatically using the exact same permit-gated pipeline (never merges).
+              if (policy.mode === "draft_pr") yield* publish(r.id).pipe(Effect.ignore);
             }}));
         if (Exit.isSuccess(outcome)) return;
         if (Cause.hasInterruptsOnly(outcome.cause)) return yield* Effect.failCause(outcome.cause as Cause.Cause<never>);

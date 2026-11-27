@@ -7,7 +7,9 @@
 import { Effect, Schema } from "effect";
 import { AppConfig, type Source } from "./config.ts";
 import { clock } from "./clock.ts";
+import { run as exec } from "./exec.ts";
 import { afterChange, announce, groupNow } from "./inbox.ts";
+import { clean } from "./redact.ts";
 import { json, Store, type Clean, type Writer, sql } from "./store.ts";
 import { sha, type ProviderTime } from "./parse.ts";
 
@@ -66,16 +68,15 @@ export function forecast(source: Source, rows: ReadonlyArray<{ series: string; a
   if (steps.some((s) => s.dt <= 0 || s.dt > 2 * every)) return none("the readings are not evenly spaced");
   if (steps.some((s) => s.dv <= 0)) return none("usage did not rise at every reading");
   const slopes: number[] = [];
-  for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) slopes.push((points[j]!.value - points[i]!.value) / (points[j]!.at - points[i]!.at));
+  for (let i = 0; i < points.length; i++) for (let j = i + 1; j < points.length; j++) slopes.push(((points[j]!.value - points[i]!.value) * 60_000) / (points[j]!.at - points[i]!.at));
   slopes.sort((a, b) => a - b);
-  const slope = (slopes[7]! + slopes[7]!) / 2; // 15 slopes: the 8th is the median
-  if (!(slope > 0)) return none("usage is flat");
-  if (steps.some((s) => Math.abs(s.dv - slope * s.dt) > 0.25 * slope * s.dt)) return none("usage rose unevenly; the rate cannot support a time");
-  const etaMs = (cap.limit - latest!.value) / slope;
-  if (!Number.isFinite(etaMs)) return none("usage is flat");
-  const ratePerMinute = slope * 60_000;
-  if (etaMs > DAY_MS) return { ...none("more than 24 hours at this rate", "outside_horizon"), ratePerMinute };
-  return { ...base, state: "forecast", reason: null, asOfMs: latest!.at, samples: points.length, etaMinutes: Math.ceil(etaMs / 60_000), ratePerMinute };
+  const ratePerMinute = slopes[7]!; // 15 slopes: the 8th is the median, in units/minute
+  if (!(ratePerMinute > 0)) return none("usage is flat");
+  if (steps.some((s) => Math.abs(s.dv - (ratePerMinute * s.dt) / 60_000) > 0.25 * ((ratePerMinute * s.dt) / 60_000))) return none("usage rose unevenly; the rate cannot support a time");
+  const etaMin = (cap.limit - latest!.value) / ratePerMinute;
+  if (!Number.isFinite(etaMin)) return none("usage is flat");
+  if (etaMin > DAY_MS / 60_000) return { ...none("more than 24 hours at this rate", "outside_horizon"), ratePerMinute };
+  return { ...base, state: "forecast", reason: null, asOfMs: latest!.at, samples: points.length, etaMinutes: Math.ceil(etaMin), ratePerMinute };
 }
 
 /** Time left for every capacity source, from its stored samples. */
@@ -208,3 +209,71 @@ export const comparisons = Effect.gen(function* () {
   return (yield* sql.all<Row & { reason: string | null; staging_count: number | null; production_count: number | null; incident: string | null }>(
     "SELECT * FROM comparisons c WHERE start_seq = (SELECT max(start_seq) FROM comparisons WHERE app = c.app) ORDER BY app"))
     .map((c) => ({ app: c.app, staging: config.apps[c.app]?.promotion?.staging ?? null, production: config.apps[c.app]?.promotion?.production ?? null, stagingRevision: c.staging_revision, productionRevision: c.production_revision, state: c.state === "pending" ? "unknown" : c.state, reason: c.state === "pending" ? "waiting for two aligned fully measured intervals" : c.reason, stagingCount: c.staging_count, productionCount: c.production_count, incident: c.incident, sinceSeq: c.start_seq })); });
+
+export interface CommitSummary { app: string; sha: string; parent: string | null; committedAt: number; subject: string; files: number; insertions: number; deletions: number; flags: string[]; paths: string[]; deployedEnvs: string[] }
+
+const RISK: ReadonlyArray<readonly [string, RegExp]> = [
+  ["config", /(?:^|\/)(?:config|settings|env|flags)|\.(?:json|ya?ml|toml|ini)$/i],
+  ["database", /migrat|schema|\.sql$|database|pool|prisma|drizzle/i],
+  ["auth", /auth|token|secret|security|perm|rbac|oauth|jwt/i],
+  ["timeout", /timeout|retry|backoff|circuit|limit|rate/i],
+];
+/** Deterministic risk flags computed purely from changed paths, diff size and subject. */
+export function commitRiskFlags(paths: ReadonlyArray<string>, subject: string, insertions: number, deletions: number, watched?: ReadonlyArray<string>): string[] {
+  const hay = `${subject} ${paths.join(" ")}`, flags: string[] = [];
+  for (const [name, re] of RISK) if (re.test(hay)) flags.push(name);
+  if (insertions + deletions >= 300 || paths.length >= 12) flags.push("large_diff");
+  if (watched?.length && paths.some((p) => watched.some((w) => p === w || p.startsWith(w.endsWith("/") ? w : `${w}/`)))) flags.push("watched_path");
+  return flags;
+}
+
+/** Read-only git commit watcher: inspects each app's checkout for newly landed commits and persists deterministic stats. */
+export const watchCommits = Effect.gen(function* () {
+  const store = yield* Store, config = yield* AppConfig;
+  for (const [app, a] of Object.entries(config.apps)) {
+    if (!a.commitWatch) continue;
+    const limit = a.commitWatch.limit ?? 15, ref = a.commitWatch.branch;
+    const args = ["-C", a.checkout, "log", "-n", String(limit), "--format=%x1e%H%x1f%P%x1f%ct%x1f%s", "--numstat", ...(ref ? [ref] : [])];
+    const r = yield* exec("git", args, { timeoutMs: 10_000 });
+    if (r.code !== 0 || !r.stdout.trim()) continue;
+    const known = new Set((yield* store.all<{ sha: string }>("SELECT sha FROM commits WHERE app = ?", app)).map((x) => x.sha));
+    const fresh: Array<{ sha: string; parent: string | null; committedAt: number; subject: string; files: number; insertions: number; deletions: number; flags: string[]; paths: string[] }> = [];
+    for (const chunk of r.stdout.split("\x1e").filter(Boolean)) {
+      const [head, ...statLines] = chunk.trim().split("\n");
+      const [hash, parents = "", sec = "0", subject = ""] = (head ?? "").split("\x1f");
+      if (!hash || known.has(hash)) continue;
+      let insertions = 0, deletions = 0;
+      const paths: string[] = [];
+      for (const l of statLines) {
+        const [ins, del, p] = l.split("\t");
+        if (!p) continue;
+        if (ins && /^\d+$/.test(ins)) insertions += Number(ins);
+        if (del && /^\d+$/.test(del)) deletions += Number(del);
+        if (paths.length < 30) paths.push(clean(p, 200));
+      }
+      const flags = commitRiskFlags(paths, subject, insertions, deletions, a.commitWatch?.paths);
+      fresh.push({ sha: hash, parent: parents.split(" ")[0] || null, committedAt: Number(sec) * 1000, subject: clean(subject, 240), files: statLines.filter((l) => l.includes("\t")).length, insertions, deletions, flags, paths });
+    }
+    if (!fresh.length) continue;
+    yield* store.tx((w) => Effect.gen(function* () {
+      for (const c of fresh.reverse()) {
+        const seq = yield* w.event("commit", `${app}/${c.sha.slice(0, 12)}` as Clean, { app, sha: c.sha, subject: c.subject, flags: c.flags });
+        yield* w.run("INSERT OR IGNORE INTO commits (app, sha, parent, committed_at, subject, files, insertions, deletions, flags, paths, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          app as Clean, c.sha as Clean, c.parent as Clean | null, c.committedAt, c.subject as Clean, c.files, c.insertions, c.deletions, json(c.flags), json(c.paths), seq);
+      }
+      yield* w.run("DELETE FROM commits WHERE app = ? AND sha NOT IN (SELECT sha FROM commits WHERE app = ? ORDER BY committed_at DESC LIMIT 60)", app as Clean, app as Clean);
+    }));
+  }});
+
+/** Recent commits per watched app, enriched with which environments currently run each commit. */
+export const commits = Effect.gen(function* () {
+  const latest = yield* sql.all<{ app: string; environment: string; revision: string }>(
+    "SELECT d.app, d.environment, d.revision FROM deploys d WHERE d.seq = (SELECT max(seq) FROM deploys WHERE app = d.app AND environment = d.environment)");
+  const rows = yield* sql.all<{ app: string; sha: string; parent: string | null; committed_at: number; subject: string; files: number; insertions: number; deletions: number; flags: string; paths: string }>(
+    "SELECT app, sha, parent, committed_at, subject, files, insertions, deletions, flags, paths FROM commits ORDER BY committed_at DESC LIMIT 50");
+  return rows.map((r): CommitSummary => {
+    const deployedEnvs = latest.filter((d) => d.app === r.app && (d.revision === r.sha || r.sha.startsWith(d.revision) || d.revision.startsWith(r.sha))).map((d) => d.environment);
+    const baseFlags = JSON.parse(r.flags) as string[];
+    const flags = [...new Set([...baseFlags, deployedEnvs.length ? "deployed" : "unreleased"])];
+    return { app: r.app, sha: r.sha, parent: r.parent, committedAt: r.committed_at, subject: r.subject, files: r.files, insertions: r.insertions, deletions: r.deletions, flags, paths: JSON.parse(r.paths) as string[], deployedEnvs };
+  }); });

@@ -8,7 +8,7 @@
  * quiet. With no expected reading at all it can never be quiet.
  */
 import { Effect } from "effect";
-import { comparisons, forecasts } from "./outlook.ts";
+import { commits, comparisons, forecasts } from "./outlook.ts";
 import { AppConfig, LIMITS } from "./config.ts";
 import { clock } from "./clock.ts";
 import { approvalKey } from "./trial.ts";
@@ -114,7 +114,7 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
     coverage,
     metrics: (yield* store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name")).map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: yield* store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),
-    outlook: { forecasts: yield* forecasts, comparisons: yield* comparisons },
+    outlook: { forecasts: yield* forecasts, comparisons: yield* comparisons, commits: yield* commits },
     causes,
     // Real work at the top; the trial's calibration work in its own namespace.
     jobs: yield* jobs(false),

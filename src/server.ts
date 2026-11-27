@@ -25,8 +25,9 @@ import { doctor } from "./doctor.ts";
 import { ApiError, apiError, type Full } from "./errors.ts";
 import { Fixes } from "./fixes.ts";
 import { act, ask, basisOf, deadlines, focus, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
+import { buildHandoff, generateLens } from "./lens.ts";
 import { itemOf, McpRoutes } from "./mcp.ts";
-import { compare, comparisons, forecasts } from "./outlook.ts";
+import { commits, compare, comparisons, forecasts, watchCommits } from "./outlook.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
 import { Store, trace } from "./store.ts";
@@ -131,10 +132,11 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         yield* get("/v2/search", (_, url) => search(url.searchParams.get("q") ?? "", url.searchParams.get("cursor")));
         yield* get("/v2/focus", (_, url) => focus(url.searchParams.get("subject") ?? ""));
         yield* get("/v2/items/:id", (_, __, p) => itemOf(p.id!));
+        yield* get("/v2/items/:id/handoff", (_, __, p) => buildHandoff(p.id!));
         yield* get("/v2/fixes/:id", (_, __, p) => fixes.view(p.id!));
         yield* get("/v2/jobs/:id", (_, __, p) => agents.job(p.id!));
         yield* get("/v2/notifications", () => agents.notifications);
-        yield* get("/v2/outlook", () => Effect.all({ forecasts, comparisons }));
+        yield* get("/v2/outlook", () => Effect.all({ forecasts, comparisons, commits }));
         yield* get("/v2/brief", (_, url) => {
           const q = url.searchParams, num = (k: string) => (q.has(k) ? Number(q.get(k)) : undefined);
           return brief(q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")); });
@@ -167,6 +169,7 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
           ["/v2/ask", { keyed: (_, b) => ask(b) }],
           ["/v2/open", { keyed: (_, b) => agents.open(String(b.subject ?? "")) }],
           ["/v2/items/:id/investigate", { keyed: (p) => agents.investigate(p.id!), code: 202 }],
+          ["/v2/items/:id/lens", { command: (p) => generateLens(p.id!) }],
           ["/v2/items/:id/corrections", { keyed: (p, b) => agents.correct(p.id!, b) }],
           ["/v2/items/:id/fix", { keyed: (p, b) => fixes.request(p.id!, b), code: 202 }],
           ["/v2/fixes/:id/publish", { keyed: (p, b) => Effect.flatMap(basisOf(b), (basis) => fixes.publication(p.id!, basis)) }],
@@ -231,6 +234,7 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
           if (collect) yield* collector.pass;
           yield* Effect.gen(function* () {
             if (collect) yield* compare;
+            if (collect) yield* watchCommits;
             yield* store.expire(clock.now());
             yield* deadlines;
             if (collect) yield* agents.tick; // the demo contacts nothing

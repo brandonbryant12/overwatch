@@ -31,6 +31,11 @@ const PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
 const TOKEN = /[A-Za-z0-9+/_-]{20,}={0,2}/g;
 const RUN = /[A-Za-z0-9]{16,}/g;
 const HEX_OR_UUID = /^[0-9a-f-]+$/i;
+let customPatterns: RegExp[] = [];
+/** Configures extra corporate redaction regexes (from config `redactPatterns`), applied in `clean()` and `outbound()`. */
+export function setRedactPatterns(patterns: ReadonlyArray<string>): void {
+  customPatterns = patterns.map((p) => new RegExp(p, "g"));
+}
 
 /**
  * True when a run of letters and digits looks generated rather than written: digits scattered, constant changes of
@@ -72,6 +77,7 @@ export function clean(input: string, maxBytes = 16_384): Clean {
       if (kind === "named_secret" || kind === "dsn_password") return `${groups[0]}[REDACTED:${kind}]`;
       return `[REDACTED:${kind}]`; });
   }
+  for (const re of customPatterns) out = out.replace(re, "[REDACTED:custom]");
   out = out.replace(TOKEN, (token) => {
     if (HEX_OR_UUID.test(token)) return token;
     const runs = token.match(RUN) ?? [];

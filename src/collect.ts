@@ -451,6 +451,18 @@ const make = Effect.gen(function* () {
             return p ? s.add(sha("dd", source.baseUrl, source.id, log.id), source.id, log.at, p.fingerprint, p.title.replace(/^(ERROR|WARN) (?=ERROR|WARN)/, ""), p.severity, "logs", log.message) : Effect.void; });
           s.readings.set("logs", s.capped ? { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
         }
+        if (source.readings.includes("spans") && source.spans) {
+          const sp = source.spans, floorMs = sp.warnMs ?? sp.slowMs;
+          let unplaced = false;
+          const recognised = yield* datadog.searchSpans(source, s.span.from, s.span.to, (span) => {
+            if (span.at === null || span.id === null || span.durationMs === null) return Effect.sync(() => void (unplaced = true));
+            if (span.durationMs < floorMs) return Effect.void;
+            const severity = span.durationMs >= sp.slowMs || /^err/i.test(span.status) ? "error" : "warn";
+            const svc = clean(span.service, 60), norm = problem(span.resource, source.words, severity)?.title ?? clean(span.resource, 120);
+            const line = `SLOW ${Math.round(span.durationMs)}ms ${svc} ${clean(span.resource, 200)}${span.traceId ? ` trace=${clean(span.traceId, 64)}` : ""}`;
+            return s.add(sha("dd-span", source.baseUrl, source.id, span.id), source.id, span.at, `span:${svc}:${norm}`, `SLOW ${svc} ${norm} (>= ${sp.slowMs}ms)`, severity, "spans", line); });
+          s.readings.set("spans", s.capped ? { state: "capped", missed: s.fresh - LIMITS.occurrencesPerSlice, observedMs: answered(end) } : observe(recognised && !unplaced, answered(end)));
+        }
         if (end === w.now && source.readings.includes("monitors")) {
           const answer = yield* datadog.monitors(source);
           for (const m of answer.monitors) {

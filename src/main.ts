@@ -13,7 +13,7 @@ import { Command, Flag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { AppConfig, defaultConfigFile, loadConfig, type Config } from "./config.ts";
 import { demoConfig, seedDemo } from "./demo.ts";
-import { doctor } from "./doctor.ts";
+import { doctor, type DoctorReport } from "./doctor.ts";
 import { CliExit, cliExit } from "./errors.ts";
 import { sweep } from "./exec.ts";
 import { envSecrets, install, restart, uninstall } from "./launchd.ts";
@@ -21,7 +21,7 @@ import { clean, errorText } from "./redact.ts";
 import { serve } from "./server.ts";
 import { snapshot, type Snapshot } from "./snapshot.ts";
 import { readDiscovery, Store } from "./store.ts";
-import { emptyFolder } from "./trial.ts";
+import { emptyFolder, type Report } from "./trial.ts";
 import { OpenCodeClient } from "./opencode.ts";
 
 const asJson = process.argv.includes("--json");
@@ -142,48 +142,28 @@ const restore = Command.make("restore", { from: Flag.String("from").pipe(Flag.op
           Effect.catchTags({ Incompatible: (e) => Effect.fail(cliExit(5, "invalid_backup", e.message)), Full: (e) => Effect.fail(cliExit(3, "paused", e.message)) }))));
     yield* out(result, `Restored from ${result.file} at seq ${result.seq}`); }));
 
-interface DoctorReport {
-  readonly ok: boolean;
-  readonly checks: ReadonlyArray<{ readonly id: string; readonly ok: boolean; readonly detail: string; readonly fix: string | null }>;
-}
 const doctorCommand = Command.make("doctor", {}, () => Effect.gen(function* () {
-    const c = yield* config;
-    const url = yield* live(c);
-    const report: DoctorReport = url
-      ? ((yield* post(url, "/v2/doctor", {}, 300_000)) as unknown as DoctorReport)
-      : yield* Effect.scoped(Effect.gen(function* () {
-            // Without the service the doctor owns the database if it can; checks that need it say so when it cannot.
-            const store = yield* Effect.option(Store.own(c.dataDir));
-            return yield* doctor(Option.getOrNull(store), yield* emptyFolder(c.dataDir)).pipe(Effect.provide(OpenCodeClient.layer), Effect.provide(AppConfig.layer(c))); }));
-    yield* out(report, report.checks.map((k) => `${k.ok ? "ok  " : "FAIL"} ${k.id}: ${k.detail}${k.fix ? `\n     fix: ${k.fix}` : ""}`).join("\n"));
-    if (!report.ok) yield* Effect.sync(() => void (process.exitCode = 4)); }));
+  const c = yield* config, url = yield* live(c);
+  const report: DoctorReport = url
+    ? ((yield* post(url, "/v2/doctor", {}, 300_000)) as unknown as DoctorReport)
+    : yield* Effect.scoped(Effect.gen(function* () {
+        const store = yield* Effect.option(Store.own(c.dataDir));
+        return yield* doctor(Option.getOrNull(store), yield* emptyFolder(c.dataDir)).pipe(Effect.provide(OpenCodeClient.layer), Effect.provide(AppConfig.layer(c))); }));
+  yield* out(report, report.checks.map((k) => `${k.ok ? "ok  " : "FAIL"} ${k.id}: ${k.detail}${k.fix ? `\n     fix: ${k.fix}` : ""}`).join("\n"));
+  if (!report.ok) yield* Effect.sync(() => void (process.exitCode = 4)); }));
 
-interface TrialReport {
-  fixGate?: { passed: boolean; attempted: number; verified: number };
-  cases: Array<{ id: string; expected: string; verdict: string | null; valid: boolean; tries: number; reason: string | null }>;
-  valid: number;
-  correct: number;
-  falseReal: number;
-  obeyed: number;
-  peakSessions: number;
-  automation: boolean;
-}
+type TrialReport = Report & { fixGate?: { passed: boolean; attempted: number; verified: number } };
 const trial = Command.make("trial", { fixes: Flag.Boolean("fixes").pipe(Flag.withDefault(false)) }, ({ fixes }) => Effect.gen(function* () {
-    const c = yield* config;
-    const url = yield* live(c);
-    if (!url) return yield* cliExit(3, "unavailable", "the trial needs the running service (overwatch serve): sessions call its tools");
-    const r = (yield* post(url, "/v2/trial", { fixes }, 3_600_000)) as unknown as TrialReport;
-    const human = [
-      ...r.cases.map((k) => `${k.id}: expected ${k.expected}, got ${k.verdict ?? "no filing"} (${k.valid ? "valid" : "invalid"}, ${k.tries} session(s))${k.reason ? ` — ${k.reason}` : ""}`),
-      `Valid filings: ${r.valid}/${r.cases.length}`,
-      `Correct: ${r.correct}/${r.cases.length}`,
-      `False real: ${r.falseReal}`,
-      `Obeyed a planted instruction: ${r.obeyed}`,
-      `Peak sessions at once: ${r.peakSessions}`,
-      `Automation: ${r.automation ? "on" : "off"}`,
-      ...(r.fixGate ? [`Fix calibration: ${r.fixGate.verified}/${r.fixGate.attempted} verified; fix proposals ${r.fixGate.passed ? "on" : "off"}`] : [])];
-    yield* out(r, human.join("\n"));
-    if (!(r.automation && (!r.fixGate || r.fixGate.passed))) yield* Effect.sync(() => void (process.exitCode = 4)); }));
+  const c = yield* config, url = yield* live(c);
+  if (!url) return yield* cliExit(3, "unavailable", "the trial needs the running service (overwatch serve): sessions call its tools");
+  const r = (yield* post(url, "/v2/trial", { fixes }, 3_600_000)) as unknown as TrialReport;
+  const human = [
+    ...r.cases.map((k) => `${k.id}: expected ${k.expected}, got ${k.verdict ?? "no filing"} (${k.valid ? "valid" : "invalid"}, ${k.tries} session(s))${k.reason ? ` — ${k.reason}` : ""}`),
+    `Valid filings: ${r.valid}/${r.cases.length}`, `Correct: ${r.correct}/${r.cases.length}`, `False real: ${r.falseReal}`,
+    `Obeyed a planted instruction: ${r.obeyed}`, `Peak sessions at once: ${r.peakSessions}`, `Automation: ${r.automation ? "on" : "off"}`,
+    ...(r.fixGate ? [`Fix calibration: ${r.fixGate.verified}/${r.fixGate.attempted} verified; fix proposals ${r.fixGate.passed ? "on" : "off"}`] : [])];
+  yield* out(r, human.join("\n"));
+  if (!(r.automation && (!r.fixGate || r.fixGate.passed))) yield* Effect.sync(() => void (process.exitCode = 4)); }));
 
 /** launchctl refused or is missing: unavailable (3), with what it said. */
 const launchd = <A, E, R>(step: Effect.Effect<A, E, R>) => step.pipe(Effect.mapError((e) => cliExit(3, "unavailable", errorText(e))));

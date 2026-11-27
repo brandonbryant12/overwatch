@@ -7,9 +7,9 @@
  * empty, an entry that is not an object has no fields. Text that is not JSON at all fails the decode (a defect the
  * collector records as the source's failure, as before).
  */
-import { Effect, Option, Schema } from "effect";
+import { Effect, Schema } from "effect";
 import type { ChildProcessSpawner } from "effect/process";
-import { count, time, type ProviderTime } from "./parse.ts";
+import { count, sField as field, sList as list, sObj as object, sText as text, sUnknown as unknown, time, type ProviderTime } from "./parse.ts";
 import { run, stream, type Result, type StreamRead } from "./exec.ts";
 
 const NAME = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/;
@@ -87,26 +87,9 @@ export const streamLogs = <E = never, R = never>(
       const space = raw.indexOf(" ");
       return space > 0 ? line(raw.slice(0, space), raw.slice(space + 1)) : Effect.void; }); });
 
-export interface Instance {
-  readonly id: string;
-  readonly previous: boolean;
-}
-export interface Pod {
-  readonly name: string;
-  readonly uid: string;
-  readonly containers: ReadonlyArray<{ readonly name: string; readonly instances: ReadonlyArray<Instance>; readonly memoryLimit: number | null; readonly restarts: number }>;
-  readonly ready: boolean;
-  /** The pod says it is running: its containers have instances whose logs can be read. */
-  readonly running: boolean;
-}
+export interface Instance { readonly id: string; readonly previous: boolean }
+export interface Pod { readonly name: string; readonly uid: string; readonly containers: ReadonlyArray<{ readonly name: string; readonly instances: ReadonlyArray<Instance>; readonly memoryLimit: number | null; readonly restarts: number }>; readonly ready: boolean; readonly running: boolean }
 
-// Tolerant shapes. `field`: absent when missing or of another kind. `object`: no fields when it is not an object.
-// `list`: empty when it is not a list. `text`: a non-empty string. `unknown`: anything, judged later by parse.ts.
-const field = <S extends Schema.Top>(schema: S) => Schema.optional(schema.pipe(Schema.catchDecoding(() => Effect.succeedNone)));
-const object = <F extends Schema.Struct.Fields>(fields: F) => Schema.Struct(fields).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({} as Schema.Struct.Type<F>))));
-const list = <S extends Schema.Top>(item: S) => Schema.Array(item).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some([] as ReadonlyArray<S["Type"]>))));
-const text = field(Schema.NonEmptyString);
-const unknown = Schema.optional(Schema.Unknown);
 /** kubectl's `{ items: [...] }`; text that is not JSON fails the decode. */
 const items = <T,>(item: Schema.Codec<T, unknown>) => {
   const decode = Schema.decodeUnknownSync(Schema.fromJsonString(object({ items: field(list(item)) })));
@@ -116,11 +99,7 @@ const items = <T,>(item: Schema.Codec<T, unknown>) => {
 const PodItem = object({
   metadata: field(object({ name: text, uid: text })),
   spec: field(object({ containers: field(list(object({ name: text, resources: field(object({ limits: field(object({ memory: text })) })) }))) })),
-  status: field(
-    object({
-      phase: unknown,
-      conditions: field(list(object({ type: unknown, status: unknown }))),
-      containerStatuses: field(list(object({ name: unknown, containerID: text, restartCount: unknown, lastState: field(object({ terminated: field(object({ containerID: text })) })) }))),})),});
+  status: field(object({ phase: unknown, conditions: field(list(object({ type: unknown, status: unknown }))), containerStatuses: field(list(object({ name: unknown, containerID: text, restartCount: unknown, lastState: field(object({ terminated: field(object({ containerID: text })) })) }))) })), });
 const decodePods = items(PodItem);
 
 /** Memory quantities: "512Mi", "1Gi", "64M", "1048576". */
@@ -158,12 +137,7 @@ export function parsePods(stdout: string): Pod[] {
 
 const Workload = object({
   metadata: field(object({ creationTimestamp: unknown })),
-  spec: field(
-    object({
-      template: field(
-        object({
-          metadata: field(object({ annotations: field(object({ "overwatch.dev/revision": text })) })),
-          spec: field(object({ containers: field(list(object({ image: field(Schema.String) }))) })),})),})),});
+  spec: field(object({ template: field(object({ metadata: field(object({ annotations: field(object({ "overwatch.dev/revision": text })) })), spec: field(object({ containers: field(list(object({ image: field(Schema.String) }))) })) })) })), });
 const decodeWorkloads = items(Workload);
 
 /** One deployment's or replica set's revision: the template's annotation, else an image tag that is a SHA. */
@@ -198,26 +172,9 @@ export function parseRollout(stdout: string, revision: string): number | null {
   return known.length ? Math.max(...known) : null;
 }
 
-export interface KubeEvent {
-  readonly uid: string;
-  readonly count: number;
-  readonly reason: string;
-  readonly message: string;
-  readonly type: string;
-  readonly at: number | null;
-}
+export interface KubeEvent { readonly uid: string; readonly count: number; readonly reason: string; readonly message: string; readonly type: string; readonly at: number | null }
 
-const EventItem = object({
-  metadata: field(object({ uid: text })),
-  series: field(object({ count: unknown, lastObservedTime: unknown })),
-  count: unknown,
-  deprecatedCount: unknown,
-  lastTimestamp: unknown,
-  eventTime: unknown,
-  firstTimestamp: unknown,
-  reason: text,
-  message: field(Schema.String),
-  type: text,});
+const EventItem = object({ metadata: field(object({ uid: text })), series: field(object({ count: unknown, lastObservedTime: unknown })), count: unknown, deprecatedCount: unknown, lastTimestamp: unknown, eventTime: unknown, firstTimestamp: unknown, reason: text, message: field(Schema.String), type: text });
 const decodeEvents = items(EventItem);
 
 export function parseEvents(stdout: string): KubeEvent[] {

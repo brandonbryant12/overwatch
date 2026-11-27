@@ -105,6 +105,42 @@ export const seedDemo = Effect.gen(function* () {
   yield* keyed("rk_d0c1ed9e0000000000000001", yield* ask({ subject: "inc_d0c1ed9e", text: "Why is ledger reconciliation lagging since the a1b2c3d deploy?", mode: "auto" }));
   yield* investigated(TIMEOUT);
   yield* investigated(POOL);
+  // Seed span lines, watched commits, and one verified AI lens on the flagship incident (still 7 incidents, 3 envs).
+  yield* store.tx((w) => Effect.gen(function* () {
+    const seq = yield* w.event("commit", s("shop/a1b2c3d4e5f6"), { demo: true, seeded: "commits" });
+    for (const [sha, parent, ageMin, subject, files, ins, del, flags, paths] of [
+      ["b7c6d5e4f3a2", "a1b2c3d4e5f6", 18, "feat(shipping): EU carrier quote fallback", 4, 92, 14, ["timeout"], ["src/shipping/eu.ts", "config/carriers.json"]],
+      ["a1b2c3d4e5f6", "9f8e7d6c5b4a", 75, "chore(config): tighten payments timeout & orders pool", 2, 4, 4, ["config", "timeout", "database"], ["config/payments.yaml", "config/database.json"]],
+      ["9f8e7d6c5b4a", null, 360, "chore(release): baseline shop v2.14", 6, 48, 19, [], ["src/checkout/pay.ts", "config/payments.yaml"]],
+    ] as const) {
+      yield* w.run("INSERT OR IGNORE INTO commits (app, sha, parent, committed_at, subject, files, insertions, deletions, flags, paths, seq) VALUES ('shop', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        s(sha), parent ? s(parent) : null, now - ageMin * min, s(subject), files, ins, del, json(flags), json(paths), seq);
+    }
+    for (const [ago, ms, res, tr] of [[12, 318, "POST /v2/authorize", "tr_91a4"], [9, 642, "POST /v2/authorize", "tr_91b8"], [6, 1280, "POST /v2/authorize", "tr_91c2"], [4, 304, "POST /v2/authorize", "tr_91d9"]] as const)
+      yield* w.run("INSERT INTO lines (incident, source, at_ms, text) VALUES ('inc_d0c4ab11', 'pods', ?, ?)", now - ago * min, s(`SLOW ${ms}ms checkout ${res} trace=${tr}`));
+    const hTel = "e_d0c4ab11000000000000000000", hCode = "e_d0c4ab11100000000000000000";
+    const lens = {
+      source: "ai", title: "Payments timeout regression after a1b2c3d4e5f6", model: "private/glm-5.3", generatedAt: now - 3 * min,
+      summary: "Deploy a1b2c3d4e5f6 cut timeout_ms from 3000ms to 300ms; 42 checkout authorize spans timed out at the 300ms boundary.",
+      verifiedHandles: [hTel, hCode],
+      blocks: [
+        { kind: "causal_flow", title: "Causal chain", steps: [
+          { label: "Config change", detail: "config/payments.yaml lowered timeout_ms 3000 → 300", tone: "warn", handle: hCode },
+          { label: "Authorize timeouts", detail: "POST /v2/authorize aborted at 300ms across 42 requests", tone: "error", handle: hTel },
+          { label: "Challenger upheld", detail: "Provider answered within 900ms; client cut-off caused failures", tone: "error", handle: hTel }] },
+        { kind: "metric_compare", title: "Before vs after a1b2c3d4e5f6", rows: [
+          { label: "Payments timeout_ms", before: "3000 ms", after: "300 ms", beforeNum: 3000, afterNum: 300, unit: "ms", delta: "-90%", tone: "error", handle: hCode },
+          { label: "Checkout timeouts / hr", before: "0", after: "16", beforeNum: 0, afterNum: 16, unit: "/hr", delta: "+16/hr", tone: "error", handle: hTel }] },
+        { kind: "span_waterfall", title: "Slow authorize spans", p50Ms: 480, slowMs: 300, spans: [
+          { label: "POST /v2/authorize", service: "checkout", durationMs: 318, offsetMs: 0, status: "slow", handle: hTel },
+          { label: "POST /v2/authorize", service: "checkout", durationMs: 642, offsetMs: 180, status: "slow", handle: hTel },
+          { label: "POST /v2/authorize", service: "checkout", durationMs: 1280, offsetMs: 360, status: "error", handle: hTel }] },
+        { kind: "key_facts", title: "Verified facts", facts: [
+          { label: "Root setting", value: "timeout_ms: 300 (was 3000)", origin: "code", handle: hCode },
+          { label: "Error signature", value: "payments timeout after 300ms", origin: "telemetry", handle: hTel }] }], };
+    const lSeq = yield* w.event("lens", s("inc_d0c4ab11"), { source: "ai", demo: true });
+    yield* w.run("INSERT OR REPLACE INTO lenses (incident, spec, seq) VALUES ('inc_d0c4ab11', ?, ?)", json(lens), lSeq);
+  }));
   // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, waiting for the owner's P.
   yield* store.tx((w) => Effect.gen(function* () {
     const job = "job_d0c0db050000000000000001", seq = yield* w.event("fix", "inc_d0c0db05" as Clean, { id: "fx_d0c0db05", state: "verified", demo: true });

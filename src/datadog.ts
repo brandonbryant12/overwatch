@@ -6,12 +6,12 @@
  * Replies are decoded by Schema, tolerantly: a reply is complete only when its recognised parts say so, and a part of
  * the wrong kind is absent, so it makes the reading a gap rather than a failure.
  */
-import { Duration, Effect, Option, Redacted, Schedule, Schema } from "effect";
+import { Duration, Effect, Redacted, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import type { ChildProcessSpawner } from "effect/process";
 import { LIMITS, type Source } from "./config.ts";
 import { secret } from "./exec.ts";
-import { num, time, type ProviderTime } from "./parse.ts";
+import { num, sDecode as decode, sField as field, sList as list, sObj as object, sText as text, sUnknown as unknown, time, type ProviderTime } from "./parse.ts";
 
 /** Datadog refused or could not be reached: the HTTP status (0 when unreachable), and for a rate limit its wait. */
 export class HttpFailure extends Schema.TaggedError<HttpFailure>()("HttpFailure", {
@@ -53,25 +53,7 @@ const request = Effect.fnUntraced(function* (source: Source, path: string, body?
       Effect.mapError(() => new HttpFailure({ status: 0, message: "Datadog answered something that is not JSON" }))); });
   return yield* once.pipe(Effect.retry(rateLimited)); });
 
-// Tolerant shapes: a field of the wrong kind is absent; a list that is not one is absent (and so not complete).
-const field = <S extends Schema.Top>(schema: S) => Schema.optional(schema.pipe(Schema.catchDecoding(() => Effect.succeedNone)));
-const object = <F extends Schema.Struct.Fields>(fields: F) => Schema.Struct(fields).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some({} as Schema.Struct.Type<F>))));
-const list = <S extends Schema.Top>(item: S) => Schema.Array(item).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some([] as ReadonlyArray<S["Type"]>))));
-const text = field(Schema.NonEmptyString);
-const unknown = Schema.optional(Schema.Unknown);
-const decode = <S extends Schema.ConstraintDecoder<unknown>>(schema: S) => {
-  const run = Schema.decodeUnknownOption(schema);
-  return (value: unknown): S["Type"] | undefined => Option.getOrUndefined(run(value));
-};
-
-export interface DatadogLog {
-  /** null when the log has no stable ID: it cannot be counted once, so the reading is incomplete. */
-  readonly id: string | null;
-  /** null when the log has no readable time: it cannot be placed in a window. */
-  readonly at: ProviderTime | null;
-  readonly message: string;
-  readonly status: string;
-}
+export interface DatadogLog { readonly id: string | null; readonly at: ProviderTime | null; readonly message: string; readonly status: string }
 
 const LogPage = object({
   data: field(Schema.Array(object({ id: text, attributes: field(object({ timestamp: unknown, message: field(Schema.String), status: text })) }))),
@@ -141,6 +123,31 @@ export const metric = Effect.fnUntraced(function* (source: Source, from: number,
         return { name: `${series.metric ?? source.metric} (${source.metric})`, value, at, unit: u.name ?? u.family ?? null };
     }}
   return null; });
+
+export interface DatadogSpan { readonly id: string | null; readonly at: ProviderTime | null; readonly service: string; readonly resource: string; readonly durationMs: number | null; readonly traceId: string | null; readonly status: string }
+const SpanPage = object({
+  data: field(Schema.Array(object({ id: text, attributes: field(object({ timestamp: unknown, start_timestamp: unknown, end_timestamp: unknown, service: text, resource_name: text, duration: unknown, trace_id: text, status: text, custom: field(object({ duration: unknown })) })) }))),
+  meta: field(object({ status: unknown, warnings: field(Schema.Array(Schema.Unknown)), page: field(object({ after: field(Schema.NonEmptyString) })) })), });
+const decodeSpanPage = decode(SpanPage);
+
+/** Every span in [from, to], page by page, through Datadog's v2 Spans Search API. */
+export const searchSpans = <E = never, R = never>(source: Source, from: number, to: number, each: (span: DatadogSpan) => Effect.Effect<void, E, R>) => Effect.gen(function* () {
+  let cursor: string | null = null;
+  for (let page = 0; page < 10_000; page++) {
+    const body = { data: { type: "search_request", attributes: { filter: { query: source.spans?.query ?? source.query, from: new Date(from).toISOString(), to: new Date(to).toISOString() }, page: { limit: 1000, ...(cursor ? { cursor } : {}) }, sort: "timestamp" } } };
+    const reply: typeof SpanPage.Type = decodeSpanPage(yield* request(source, "/api/v2/spans/events/search", body)) ?? {};
+    const meta: NonNullable<typeof reply.meta> = reply.meta ?? {};
+    if (!reply.data || (meta.status !== undefined && meta.status !== "done") || (meta.warnings ?? []).length) return false;
+    for (const row of reply.data) {
+      const a = row.attributes ?? {}, ns = num(a.duration ?? a.custom?.duration);
+      const durationMs = ns !== null && ns >= 0 ? Math.round((ns / 1e6) * 10) / 10 : null;
+      yield* each({ id: row.id ?? null, at: time(a.timestamp ?? a.end_timestamp ?? a.start_timestamp), service: a.service ?? "service", resource: a.resource_name ?? "span", durationMs, traceId: a.trace_id ?? null, status: a.status ?? "ok" });
+    }
+    const after: string | undefined = meta.page?.after;
+    if (!after) return true;
+    cursor = after;
+  }
+  return false; });
 
 /** For the doctor: are the keys accepted? */
 export const validate = (source: Source): Effect.Effect<void, HttpFailure, Requirements> => Effect.asVoid(request(source, "/api/v1/validate"));

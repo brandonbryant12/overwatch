@@ -173,8 +173,7 @@ test("class: a forecast exists only for six fresh, evenly spaced, consistently r
       assert.ok(values.length >= 6 && last.every((v) => v !== null) && lag <= 60_000);
       for (let i = 1; i < 6; i++) assert.ok(last[i]! > last[i - 1]!);
       assert.ok(last[5]! < 1000);
-      const slope = f.ratePerMinute! / 60_000;
-      assert.equal(f.etaMinutes, Math.ceil((1000 - last[5]!) / slope / 60_000));
+      assert.equal(f.etaMinutes, Math.ceil((1000 - last[5]!) / f.ratePerMinute!));
       assert.ok(f.etaMinutes! <= 24 * 60);
     }),
     { numRuns: 400 },

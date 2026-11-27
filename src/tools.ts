@@ -15,7 +15,7 @@
 import { Context, Effect, Layer, Option, Predicate, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { createHash, randomBytes } from "node:crypto";
-import { LIMITS } from "./config.ts";
+import { AppConfig, LIMITS } from "./config.ts";
 import { clock } from "./clock.ts";
 import { type ApiError, Refusal } from "./errors.ts";
 import { run as exec } from "./exec.ts";
@@ -25,90 +25,28 @@ import { type Full, json, type Clean, Store } from "./store.ts";
 
 export { Refusal };
 
-export interface Code {
-  readonly expected: string | null;
-  readonly read: string | null;
-  readonly deployed: boolean;
-}
-
-/** What a run may read: its telemetry lines (by source name) and the repository its pinned commit is in. */
+export interface Code { readonly expected: string | null; readonly read: string | null; readonly deployed: boolean }
 export type Origin = "telemetry" | "code" | "history" | "generated";
-export interface RunContext {
-  readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>;
-  readonly repo: string | null;
-  /** The run's end on the service's monotonic clock: the same value the driver waits on. */
-  readonly deadline: number;
-  /** What the run may do: an investigator files a finding, a challenger a challenge, a responder only reads, a fixer selects. */
-  readonly role?: "investigator" | "challenger" | "responder" | "fixer";
-  /** A fixer's choices, computed by code: the commits it may revert and the JSON keys it may restore. */
-  readonly options?: Options;
-}
-export interface Options {
-  readonly commits: ReadonlyArray<{ sha: string; subject: string }>;
-  readonly keys: ReadonlyArray<{ path: string; key: string }>;
-}
+export interface RunContext { readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>; readonly repo: string | null; readonly deadline: number; readonly role?: "investigator" | "challenger" | "responder" | "fixer"; readonly options?: Options }
+export interface Options { readonly commits: ReadonlyArray<{ sha: string; subject: string }>; readonly keys: ReadonlyArray<{ path: string; key: string }> }
 export type Proposal = { kind: "revert"; commit: string } | { kind: "setting"; path: string; key: string } | { kind: "abstain" };
+export interface Owner { readonly exists: (sessionId: string) => Effect.Effect<boolean>; readonly inbox: Effect.Effect<unknown, ApiError | Full>; readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>; readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>; readonly brief?: (args: { audience?: string; afterSeq?: number; throughSeq?: number }) => Effect.Effect<unknown, ApiError | Full>; readonly outlook?: Effect.Effect<unknown, ApiError | Full> }
+export interface Piece { readonly handle: string; readonly source: string; readonly text: string }
 
-/**
- * The owner's own operations, for ordinary OpenCode sessions: the same functions the page calls. `exists` asks the
- * OpenCode peer whether a session is there; a session Overwatch runs (any role, even retired) is never an owner.
- */
-export interface Owner {
-  readonly exists: (sessionId: string) => Effect.Effect<boolean>;
-  readonly inbox: Effect.Effect<unknown, ApiError | Full>;
-  readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>;
-  readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>;
-  readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>;
-}
-
-export interface Piece {
-  readonly handle: string;
-  readonly source: string;
-  readonly text: string;
-}
-
-// ---- the tools' parameters
-
-const Int = Schema.Int;
-const Text = Schema.String;
-const Texts = Schema.Array(Schema.String);
-const Telemetry = Schema.Struct({
-  source: Text,
-  since: Schema.optionalKey(Schema.NullOr(Int)),
-  until: Schema.optionalKey(Schema.NullOr(Int)),
-  query: Schema.optionalKey(Text),
-  cursor: Schema.optionalKey(Text),});
+const Int = Schema.Int, Text = Schema.String, Texts = Schema.Array(Schema.String), Empty = Schema.Record(Schema.String, Schema.Never);
+const Telemetry = Schema.Struct({ source: Text, since: Schema.optionalKey(Schema.NullOr(Int)), until: Schema.optionalKey(Schema.NullOr(Int)), query: Schema.optionalKey(Text), cursor: Schema.optionalKey(Text) });
 const CodeSearch = Schema.Struct({ pattern: Text, path: Schema.optionalKey(Text) });
 const CodeRead = Schema.Struct({ path: Text, from: Int, to: Int });
 const History = Schema.Struct({ path: Schema.optionalKey(Text), ref: Schema.optionalKey(Text) });
 const ChallengeInput = Schema.Struct({ outcome: Schema.Literals(["upheld", "disproved", "unsure"]), reason: Text, evidence: Texts });
 const Kind = Schema.Literals(["revert", "setting", "abstain"]);
 const ProposalInput = Schema.Struct({ kind: Kind, commit: Schema.optionalKey(Text), path: Schema.optionalKey(Text), key: Schema.optionalKey(Text) });
-/** No arguments: a closed, empty object. */
-const Empty = Schema.Record(Schema.String, Schema.Never);
-const GetInput = Schema.Struct({ id: Text });
-const SearchInput = Schema.Struct({ text: Text });
-const ActInput = Schema.Struct({
-  id: Text,
-  action: Schema.Literals(["done", "later", "never", "undo", "seen"]),
-  until: Schema.optionalKey(Int),
-  when: Schema.optionalKey(Text),
-  reason: Schema.optionalKey(Text),
-  actionSeq: Schema.optionalKey(Int),
-  throughSeq: Schema.optionalKey(Int),});
+const GetInput = Schema.Struct({ id: Text }), SearchInput = Schema.Struct({ text: Text });
+const ActInput = Schema.Struct({ id: Text, action: Schema.Literals(["done", "later", "never", "undo", "seen"]), until: Schema.optionalKey(Int), when: Schema.optionalKey(Text), reason: Schema.optionalKey(Text), actionSeq: Schema.optionalKey(Int), throughSeq: Schema.optionalKey(Int) });
+const BriefInput = Schema.Struct({ audience: Schema.optionalKey(Schema.Literals(["owner", "team"])), afterSeq: Schema.optionalKey(Int), throughSeq: Schema.optionalKey(Int) });
 const Claim = Schema.Struct({ statement: Text, evidence: Texts });
-const findingFields = {
-  verdict: Schema.Literals(["real", "not_real", "unsure"]),
-  cause: Text,
-  ruled_out: Texts,
-  not_checked: Texts,
-  next_check: Text,
-  impact: Text,
-  affected: Texts,
-  since: Schema.NullOr(Int),
-  status: Text,};
+const findingFields = { verdict: Schema.Literals(["real", "not_real", "unsure"]), cause: Text, ruled_out: Texts, not_checked: Texts, next_check: Text, impact: Text, affected: Texts, since: Schema.NullOr(Int), status: Text };
 const FindingInput = Schema.Struct({ ...findingFields, claims: Schema.Array(Claim) });
-/** The finding with its claims undecoded: each claim is judged on its own, with the handles the run may cite. */
 const FindingShape = Schema.Struct({ ...findingFields, claims: Schema.Array(Schema.Unknown) });
 
 /** Every tool: its name, what the model is told, and its parameters. */
@@ -126,10 +64,12 @@ export const TOOLS = [
   { name: "ow_get", description: "One problem in full: counts, way out, history, findings, investigations, questions.", parameters: GetInput },
   { name: "ow_search", description: "Literal, case-insensitive search over problems, evidence, findings and questions.", parameters: SearchInput },
   { name: "ow_act", description: "Put a problem away (done, later, never), undo the current way out (with its actionSeq), or mark it seen. Confirm with the owner first.", parameters: ActInput },
+  { name: "ow_brief", description: "Owner or team brief of what changed between two event sequence numbers.", parameters: BriefInput },
+  { name: "ow_outlook", description: "Capacity forecasts, staging-vs-production comparisons, and recent watched commits with risk flags.", parameters: Empty },
   { name: "ow_finding", description: "File the finding. Each claim cites evidence handles you were given.", parameters: FindingInput },
 ] as const;
 export type ToolName = (typeof TOOLS)[number]["name"];
-const OWNER_TOOLS: ReadonlyArray<string> = ["ow_inbox", "ow_get", "ow_search", "ow_act"];
+const OWNER_TOOLS: ReadonlyArray<string> = ["ow_inbox", "ow_get", "ow_search", "ow_act", "ow_brief", "ow_outlook"];
 
 /** A tool's parameters as a closed JSON Schema object, for MCP's tools/list. */
 export const inputSchema = (parameters: Schema.Top): Record<string, unknown> => {
@@ -175,6 +115,8 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
     Tools,
     Effect.gen(function* () {
       const store = yield* Store;
+      const cfg = yield* Effect.serviceOption(AppConfig);
+      const maxCalls = cfg._tag === "Some" ? cfg.value.opencode.toolCalls : LIMITS.toolCallsPerRun;
       const services = yield* Effect.context<Store | ChildProcessSpawner.ChildProcessSpawner>();
       const contexts = new Map<string, RunContext>();
       const authored = new Map<string, string[]>();
@@ -365,6 +307,14 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
           if (!text) return yield* refusal("text is required");
           return yield* o.search(text);
         }
+        if (name === "ow_brief") {
+          const b = yield* decode(BriefInput, args, name);
+          return o.brief ? yield* o.brief(b) : yield* refusal("ow_brief is not available");
+        }
+        if (name === "ow_outlook") {
+          yield* decode(Empty, args, name);
+          return o.outlook ? yield* o.outlook : yield* refusal("ow_outlook is not available");
+        }
         const { id, until, ...rest } = yield* decode(ActInput, args, name);
         if (!id) return yield* refusal("id is required");
         return yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) }); });
@@ -375,7 +325,7 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         const run = yield* store.get<RunRow>("SELECT id, session_id, state, calls, code FROM runs WHERE session_id = ?", sessionId);
         const context = run ? contexts.get(run.id) : undefined;
         if (!run || run.state !== "active" || !context) return yield* refusal("this session has no active Overwatch investigation");
-        if (run.calls >= LIMITS.toolCallsPerRun) return yield* refusal(`this investigation has used its ${LIMITS.toolCallsPerRun} tool calls`);
+        if (run.calls >= maxCalls) return yield* refusal(`this investigation has used its ${maxCalls} tool calls`);
         if (clock.mono() >= context.deadline) return yield* refusal("this investigation's five minutes have passed");
         authored.get(run.id)?.push(JSON.stringify(args ?? null));
         yield* store.tx((w) => Effect.andThen(w.run("UPDATE runs SET calls = calls + 1 WHERE id = ?", run.id as Clean), w.event("run", run.id as Clean, { tool: name, call: run.calls + 1 })));

@@ -30,201 +30,43 @@ export const USER_VERSION = 1;
  * in `refs`, as a reference to a named parent ("table.key"). Restore checks every declared reference, whatever the
  * column is called; a unit test fails the build when a created table has a column this list does not declare.
  */
+const tbl = (name: string, ddl: string, columns: ReadonlyArray<string>, opts: { refs?: Readonly<Record<string, string>>; json?: ReadonlyArray<string>; derived?: boolean } = {}) => ({ name, ddl, columns, ...opts });
 export const TABLES: ReadonlyArray<{ name: string; ddl: string; columns: ReadonlyArray<string>; refs?: Readonly<Record<string, string>>; json?: ReadonlyArray<string>; derived?: boolean }> = [
-  {
-    name: "events",
-    ddl: `CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 40),
-      subject TEXT, actor TEXT NOT NULL, data TEXT NOT NULL CHECK (json_valid(data)))`,
-    columns: ["seq", "at_ms", "kind", "subject", "actor", "data"],
-    json: ["data"],},
-  { name: "meta", ddl: `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`, columns: ["key", "value"] },
-  {
-    name: "sources",
-    ddl: `CREATE TABLE sources (id TEXT PRIMARY KEY, checkpoint_ms INTEGER, failure TEXT CHECK (failure IN ('signin','permission','rate','unreachable','config')),
-      streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0), next_ms INTEGER, suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0,1)), fix TEXT, endpoint TEXT,
-      delay_ms INTEGER CHECK (delay_ms >= 0))`,
-    columns: ["id", "checkpoint_ms", "failure", "streak", "next_ms", "suspended", "fix", "endpoint", "delay_ms"],},
-  {
-    name: "readings",
-    ddl: `CREATE TABLE readings (source TEXT NOT NULL, reading TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')),
-      at_ms INTEGER NOT NULL, ok_ms INTEGER, PRIMARY KEY (source, reading))`,
-    columns: ["source", "reading", "state", "at_ms", "ok_ms"],},
-  {
-    name: "coverage",
-    ddl: `CREATE TABLE coverage (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL,
-      to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')), missed INTEGER CHECK (missed >= 0))`,
-    columns: ["id", "seq", "source", "reading", "from_ms", "to_ms", "state", "missed"],},
-  {
-    name: "incidents",
-    ddl: `CREATE TABLE incidents (id TEXT PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
-      severity TEXT NOT NULL CHECK (severity IN ('error','warn','info')), count INTEGER NOT NULL CHECK (count >= 0), exact INTEGER NOT NULL CHECK (exact IN (0,1)),
-      first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL, seq INTEGER NOT NULL,
-      reading TEXT NOT NULL DEFAULT 'logs', active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0),
-      way TEXT CHECK (way IS NULL OR json_valid(way)), returned TEXT CHECK (returned IS NULL OR json_valid(returned)),
-      seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0, decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0))`,
-    columns: ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq", "decided_seq"],
-    json: ["way", "returned"],},
-  {
-    name: "occurrences",
-    ddl: `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL DEFAULT '', at_ms INTEGER NOT NULL, incident TEXT NOT NULL DEFAULT '')`,
-    columns: ["key", "source", "stream", "at_ms", "incident"],
-    refs: { incident: "incidents.id" },},
-  {
-    name: "baselines",
-    ddl: `CREATE TABLE baselines (key TEXT PRIMARY KEY, source TEXT NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), seen_ms INTEGER NOT NULL)`,
-    columns: ["key", "source", "count", "seen_ms"],},
-  {
-    name: "saturated",
-    ddl: `CREATE TABLE saturated (source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL, to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), PRIMARY KEY (source, reading, from_ms))`,
-    columns: ["source", "reading", "from_ms", "to_ms"],},
-  {
-    name: "metrics",
-    ddl: `CREATE TABLE metrics (source TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, at_ms INTEGER NOT NULL,
-      over INTEGER NOT NULL DEFAULT 0 CHECK (over >= 0), under INTEGER NOT NULL DEFAULT 0 CHECK (under >= 0), breach INTEGER NOT NULL DEFAULT 0 CHECK (breach IN (0,1)), PRIMARY KEY (source, name))`,
-    columns: ["source", "name", "value", "at_ms", "over", "under", "breach"],},
-  {
-    name: "deploys",
-    ddl: `CREATE TABLE deploys (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, revision TEXT NOT NULL, previous TEXT)`,
-    columns: ["seq", "app", "environment", "revision", "previous"],},
-  {
-    name: "jobs",
-    ddl: `CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, title TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('queued','running','completed','parked')), reason TEXT, created_seq INTEGER NOT NULL,
-      inputs TEXT CHECK (inputs IS NULL OR json_valid(inputs)), result TEXT CHECK (result IS NULL OR json_valid(result)), attribution TEXT,
-      closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0,1)))`,
-    columns: ["id", "kind", "subject", "title", "state", "reason", "created_seq", "inputs", "result", "attribution", "closed"],
-    json: ["inputs", "result"],},
-  {
-    name: "runs",
-    ddl: `CREATE TABLE runs (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL CHECK (attempt >= 1),
-      session_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK (state IN ('active','terminal')), calls INTEGER NOT NULL DEFAULT 0 CHECK (calls >= 0),
-      code TEXT NOT NULL CHECK (json_valid(code)), started_ms INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'reader', slot INTEGER, work_id TEXT,
-      UNIQUE (job_id, attempt))`,
-    columns: ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms", "role", "slot", "work_id"],
-    refs: { job_id: "jobs.id" },
-    json: ["code"],},
-  {
-    name: "messages",
-    ddl: `CREATE TABLE messages (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), purpose TEXT NOT NULL CHECK (purpose IN ('prompt','nudge')))`,
-    columns: ["id", "run_id", "purpose"],
-    refs: { run_id: "runs.id" },},
-  {
-    name: "evidence",
-    ddl: `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL,
-      text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`,
-    columns: ["handle", "run_id", "session_id", "source", "text", "ordinal"],
-    refs: { run_id: "runs.id" },},
-  {
-    // What a piece of evidence is, apart from what its source is called. A piece without a row here is not
-    // telemetry: an origin that was never recorded cannot make a verdict observed.
-    name: "origins",
-    ddl: `CREATE TABLE origins (handle TEXT PRIMARY KEY REFERENCES evidence(handle) ON DELETE CASCADE,
-      origin TEXT NOT NULL CHECK (origin IN ('telemetry','code','history','generated')))`,
-    columns: ["handle", "origin"],
-    refs: { handle: "evidence.handle" },},
-  {
-    name: "hourly",
-    ddl: `CREATE TABLE hourly (incident TEXT NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), PRIMARY KEY (incident, hour))`,
-    columns: ["incident", "hour", "count"],
-    refs: { incident: "incidents.id" },},
-  {
-    name: "asks",
-    ddl: `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')),
-      text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL,
-      state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT, message TEXT)`,
-    columns: ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason", "message"],
-    refs: { job_id: "jobs.id" },},
-  {
-    // Agent work, one item per reading, challenge or answer: the queue the two slots take from, owner questions first.
-    name: "work",
-    ddl: `CREATE TABLE work (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), kind TEXT NOT NULL CHECK (kind IN ('reading','challenge','answer')),
-      slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0,
-      ask_key TEXT, run_id TEXT REFERENCES runs(id), reason TEXT, seq INTEGER NOT NULL)`,
-    columns: ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"],
-    refs: { job_id: "jobs.id", run_id: "runs.id" },},
-  {
-    // Idempotent owner requests (investigate, open, correct): the key binds to the operation and its payload.
-    name: "requests",
-    ddl: `CREATE TABLE requests (key TEXT PRIMARY KEY, op TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL CHECK (json_valid(result)))`,
-    columns: ["key", "op", "digest", "result"],
-    json: ["result"],},
-  {
-    name: "corrections",
-    ddl: `CREATE TABLE corrections (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), text TEXT NOT NULL, date TEXT NOT NULL)`,
-    columns: ["seq", "app", "subject", "job_id", "text", "date"],
-    refs: { job_id: "jobs.id" },},
-  {
-    name: "notifications",
-    ddl: `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES incidents(id), cause_seq INTEGER NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER,
-      reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`,
-    columns: ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"],
-    refs: { subject: "incidents.id" },},
-  {
-    // The latest lines of each problem (cleaned), what an investigation reads as telemetry.
-    name: "lines",
-    ddl: `CREATE TABLE lines (incident TEXT NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, text TEXT NOT NULL)`,
-    columns: ["incident", "source", "at_ms", "text"],
-    refs: { incident: "incidents.id" },},
-  {
-    // When a problem was first observed, by the provider's own time (a log line's timestamp): its onset.
-    name: "onsets",
-    ddl: `CREATE TABLE onsets (incident TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)`,
-    columns: ["incident", "at_ms"],
-    refs: { incident: "incidents.id" },},
-  {
-    // When a deploy rolled out: the provider's rollout time when it gives one (exact), else the interval between the
-    // last observation of the previous revision and the first of this one. Keyed by the deploy's seq.
-    name: "rollouts",
-    ddl: `CREATE TABLE rollouts (seq INTEGER PRIMARY KEY, after_ms INTEGER, by_ms INTEGER NOT NULL, exact INTEGER NOT NULL CHECK (exact IN (0,1)))`,
-    columns: ["seq", "after_ms", "by_ms", "exact"],},
-  {
-    // Measured used capacity by the provider's time, per series (metric, unit and ceiling); a null value is a gap.
-    name: "samples",
-    ddl: `CREATE TABLE samples (id INTEGER PRIMARY KEY, source TEXT NOT NULL, series TEXT NOT NULL, at_ms INTEGER NOT NULL, value REAL)`,
-    columns: ["id", "source", "series", "at_ms", "value"],},
-  {
-    // A staging release compared with unchanged production over two aligned intervals.
-    name: "comparisons",
-    ddl: `CREATE TABLE comparisons (id TEXT PRIMARY KEY, app TEXT NOT NULL, staging_revision TEXT NOT NULL, production_revision TEXT, start_seq INTEGER NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('pending','regression','no_signal','unknown','same_release')), reason TEXT, staging_count INTEGER, production_count INTEGER,
-      data TEXT NOT NULL CHECK (json_valid(data)), incident TEXT)`,
-    columns: ["id", "app", "staging_revision", "production_revision", "start_seq", "state", "reason", "staging_count", "production_count", "data", "incident"],
-    refs: { incident: "incidents.id" },
-    json: ["data"],},
-  {
-    // A fix attempt: one per (problem, investigation, reviewed revision, policy). Its intents are written before any
-    // outside step: the candidate before verification, the head and branch before any ref changes.
-    name: "fixes",
-    ddl: `CREATE TABLE fixes (id TEXT PRIMARY KEY, incident TEXT NOT NULL, job_id TEXT NOT NULL, app TEXT NOT NULL, environment TEXT NOT NULL, origin TEXT NOT NULL,
-      state TEXT NOT NULL, reason TEXT, previous TEXT, deployed TEXT, base TEXT, candidate TEXT, head TEXT, diff TEXT, run_id TEXT,
-      data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0)`,
-    columns: ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq", "version"],
-    refs: { incident: "incidents.id", job_id: "jobs.id", run_id: "runs.id" },
-    json: ["data"],},
-  {
-    // What a fixer session selected: one proposal per run, final once stored.
-    name: "proposals",
-    ddl: `CREATE TABLE proposals (run_id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)), refused TEXT)`,
-    columns: ["run_id", "body", "refused"],
-    refs: { run_id: "runs.id" },
-    json: ["body"],},
-  {
-    name: "findings",
-    ddl: `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')),
-      claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`,
-    columns: ["id", "run_id", "verdict", "claims", "code", "body"],
-    refs: { run_id: "runs.id" },
-    json: ["claims", "code", "body"],},
-  {
-    // Each cited handle, kept by a trigger on findings: evidence a finding cites cannot be deleted (RESTRICT), so
-    // retention and restore get the rule from the database. Derived: never copied, rebuilt by the trigger.
-    name: "citations",
-    ddl: `CREATE TABLE citations (finding TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
-      handle TEXT NOT NULL REFERENCES evidence(handle) ON DELETE RESTRICT, PRIMARY KEY (finding, handle))`,
-    columns: ["finding", "handle"],
-    refs: { finding: "findings.id", handle: "evidence.handle" },
-    derived: true,}];
+  tbl("events", `CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, kind TEXT NOT NULL CHECK (length(kind) BETWEEN 1 AND 40), subject TEXT, actor TEXT NOT NULL, data TEXT NOT NULL CHECK (json_valid(data)))`, ["seq", "at_ms", "kind", "subject", "actor", "data"], { json: ["data"] }),
+  tbl("meta", `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`, ["key", "value"]),
+  tbl("sources", `CREATE TABLE sources (id TEXT PRIMARY KEY, checkpoint_ms INTEGER, failure TEXT CHECK (failure IN ('signin','permission','rate','unreachable','config')), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0), next_ms INTEGER, suspended INTEGER NOT NULL DEFAULT 0 CHECK (suspended IN (0,1)), fix TEXT, endpoint TEXT, delay_ms INTEGER CHECK (delay_ms >= 0))`, ["id", "checkpoint_ms", "failure", "streak", "next_ms", "suspended", "fix", "endpoint", "delay_ms"]),
+  tbl("readings", `CREATE TABLE readings (source TEXT NOT NULL, reading TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')), at_ms INTEGER NOT NULL, ok_ms INTEGER, PRIMARY KEY (source, reading))`, ["source", "reading", "state", "at_ms", "ok_ms"]),
+  tbl("coverage", `CREATE TABLE coverage (id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL, to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), state TEXT NOT NULL CHECK (state IN ('ok','capped','gap','failed')), missed INTEGER CHECK (missed >= 0))`, ["id", "seq", "source", "reading", "from_ms", "to_ms", "state", "missed"]),
+  tbl("incidents", `CREATE TABLE incidents (id TEXT PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL, severity TEXT NOT NULL CHECK (severity IN ('error','warn','info')), count INTEGER NOT NULL CHECK (count >= 0), exact INTEGER NOT NULL CHECK (exact IN (0,1)), first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL, seq INTEGER NOT NULL, reading TEXT NOT NULL DEFAULT 'logs', active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), streak INTEGER NOT NULL DEFAULT 0 CHECK (streak >= 0), way TEXT CHECK (way IS NULL OR json_valid(way)), returned TEXT CHECK (returned IS NULL OR json_valid(returned)), seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0), first_seq INTEGER NOT NULL DEFAULT 0, decided_seq INTEGER NOT NULL DEFAULT 0 CHECK (decided_seq >= 0))`, ["id", "app", "environment", "source", "title", "severity", "count", "exact", "first_ms", "last_ms", "seq", "reading", "active", "streak", "way", "returned", "seen_seq", "first_seq", "decided_seq"], { json: ["way", "returned"] }),
+  tbl("occurrences", `CREATE TABLE occurrences (key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL DEFAULT '', at_ms INTEGER NOT NULL, incident TEXT NOT NULL DEFAULT '')`, ["key", "source", "stream", "at_ms", "incident"], { refs: { incident: "incidents.id" } }),
+  tbl("baselines", `CREATE TABLE baselines (key TEXT PRIMARY KEY, source TEXT NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), seen_ms INTEGER NOT NULL)`, ["key", "source", "count", "seen_ms"]),
+  tbl("saturated", `CREATE TABLE saturated (source TEXT NOT NULL, reading TEXT NOT NULL, from_ms INTEGER NOT NULL, to_ms INTEGER NOT NULL CHECK (to_ms >= from_ms), PRIMARY KEY (source, reading, from_ms))`, ["source", "reading", "from_ms", "to_ms"]),
+  tbl("metrics", `CREATE TABLE metrics (source TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, at_ms INTEGER NOT NULL, over INTEGER NOT NULL DEFAULT 0 CHECK (over >= 0), under INTEGER NOT NULL DEFAULT 0 CHECK (under >= 0), breach INTEGER NOT NULL DEFAULT 0 CHECK (breach IN (0,1)), PRIMARY KEY (source, name))`, ["source", "name", "value", "at_ms", "over", "under", "breach"]),
+  tbl("deploys", `CREATE TABLE deploys (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, environment TEXT NOT NULL, revision TEXT NOT NULL, previous TEXT)`, ["seq", "app", "environment", "revision", "previous"]),
+  tbl("jobs", `CREATE TABLE jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, title TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','completed','parked')), reason TEXT, created_seq INTEGER NOT NULL, inputs TEXT CHECK (inputs IS NULL OR json_valid(inputs)), result TEXT CHECK (result IS NULL OR json_valid(result)), attribution TEXT, closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0,1)))`, ["id", "kind", "subject", "title", "state", "reason", "created_seq", "inputs", "result", "attribution", "closed"], { json: ["inputs", "result"] }),
+  tbl("runs", `CREATE TABLE runs (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL CHECK (attempt >= 1), session_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK (state IN ('active','terminal')), calls INTEGER NOT NULL DEFAULT 0 CHECK (calls >= 0), code TEXT NOT NULL CHECK (json_valid(code)), started_ms INTEGER NOT NULL, role TEXT NOT NULL DEFAULT 'reader', slot INTEGER, work_id TEXT, UNIQUE (job_id, attempt))`, ["id", "job_id", "attempt", "session_id", "state", "calls", "code", "started_ms", "role", "slot", "work_id"], { refs: { job_id: "jobs.id" }, json: ["code"] }),
+  tbl("messages", `CREATE TABLE messages (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), purpose TEXT NOT NULL CHECK (purpose IN ('prompt','nudge')))`, ["id", "run_id", "purpose"], { refs: { run_id: "runs.id" } }),
+  tbl("evidence", `CREATE TABLE evidence (handle TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), session_id TEXT NOT NULL, source TEXT NOT NULL, text TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384), ordinal INTEGER NOT NULL, UNIQUE (run_id, source, ordinal))`, ["handle", "run_id", "session_id", "source", "text", "ordinal"], { refs: { run_id: "runs.id" } }),
+  // What a piece of evidence is, apart from what its source is called. A piece without a row here is not telemetry.
+  tbl("origins", `CREATE TABLE origins (handle TEXT PRIMARY KEY REFERENCES evidence(handle) ON DELETE CASCADE, origin TEXT NOT NULL CHECK (origin IN ('telemetry','code','history','generated')))`, ["handle", "origin"], { refs: { handle: "evidence.handle" } }),
+  tbl("hourly", `CREATE TABLE hourly (incident TEXT NOT NULL, hour INTEGER NOT NULL, count INTEGER NOT NULL CHECK (count >= 0), PRIMARY KEY (incident, hour))`, ["incident", "hour", "count"], { refs: { incident: "incidents.id" } }),
+  tbl("asks", `CREATE TABLE asks (key TEXT PRIMARY KEY, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), mode TEXT NOT NULL CHECK (mode IN ('new','continue')), text TEXT NOT NULL, digest TEXT NOT NULL, seq INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','answered','failed')), session_id TEXT, answer TEXT, reason TEXT, message TEXT)`, ["key", "subject", "job_id", "mode", "text", "digest", "seq", "state", "session_id", "answer", "reason", "message"], { refs: { job_id: "jobs.id" } }),
+  tbl("work", `CREATE TABLE work (id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id), kind TEXT NOT NULL CHECK (kind IN ('reading','challenge','answer')), slot INTEGER, priority INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','running','done','missing')), tries INTEGER NOT NULL DEFAULT 0, ask_key TEXT, run_id TEXT REFERENCES runs(id), reason TEXT, seq INTEGER NOT NULL)`, ["id", "job_id", "kind", "slot", "priority", "state", "tries", "ask_key", "run_id", "reason", "seq"], { refs: { job_id: "jobs.id", run_id: "runs.id" } }),
+  tbl("requests", `CREATE TABLE requests (key TEXT PRIMARY KEY, op TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL CHECK (json_valid(result)))`, ["key", "op", "digest", "result"], { json: ["result"] }),
+  tbl("corrections", `CREATE TABLE corrections (seq INTEGER PRIMARY KEY, app TEXT NOT NULL, subject TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), text TEXT NOT NULL, date TEXT NOT NULL)`, ["seq", "app", "subject", "job_id", "text", "date"], { refs: { job_id: "jobs.id" } }),
+  tbl("notifications", `CREATE TABLE notifications (id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES incidents(id), cause_seq INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued','sending','delivered','parked')), attempts INTEGER NOT NULL DEFAULT 0, next_ms INTEGER, delay_ms INTEGER, reason TEXT, title TEXT NOT NULL, body TEXT NOT NULL, UNIQUE (subject, cause_seq))`, ["id", "subject", "cause_seq", "state", "attempts", "next_ms", "delay_ms", "reason", "title", "body"], { refs: { subject: "incidents.id" } }),
+  tbl("lines", `CREATE TABLE lines (incident TEXT NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, text TEXT NOT NULL)`, ["incident", "source", "at_ms", "text"], { refs: { incident: "incidents.id" } }),
+  tbl("onsets", `CREATE TABLE onsets (incident TEXT PRIMARY KEY, at_ms INTEGER NOT NULL)`, ["incident", "at_ms"], { refs: { incident: "incidents.id" } }),
+  tbl("rollouts", `CREATE TABLE rollouts (seq INTEGER PRIMARY KEY, after_ms INTEGER, by_ms INTEGER NOT NULL, exact INTEGER NOT NULL CHECK (exact IN (0,1)))`, ["seq", "after_ms", "by_ms", "exact"]),
+  tbl("samples", `CREATE TABLE samples (id INTEGER PRIMARY KEY, source TEXT NOT NULL, series TEXT NOT NULL, at_ms INTEGER NOT NULL, value REAL)`, ["id", "source", "series", "at_ms", "value"]),
+  tbl("comparisons", `CREATE TABLE comparisons (id TEXT PRIMARY KEY, app TEXT NOT NULL, staging_revision TEXT NOT NULL, production_revision TEXT, start_seq INTEGER NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending','regression','no_signal','unknown','same_release')), reason TEXT, staging_count INTEGER, production_count INTEGER, data TEXT NOT NULL CHECK (json_valid(data)), incident TEXT)`, ["id", "app", "staging_revision", "production_revision", "start_seq", "state", "reason", "staging_count", "production_count", "data", "incident"], { refs: { incident: "incidents.id" }, json: ["data"] }),
+  tbl("fixes", `CREATE TABLE fixes (id TEXT PRIMARY KEY, incident TEXT NOT NULL, job_id TEXT NOT NULL, app TEXT NOT NULL, environment TEXT NOT NULL, origin TEXT NOT NULL, state TEXT NOT NULL, reason TEXT, previous TEXT, deployed TEXT, base TEXT, candidate TEXT, head TEXT, diff TEXT, run_id TEXT, data TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(data)), seq INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 0)`, ["id", "incident", "job_id", "app", "environment", "origin", "state", "reason", "previous", "deployed", "base", "candidate", "head", "diff", "run_id", "data", "seq", "version"], { refs: { incident: "incidents.id", job_id: "jobs.id", run_id: "runs.id" }, json: ["data"] }),
+  tbl("proposals", `CREATE TABLE proposals (run_id TEXT PRIMARY KEY, body TEXT NOT NULL CHECK (json_valid(body)), refused TEXT)`, ["run_id", "body", "refused"], { refs: { run_id: "runs.id" }, json: ["body"] }),
+  tbl("findings", `CREATE TABLE findings (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id), verdict TEXT NOT NULL CHECK (verdict IN ('real','not_real','unsure')), claims TEXT NOT NULL CHECK (json_valid(claims)), code TEXT NOT NULL CHECK (json_valid(code)), body TEXT NOT NULL CHECK (json_valid(body)))`, ["id", "run_id", "verdict", "claims", "code", "body"], { refs: { run_id: "runs.id" }, json: ["claims", "code", "body"] }),
+  tbl("citations", `CREATE TABLE citations (finding TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE, handle TEXT NOT NULL REFERENCES evidence(handle) ON DELETE RESTRICT, PRIMARY KEY (finding, handle))`, ["finding", "handle"], { refs: { finding: "findings.id", handle: "evidence.handle" }, derived: true }),
+  tbl("commits", `CREATE TABLE commits (app TEXT NOT NULL, sha TEXT NOT NULL, parent TEXT, committed_at INTEGER NOT NULL, subject TEXT NOT NULL, files INTEGER NOT NULL DEFAULT 0, insertions INTEGER NOT NULL DEFAULT 0, deletions INTEGER NOT NULL DEFAULT 0, flags TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(flags)), paths TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(paths)), seq INTEGER NOT NULL, PRIMARY KEY (app, sha))`, ["app", "sha", "parent", "committed_at", "subject", "files", "insertions", "deletions", "flags", "paths", "seq"], { json: ["flags", "paths"] }),
+  tbl("lenses", `CREATE TABLE lenses (incident TEXT PRIMARY KEY REFERENCES incidents(id), spec TEXT NOT NULL CHECK (json_valid(spec)), seq INTEGER NOT NULL)`, ["incident", "spec", "seq"], { refs: { incident: "incidents.id" }, json: ["spec"] }),
+];
 
 const INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS occurrences_age ON occurrences (source, at_ms)",
@@ -236,10 +78,11 @@ const INDEXES: ReadonlyArray<string> = [
   "CREATE INDEX IF NOT EXISTS lines_incident ON lines (incident, at_ms)",
   "CREATE INDEX IF NOT EXISTS work_queue ON work (state, priority, seq)",
   "CREATE INDEX IF NOT EXISTS samples_series ON samples (source, id)",
-  "CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id)"];
+  "CREATE INDEX IF NOT EXISTS fixes_job ON fixes (job_id)",
+  "CREATE INDEX IF NOT EXISTS commits_recent ON commits (app, committed_at DESC)"];
 
 /** Tables added within version 1: created on open when absent, and empty when restoring a backup that lacks them. */
-const ADDED_TABLES = new Set(["onsets", "rollouts", "samples", "comparisons", "fixes", "proposals", "origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines"]);
+const ADDED_TABLES = new Set(["onsets", "rollouts", "samples", "comparisons", "fixes", "proposals", "origins", "hourly", "asks", "citations", "work", "requests", "corrections", "notifications", "lines", "commits", "lenses"]);
 
 /** Rules kept by the database itself; created with the schema and on open of an older file. One statement each. */
 const TRIGGERS: ReadonlyArray<string> = [

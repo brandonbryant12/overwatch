@@ -12,13 +12,15 @@ import { Cause, Effect, Layer, Option, Predicate, Redacted, Schema } from "effec
 import { McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { timingSafeEqual } from "node:crypto";
+import { brief } from "./brief.ts";
 import { Collector } from "./collect.ts";
 import { AppConfig } from "./config.ts";
 import { secret } from "./exec.ts";
 import { Fixes } from "./fixes.ts";
 import { act, basisOf, detail, inbox, search } from "./inbox.ts";
+import { lensesFor } from "./lens.ts";
 import { OpenCodeClient } from "./opencode.ts";
-import { comparisons } from "./outlook.ts";
+import { commits, comparisons, forecasts } from "./outlook.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
 import { Store } from "./store.ts";
@@ -28,7 +30,7 @@ import { inputSchema, type Owner, TOOLS, Tools } from "./tools.ts";
 const Failure = Schema.Struct({ error: Schema.String });
 
 /** Each tool as MCP lists it: its closed input schema from its parameters Schema. Arguments reach `Tools.call` as sent. */
-const READS = new Set(["ow_telemetry", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search"]);
+const READS = new Set(["ow_telemetry", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search", "ow_brief", "ow_outlook"]);
 const definitions = TOOLS.map((t) =>
   Tool.dynamic(t.name, { description: t.description, parameters: inputSchema(t.parameters), success: Schema.Unknown, failure: Failure }).annotate(Tool.Readonly, READS.has(t.name)));
 const toolkit = Toolkit.make(...definitions);
@@ -51,12 +53,14 @@ const owner = Effect.gen(function* () {
       local(Effect.gen(function* () {
           const action = yield* act(id, body, yield* basisOf(body));
           return { ...(yield* snapshot(collector.view, true)), action }; })),
+    brief: (b) => local(brief(b.audience ?? "owner", b.afterSeq, b.throughSeq)),
+    outlook: local(Effect.all({ forecasts, comparisons, commits })),
   } satisfies Owner; });
 
-/** An item in full, as the page and the owner tools see it: its fix attempts and, for a staging regression, its comparison. */
+/** An item in full, as the page and the owner tools see it: its fix attempts, staging comparison, and visual lenses. */
 export const itemOf = Effect.fnUntraced(function* (id: string) {
-  const d = yield* detail(id);
-  return { ...d, fixable: Boolean((yield* AppConfig).apps[d.incident.app]?.fixes), fixes: yield* (yield* Fixes).forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null };
+  const d = yield* detail(id), l = yield* lensesFor(id);
+  return { ...d, fixable: Boolean((yield* AppConfig).apps[d.incident.app]?.fixes), fixes: yield* (yield* Fixes).forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null, ...(l.lens ? { lens: l.lens, lenses: l.lenses } : {}) };
 });
 
 const handlers = toolkit.toLayer(Effect.gen(function* () {

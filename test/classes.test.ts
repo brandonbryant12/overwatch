@@ -204,6 +204,7 @@ test("class: a restored copy that breaks any declared reference is refused whole
                 "INSERT INTO lines (incident, source, at_ms, text) VALUES ('inc_1', 'pods', 0, 'ERROR x')",
                 "INSERT INTO work (id, job_id, kind, slot, priority, state, seq) VALUES ('w_x', 'job_x', 'reading', 1, 1, 'done', 1)",
                 "INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (1, 'shop', 'inc_1', 'job_x', 'note', '2026-11-01')",
+                "INSERT INTO lenses (incident, spec, seq) VALUES ('inc_1', '{}', 1)",
               ])
                 yield* w.run(statement);
             }),

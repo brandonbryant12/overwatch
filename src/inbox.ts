@@ -16,41 +16,8 @@ import { clean } from "./redact.ts";
 import { fold, json, Store, type Clean, type Writer, sql } from "./store.ts";
 
 type Kind = "done" | "later" | "never";
-interface Way {
-  kind: Kind;
-  seq: number;
-  untilMs: number | null;
-  when: "worse" | null;
-  reason: string | null;
-  /** When it was put away (wall), the delay a deadline counts from it, and what it was like then. */
-  atMs: number;
-  delayMs: number | null;
-  count: number;
-  baseline: number;
-  /** Whether the count was exact when put away: a rate needs a known baseline. */
-  exact?: boolean;
-  severity: string;
-  previous: Way | null;
-}
-interface Row {
-  id: string;
-  app: string;
-  environment: string;
-  source: string;
-  title: string;
-  severity: string;
-  count: number;
-  exact: number;
-  active: number;
-  way: string | null;
-  returned: string | null;
-  seen_seq: number;
-  first_seq: number;
-  decided_seq: number;
-  seq: number;
-  first_ms: number;
-  last_ms: number;
-}
+interface Way { kind: Kind; seq: number; untilMs: number | null; when: "worse" | null; reason: string | null; atMs: number; delayMs: number | null; count: number; baseline: number; exact?: boolean; severity: string; previous: Way | null }
+interface Row { id: string; app: string; environment: string; source: string; title: string; severity: string; count: number; exact: number; active: number; way: string | null; returned: string | null; seen_seq: number; first_seq: number; decided_seq: number; seq: number; first_ms: number; last_ms: number }
 
 export const GROUPS = ["needsYou", "new", "working", "quiet"] as const;
 export type Group = (typeof GROUPS)[number];
