@@ -25,8 +25,8 @@ export const demoConfig = Effect.fn("demoConfig")(function* (port: number) {
         fixes: { remote: "origin", base: "main", paths: ["config/database.json", "config/payments.json"], verify: [["npm", "test", "--", "config"]] },
         promotion: { staging: "staging", production: "production" },
         environments: {
-          production: { sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
-          staging: { policy: { investigate: false, notify: false }, sources: { pods: pods("staging-east") } },
+          production: { databases: { primary: { driver: "sqlite", file: "demo.sqlite", allowSelect: true } }, sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
+          staging: { policy: { investigate: false, notify: false, fixMode: "off" }, sources: { pods: pods("staging-east") } },
           qa: { sources: { pods: pods("qa-east") } }, }, }, },
     watchers: [{ app: "shop", environment: "production", every: "2m" }, { app: "shop", environment: "staging", every: "2m" }, { app: "shop", environment: "qa", every: "10m" }],
   }, join(dataDir, "demo.json")) as Config; });

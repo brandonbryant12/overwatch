@@ -367,8 +367,8 @@ test("snapshot exposes environments[].policy, jobs[].{verdict,seq}, fixes[], and
     assert.equal(snap.environments.length, 3);
     const prod = snap.environments.find((e) => e.environment === "production")!;
     const stg = snap.environments.find((e) => e.environment === "staging")!;
-    assert.deepEqual(prod.policy, { investigate: true, readings: 3, notify: true, critical: true, fixMode: "propose", genUi: false, databases: [] });
-    assert.deepEqual(stg.policy, { investigate: false, readings: 3, notify: false, critical: false, fixMode: "propose", genUi: false, databases: [] });
+    assert.deepEqual(prod.policy, { investigate: true, readings: 3, notify: true, critical: true, fixMode: "propose", genUi: false, databases: ["primary"] });
+    assert.deepEqual(stg.policy, { investigate: false, readings: 3, notify: false, critical: false, fixMode: "off", genUi: false, databases: [] });
     // jobs[] carry verdict and seq
     const inv = snap.jobs.find((j) => j.kind === "investigation" && j.subject === "inc_d0c4ab11")!;
     assert.equal(inv.verdict, "real");
