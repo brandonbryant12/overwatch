@@ -60,6 +60,13 @@
   --accent-border: rgba(245, 166, 35, 0.42);
   --cyan: #38d9c0;
   --cyan-surface: rgba(56, 217, 192, 0.11);
+  --cyan-border: rgba(56, 217, 192, 0.36);
+
+  /* Unified subtle badge surfaces & evidence jump pulse */
+  --badge-bg: rgba(148, 175, 206, 0.08);
+  --badge-border: rgba(148, 175, 206, 0.22);
+  --evidence-flash-bg: rgba(56, 217, 192, 0.14);
+  --evidence-flash-ring: rgba(56, 217, 192, 0.55);
 
   /* Semantic states (always paired with distinct shape/pattern + text) */
   --state-error: #f26461;
@@ -132,6 +139,12 @@
   --accent-border: rgba(184, 107, 0, 0.42);
   --cyan: #0b806e;
   --cyan-surface: rgba(11, 128, 110, 0.1);
+  --cyan-border: rgba(11, 128, 110, 0.34);
+
+  --badge-bg: rgba(15, 23, 42, 0.045);
+  --badge-border: rgba(15, 23, 42, 0.16);
+  --evidence-flash-bg: rgba(11, 128, 110, 0.11);
+  --evidence-flash-ring: rgba(11, 128, 110, 0.48);
 
   --state-error: #c52828;
   --state-error-surface: rgba(197, 40, 40, 0.08);

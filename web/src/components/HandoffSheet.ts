@@ -28,6 +28,7 @@ export const Model = Schema.Struct({
   placed: Schema.String,
   bundle: Schema.NullOr(HandoffBundle),
   loading: Schema.Boolean,
+  copied: Schema.Boolean,
 });
 export type Model = typeof Model.Type;
 
@@ -80,7 +81,7 @@ export const CopyHandoffPrompt = Command.define("CopyHandoffPrompt", {
 
 export const init = (snapshot: Snapshot | null, focus: string, detail: ItemDetail | null): Step<Model, Message, never> => {
   const initial = buildOpenCodeHandoff(snapshot, focus, detail, "investigate")?.text ?? "";
-  const model: Model = { preset: "investigate", text: initial, placed: initial, bundle: null, loading: m.isIncident(focus) };
+  const model: Model = { preset: "investigate", text: initial, placed: initial, bundle: null, loading: m.isIncident(focus), copied: false };
   return m.isIncident(focus) ? run(model, LoadHandoff({ id: focus })) : { model };
 };
 
@@ -88,9 +89,9 @@ export const update = (model: Model, message: Message, props: Props): Step<Model
   Message.match(message, {
     SelectedPreset: ({ preset }) => {
       const next = buildOpenCodeHandoff(props.snapshot, props.focus, props.detail, preset, model.bundle)?.text ?? "";
-      return { model: { ...model, preset, text: next, placed: next } };
+      return { model: { ...model, preset, text: next, placed: next, copied: false } };
     },
-    UpdatedText: ({ value }) => ({ model: { ...model, text: value } }),
+    UpdatedText: ({ value }) => ({ model: { ...model, text: value, copied: false } }),
     LoadedBundle: ({ bundle }) => {
       const next = buildOpenCodeHandoff(props.snapshot, props.focus, props.detail, model.preset, bundle)?.text ?? model.text;
       // Preserve user edits made while the network request was in flight.
@@ -102,7 +103,7 @@ export const update = (model: Model, message: Message, props: Props): Step<Model
     ClickedOpenTab: () => emit(model, Events.RequestedOpenTab()),
     SucceededCopy: () => {
       const handles = buildOpenCodeHandoff(props.snapshot, props.focus, props.detail, model.preset, model.bundle)?.handleCount ?? 0;
-      return emit(model, Events.Copied({ handles }));
+      return emit({ ...model, copied: true }, Events.Copied({ handles }));
     },
     FailedCopy: ({ reason }) => emit(model, Events.FailedCopy({ reason })),
     RequestedCloseDialog: () => emit(model, Events.RequestedClose()),
@@ -150,7 +151,16 @@ export const view = defineView<Model, Message, Props>((model, { opened, focus, s
       { class: "sheet-actions" },
       el(h, "button", { attrs: { type: "button", "data-close": "" }, on: [h.OnClick(Message.RequestedCloseDialog())] }, "Close ", el(h, "kbd", {}, "Esc")),
       el(h, "button", { attrs: { type: "button", "data-handoff-open": "" }, on: [h.OnClick(Message.ClickedOpenTab())] }, "Open tab ", el(h, "kbd", {}, "o")),
-      el(h, "button", { class: "primary", attrs: { type: "button", "data-handoff-copy": "" }, on: [h.OnClick(Message.ClickedCopy())] }, "Copy prompt"),
+      el(
+        h,
+        "button",
+        {
+          class: ["primary", model.copied && "copied"],
+          attrs: { type: "button", "data-handoff-copy": "", "data-copied": model.copied ? "true" : undefined },
+          on: [h.OnClick(Message.ClickedCopy())],
+        },
+        model.copied ? "Copied for OpenCode" : "Copy prompt",
+      ),
     ),
   );
 });

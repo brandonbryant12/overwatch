@@ -570,6 +570,59 @@ export function whatsNew(
   return { window, sinceSeq, sinceAtMs, count: visible + overflow.length, groups, overflow };
 }
 
+export interface ReadyQueue {
+  readonly ids: ReadonlyArray<string>;
+  readonly coveredInWhatsNew: number;
+}
+
+/**
+ * Deduplicates Overview's "Ready for your keypress" against visible "What's new" rows.
+ * While What's new is expanded (`count > 0`), incidents already shown in visible What's new rows are excluded so they
+ * do not appear twice on the board; as soon as What's new collapses (`count === 0`), all active `needsYou` items
+ * surface immediately so urgent work is never hidden.
+ */
+export function readyForKeypress(
+  needsYou: ReadonlyArray<string>,
+  wn: Pick<WhatsNewSummary, "count" | "groups">,
+  limit = 3,
+): ReadyQueue {
+  if (wn.count === 0) return { ids: needsYou.slice(0, limit), coveredInWhatsNew: 0 };
+  const visible = new Set<string>();
+  for (const g of wn.groups) {
+    for (const item of g.items) {
+      if (isIncident(item.subject)) visible.add(item.subject);
+    }
+  }
+  const remaining = needsYou.filter((id) => !visible.has(id));
+  return { ids: remaining.slice(0, limit), coveredInWhatsNew: needsYou.length - remaining.length };
+}
+
+// ---------------------------------------------------------------- Evidence handle refs
+
+/** Whether a string looks like a stored Overwatch evidence handle (`e_...`). */
+export const isEvidenceHandle = (value: string): boolean => /^e_[a-zA-Z0-9_-]{4,}$/.test(value);
+
+export type TextSegment =
+  | { readonly kind: "text"; readonly value: string }
+  | { readonly kind: "handle"; readonly value: string };
+
+/** Splits plain prose into text and clickable evidence handle references (`e_...`) without HTML parsing. */
+export function splitHandleRefs(text: string): ReadonlyArray<TextSegment> {
+  if (!text.includes("e_")) return [{ kind: "text", value: text }];
+  const out: Array<TextSegment> = [];
+  const re = /\b(e_[a-zA-Z0-9_-]{4,})\b/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) out.push({ kind: "text", value: text.slice(last, match.index) });
+    out.push({ kind: "handle", value: match[1]! });
+    last = re.lastIndex;
+  }
+  if (last === 0) return [{ kind: "text", value: text }];
+  if (last < text.length) out.push({ kind: "text", value: text.slice(last) });
+  return out;
+}
+
 // ---------------------------------------------------------------- Policy pills
 
 export interface PolicyTag {

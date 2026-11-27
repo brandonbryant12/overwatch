@@ -107,9 +107,12 @@ export const AppModel = Schema.Struct({
   lensMode: LensModeSchema,
   lensLoading: Schema.Boolean,
   aiLenses: Schema.Record(Schema.String, LensSpec),
-  /** Browser-remembered "What's new" caught-up checkpoint and window toggle. */
+  /** Browser-remembered "What's new" caught-up checkpoint, one-click undo state, and window toggle. */
   caughtUp: Schema.NullOr(CaughtUpSchema),
+  caughtUpUndo: Schema.NullOr(Schema.Struct({ previous: Schema.NullOr(CaughtUpSchema) })),
   whatsNewWindow: WhatsNewWindowSchema,
+  /** Brief inline confirmation state on the OpenCode copy button after `c` / copy handoff. */
+  copyFeedback: Schema.Struct({ shown: Schema.Boolean, n: Schema.Number }),
   /** The bar's own state. */
   dock: Dock.Model,
 });
@@ -137,6 +140,7 @@ export const AppMessage = TaggedEnum({
   PressedKey: { command: Command_ },
   ClickedOverview: {},
   ClickedMarkCaughtUp: {},
+  ClickedUndoCaughtUp: {},
   ToggledWhatsNewWindow: {},
   ClickedFind: {},
   ClickedBrief: {},
@@ -150,6 +154,7 @@ export const AppMessage = TaggedEnum({
   RequestedInbox: {},
   RequestedItemAction: { action: Stage.ItemAction },
   RequestedPublish: { fixId: Schema.String },
+  RequestedJumpHandle: { handle: Schema.String },
   ChangedLensMode: { mode: LensModeSchema },
   RequestedGenerateLens: {},
   CopiedText: { text: Schema.String },
@@ -174,6 +179,7 @@ export const AppMessage = TaggedEnum({
   FailedMarkSeen: {},
   ElapsedSeenWait: { id: Schema.String, n: Schema.Number },
   ElapsedToast: { n: Schema.Number },
+  ElapsedCopyFeedback: { n: Schema.Number },
   SucceededInvestigate: {},
   SucceededRequestFix: {},
   SucceededPublish: { published: Published },
@@ -182,6 +188,7 @@ export const AppMessage = TaggedEnum({
   CompletedOpenInOpenCode: {},
   CompletedRemember: {},
   CompletedScrollToTop: {},
+  CompletedJumpHandle: { handle: Schema.String, found: Schema.Boolean },
   FailedRequest: { message: Schema.String },
   // The parts' own Messages
   GotStripMessage: { message: Strip.Message },
@@ -358,6 +365,12 @@ export const WaitBeforeDismissal = Command.define("WaitBeforeDismissal", {
   execute: ({ n }) => Effect.sleep(Duration.millis(3200)).pipe(Effect.as(AppMessage.ElapsedToast({ n }))),
 });
 
+export const WaitBeforeClearCopyFeedback = Command.define("WaitBeforeClearCopyFeedback", {
+  args: { n: Schema.Number },
+  messages: [AppMessage.ElapsedCopyFeedback],
+  execute: ({ n }) => Effect.sleep(Duration.millis(2200)).pipe(Effect.as(AppMessage.ElapsedCopyFeedback({ n }))),
+});
+
 /** What the page keeps in this browser: the theme and which groups are open. Without storage it only forgets. */
 export const Remember = Command.define("Remember", {
   args: { key: Schema.String, value: Schema.String },
@@ -376,6 +389,18 @@ export const ScrollToTop = Command.define("ScrollToTop", {
     yield* page.scrollToTop;
     return AppMessage.CompletedScrollToTop();
   }),
+});
+
+/** Jumps to the evidence card for a handle, opening any collapsed ancestor `<details>` and pulsing it briefly. */
+export const RevealEvidence = Command.define("RevealEvidence", {
+  args: { handle: Schema.String },
+  messages: [AppMessage.CompletedJumpHandle],
+  execute: ({ handle }) =>
+    Effect.gen(function* () {
+      const page = yield* PageWindow;
+      const found = yield* page.revealEvidence(handle);
+      return AppMessage.CompletedJumpHandle({ handle, found });
+    }),
 });
 
 /** Plain left-click on `.brand` returns to Overview without a full page reload; middle/modifier clicks keep `href="/"`. */
@@ -433,7 +458,9 @@ export const init = (props: AppProps): Return => ({
     lensLoading: false,
     aiLenses: {},
     caughtUp: props.initialCaughtUp ?? null,
+    caughtUpUndo: null,
     whatsNewWindow: "since",
+    copyFeedback: { shown: false, n: 0 },
     dock: Dock.init,
   },
 });
@@ -495,9 +522,11 @@ const foldStage = Update.foldChild({
         Picked: ({ subject }) => AppMessage.PickedSubject({ subject }),
         RequestedAction: ({ action }) => AppMessage.RequestedItemAction({ action }),
         RequestedPublish: ({ fixId }) => AppMessage.RequestedPublish({ fixId }),
+        RequestedJumpHandle: ({ handle }) => AppMessage.RequestedJumpHandle({ handle }),
         ChangedLensMode: ({ mode }) => AppMessage.ChangedLensMode({ mode }),
         RequestedGenerateLens: () => AppMessage.RequestedGenerateLens(),
         RequestedMarkCaughtUp: () => AppMessage.ClickedMarkCaughtUp(),
+        RequestedUndoCaughtUp: () => AppMessage.ClickedUndoCaughtUp(),
         RequestedToggleWhatsNewWindow: () => AppMessage.ToggledWhatsNewWindow(),
         Copied: ({ text }) => AppMessage.CopiedText({ text }),
         FailedCopy: ({ reason }) => AppMessage.FailedCopy({ reason }),
@@ -627,7 +656,7 @@ const step = (model: AppModel, message: AppMessage): Return => {
   /** Puts a subject in focus: its item is read, and held for a moment it counts as seen. */
   const focusOn = (next: AppModel, subject: string | null): Return => {
     if (next.focus === subject) return go(next);
-    const focused = { ...next, focus: subject };
+    const focused = { ...next, focus: subject, copyFeedback: { ...next.copyFeedback, shown: false } };
     return m.isIncident(subject) ? waitSeen(focused, subject) : go(focused);
   };
   const open = (overlay: Overlay, ...commands: ReadonlyArray<Command.Command<AppMessage, never, AppServices>>) =>
@@ -756,7 +785,18 @@ const step = (model: AppModel, message: AppMessage): Return => {
     case "ClickedMarkCaughtUp": {
       if (model.snapshot === null) return go(model);
       const caughtUp = { seq: model.snapshot.seq, atMs: model.snapshot.atMs };
-      return go({ ...model, caughtUp, whatsNewWindow: "since" }, Remember({ key: "ow-caught-up", value: JSON.stringify(caughtUp) }));
+      return go(
+        { ...model, caughtUp, caughtUpUndo: { previous: model.caughtUp }, whatsNewWindow: "since" },
+        Remember({ key: "ow-caught-up", value: JSON.stringify(caughtUp) }),
+      );
+    }
+    case "ClickedUndoCaughtUp": {
+      if (model.caughtUpUndo === null) return go(model);
+      const previous = model.caughtUpUndo.previous;
+      return go(
+        { ...model, caughtUp: previous, caughtUpUndo: null, whatsNewWindow: "since" },
+        Remember({ key: "ow-caught-up", value: previous ? JSON.stringify(previous) : "" }),
+      );
     }
     case "ToggledWhatsNewWindow":
       return go({ ...model, whatsNewWindow: model.whatsNewWindow === "since" ? "24h" : "since" });
@@ -789,11 +829,18 @@ const step = (model: AppModel, message: AppMessage): Return => {
       }
       return go(model);
     case "RequestedPublish": return publish(message.fixId);
+    case "RequestedJumpHandle": return go(model, RevealEvidence({ handle: message.handle }));
     case "ChangedLensMode": return go({ ...model, lensMode: message.mode });
     case "RequestedGenerateLens": return triggerLens();
     case "CopiedText": return say(model, `Copied ${message.text}`, "ok");
-    case "CopiedHandoff":
-      return say(model, `Copied OpenCode handoff (${message.handles} handle${message.handles === 1 ? "" : "s"} · MCP ready)`, "ok");
+    case "CopiedHandoff": {
+      const copyN = model.copyFeedback.n + 1;
+      const next = { ...model, copyFeedback: { shown: true, n: copyN } };
+      return also(
+        say(next, `Copied OpenCode handoff (${message.handles} handle${message.handles === 1 ? "" : "s"} · MCP ready)`, "ok"),
+        WaitBeforeClearCopyFeedback({ n: copyN }),
+      );
+    }
     case "FailedCopy": return say(model, `Copy failed: ${message.reason}`, "error");
     case "RequestedFind": return openFind(message.text);
     case "AskedAgent":
@@ -844,6 +891,8 @@ const step = (model: AppModel, message: AppMessage): Return => {
     }
     case "ElapsedToast":
       return message.n === model.toast.n ? go({ ...model, toast: { ...model.toast, shown: false } }) : go(model);
+    case "ElapsedCopyFeedback":
+      return message.n === model.copyFeedback.n ? go({ ...model, copyFeedback: { ...model.copyFeedback, shown: false } }) : go(model);
     case "SucceededInvestigate":
       return also(say(model, "Investigation queued: independent readings, then a challenger if most say real.", "ok"), ...readAgain(model));
     case "SucceededRequestFix":
@@ -867,6 +916,8 @@ const step = (model: AppModel, message: AppMessage): Return => {
     case "CompletedRemember":
     case "CompletedScrollToTop":
       return go(model);
+    case "CompletedJumpHandle":
+      return message.found ? go(model) : say(model, `Evidence ${m.shortHandle(message.handle)} is not shown in this view`);
 
     case "GotStripMessage": return foldStrip(model, message.message);
     case "GotInboxMessage": return foldInbox(model, message.message);
@@ -1128,6 +1179,8 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
               cachedAiLens: model.focus !== null ? (model.aiLenses[model.focus] ?? null) : null,
               caughtUp: model.caughtUp,
               whatsNewWindow: model.whatsNewWindow,
+              canUndoCaughtUp: model.caughtUpUndo !== null,
+              handoffCopied: model.copyFeedback.shown,
             },
             toParentMessage: (message) => AppMessage.GotStageMessage({ message }),
           }),

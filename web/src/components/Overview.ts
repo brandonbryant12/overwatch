@@ -15,11 +15,13 @@ export interface OverviewProps {
   readonly serverNow: number | null;
   readonly caughtUp: m.CaughtUp | null;
   readonly whatsNewWindow: m.WhatsNewWindow;
+  readonly canUndoCaughtUp: boolean;
 }
 
 export interface OverviewHandlers<M> {
   readonly onPick: (subject: string) => M;
   readonly onMarkCaughtUp: () => M;
+  readonly onUndoCaughtUp: () => M;
   readonly onToggleWindow: () => M;
 }
 
@@ -58,8 +60,8 @@ const WhatsNewRow = <M>(h: H<M>, item: m.WhatsNewItem, onPick: (subject: string)
     ),
   );
 
-export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp, whatsNewWindow }: OverviewProps, handlers: OverviewHandlers<M>) => {
-  const { onPick, onMarkCaughtUp, onToggleWindow } = handlers;
+export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp, whatsNewWindow, canUndoCaughtUp }: OverviewProps, handlers: OverviewHandlers<M>) => {
+  const { onPick, onMarkCaughtUp, onUndoCaughtUp, onToggleWindow } = handlers;
   const g = snapshot.inbox.groups;
   const n = g.needsYou.length;
   const now = serverNow ?? snapshot.atMs;
@@ -69,9 +71,9 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp
   const wn = m.whatsNew(snapshot, caughtUp, now, whatsNewWindow);
   const hasCheckpoint = caughtUp !== null && caughtUp.seq <= snapshot.seq;
 
-  // Keep Ready for your keypress strictly for active needsYou items so marking caught up never hides urgent errors.
-  const urgent = g.needsYou
-    .slice(0, 3)
+  // Deduplicate active needsYou items already visible in expanded What's new; once caught up, all urgent items surface.
+  const ready = m.readyForKeypress(g.needsYou, wn, 3);
+  const urgent = ready.ids
     .map((id) => snapshot.incidents.find((x) => x.id === id))
     .filter((x): x is Snapshot["incidents"][number] => x !== undefined);
 
@@ -180,17 +182,30 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp
           el(
             h,
             "span",
-            {},
+            { class: "wn-quiet-status" },
             hasCheckpoint && wn.window === "since"
-              ? `Caught up since ${m.ago(caughtUp.atMs, now)}`
+              ? (now - caughtUp.atMs < 60_000 ? "Caught up" : `Caught up · ${m.ago(caughtUp.atMs, now)}`)
               : "Nothing new in the last 24h",
           ),
-          hasCheckpoint &&
+          (canUndoCaughtUp || hasCheckpoint) &&
             el(
               h,
-              "button",
-              { class: "wn-toggle", attrs: { type: "button", "data-whats-new-toggle": "" }, on: [h.OnClick(onToggleWindow())] },
-              wn.window === "since" ? "Show last 24h" : "Since caught up",
+              "div",
+              { class: "wn-quiet-actions" },
+              canUndoCaughtUp &&
+                el(
+                  h,
+                  "button",
+                  { class: "wn-undo", attrs: { type: "button", "data-undo-caught-up": "" }, on: [h.OnClick(onUndoCaughtUp())] },
+                  "Undo",
+                ),
+              hasCheckpoint &&
+                el(
+                  h,
+                  "button",
+                  { class: "wn-toggle", attrs: { type: "button", "data-whats-new-toggle": "" }, on: [h.OnClick(onToggleWindow())] },
+                  wn.window === "since" ? "Show last 24h" : "Since caught up",
+                ),
             ),
         )
         : el(
@@ -246,7 +261,7 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp
               h,
               "details",
               { class: "disclosure" },
-              el(h, "summary", {}, `Show ${wn.overflow.length} more`),
+              el(h, "summary", {}, `Show ${wn.overflow.length} more (${wn.count} total)`),
               el(h, "ul", { class: ["wn-list", "wn-overflow-list"] }, ...wn.overflow.map((item) => WhatsNewRow(h, item, onPick))),
             ),
         ),
@@ -256,8 +271,8 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp
       el(
         h,
         "section",
-        { class: "board-section" },
-        el(h, "h3", {}, "Ready for your keypress"),
+        { class: "board-section", attrs: { "data-ready-section": "" } },
+        el(h, "h3", {}, "Ready for your keypress", el(h, "span", { class: "section-count" }, ` (${urgent.length})`)),
         el(
           h,
           "ul",

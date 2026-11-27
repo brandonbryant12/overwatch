@@ -20,6 +20,7 @@ import { CommitIcon, LensIcon } from "./Glyphs.ts";
 
 export interface VisualLensHandlers<M> {
   readonly onCopyHandle: (handle: string) => M;
+  readonly onJumpHandle?: (handle: string) => M;
   readonly onSwitchMode?: (mode: LensMode) => M;
   readonly onGenerateAi?: () => M;
 }
@@ -34,20 +35,21 @@ export interface VisualLensViewOptions {
   readonly canGenerate: boolean;
 }
 
-const HandleChip = <M>(h: H<M>, handle: string | null | undefined, valid: ReadonlySet<string>, onCopy: (handle: string) => M) => {
+const HandleChip = <M>(h: H<M>, handle: string | null | undefined, valid: ReadonlySet<string>, onSelect: (handle: string) => M) => {
   if (!handle) return null;
   const grounded = valid.has(handle);
   return el(
     h,
     "button",
     {
-      class: ["handle", "lens-handle", !grounded && "ungrounded"],
+      class: ["handle", "lens-handle", grounded ? "handle-jump" : "ungrounded"],
       attrs: {
         type: "button",
-        "data-handle": handle,
-        title: grounded ? `${handle} · click to copy verified handle` : `${handle} · unverified handle (not in stored evidence)`,
+        "data-lens-handle": handle,
+        "data-handle-jump": grounded ? handle : undefined,
+        title: grounded ? `${handle} · jump to evidence` : `${handle} · unverified handle (not in stored evidence)`,
       },
-      on: [h.OnClick(onCopy(handle))],
+      on: [h.OnClick(onSelect(handle))],
     },
     grounded ? m.shortHandle(handle) : `? ${m.shortHandle(handle)}`,
   );
@@ -293,20 +295,23 @@ const renderBlock = <M>(h: H<M>, block: LensBlock, valid: ReadonlySet<string>, n
 export const VisualLens = <M>(h: H<M>, options: VisualLensViewOptions, handlers: VisualLensHandlers<M>) => {
   const { lens, validation, validHandles, hasAi, mode, loading, canGenerate } = options;
   if (lens.blocks.length === 0) return null;
-  const originText = lens.source === "ai"
+  const originText = loading
+    ? "Generating lens…"
+    : lens.source === "ai"
     ? validation.grounded
       ? `AI lens · ${validation.verified.length} handle${validation.verified.length === 1 ? "" : "s"} verified`
       : `AI lens · ${validation.ungrounded.length} unverified ref${validation.ungrounded.length === 1 ? "" : "s"}`
     : validation.verified.length > 0
     ? `Derived · ${validation.verified.length} handle${validation.verified.length === 1 ? "" : "s"}`
     : "Derived from snapshot";
+  const onSelectHandle = (handle: string) => (validHandles.has(handle) && handlers.onJumpHandle ? handlers.onJumpHandle(handle) : handlers.onCopyHandle(handle));
 
   return el(
     h,
     "section",
     {
-      class: ["panel", "lens-card", lens.source === "ai" && "lens-ai", !validation.grounded && "lens-partial"],
-      attrs: { "data-lens": lens.source, "aria-label": lens.title },
+      class: ["panel", "lens-card", lens.source === "ai" && "lens-ai", !validation.grounded && "lens-partial", loading && "lens-loading"],
+      attrs: { "data-lens": lens.source, "aria-label": lens.title, "aria-busy": loading ? "true" : undefined },
     },
     el(
       h,
@@ -318,7 +323,7 @@ export const VisualLens = <M>(h: H<M>, options: VisualLensViewOptions, handlers:
         { class: "lens-title-wrap" },
         el(h, "span", { class: "lens-icon" }, LensIcon(h)),
         el(h, "h3", {}, lens.title),
-        el(h, "span", { class: ["lens-origin", !validation.grounded && "warn"] }, originText),
+        el(h, "span", { class: ["lens-origin", !validation.grounded && !loading && "warn", loading && "generating"] }, originText),
       ),
       el(
         h,
@@ -356,12 +361,12 @@ export const VisualLens = <M>(h: H<M>, options: VisualLensViewOptions, handlers:
             h,
             "button",
             {
-              class: "lens-gen-btn",
+              class: ["lens-gen-btn", loading && "loading"],
               attrs: { type: "button", "data-action": "lens", title: "Generate or refresh AI visual lens (g)" },
               on: [h.Disabled(loading), h.OnClick(handlers.onGenerateAi())],
             },
             loading ? el(h, "span", { class: "orbit", attrs: { "aria-hidden": "true" } }) : null,
-            loading ? "Synthesizing…" : hasAi ? "Refresh lens " : "AI lens ",
+            loading ? "Generating lens…" : hasAi ? "Refresh lens " : "AI lens ",
             !loading && el(h, "kbd", {}, "g"),
           )
           : null,
@@ -372,7 +377,7 @@ export const VisualLens = <M>(h: H<M>, options: VisualLensViewOptions, handlers:
       h,
       "div",
       { class: "lens-blocks" },
-      ...lens.blocks.map((block) => renderBlock(h, block, validHandles, lens.generatedAt, handlers.onCopyHandle)),
+      ...lens.blocks.map((block) => renderBlock(h, block, validHandles, lens.generatedAt, onSelectHandle)),
     ),
   );
 };

@@ -3,9 +3,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Story } from "foldkit";
 import { freshness } from "../freshness.mjs";
-import { Act, AppMessage, type AppModel, init, ReadItem, Remember, ScrollToTop, Undo, update, WaitBeforeDismissal, WaitBeforeSeen } from "../src/App.ts";
+import { Act, AppMessage, type AppModel, init, ReadItem, Remember, RevealEvidence, ScrollToTop, Undo, update, WaitBeforeClearCopyFeedback, WaitBeforeDismissal, WaitBeforeSeen } from "../src/App.ts";
 import * as Dock from "../src/components/Dock.ts";
 import * as Inbox from "../src/components/Inbox.ts";
+import * as Stage from "../src/components/Stage.ts";
 import type { Incident, Snapshot } from "../src/domain/Overwatch.ts";
 
 const { Command, given, message, model, story } = Story;
@@ -134,7 +135,54 @@ test("ClickedOverview returns to the board without reload; ClickedMarkCaughtUp p
     Command.resolve(Remember, AppMessage.CompletedRemember()),
     expect((s) => {
       assert.deepEqual(s.caughtUp, { seq: 5, atMs: 1_000_000 });
+      assert.deepEqual(s.caughtUpUndo, { previous: null });
       assert.equal(s.whatsNewWindow, "since");
+    }),
+    // One-click Undo restores previous checkpoint (null here) and clears undo state.
+    message(AppMessage.ClickedUndoCaughtUp()),
+    Command.expectExact(Remember({ key: "ow-caught-up", value: "" })),
+    Command.resolve(Remember, AppMessage.CompletedRemember()),
+    expect((s) => {
+      assert.equal(s.caughtUp, null);
+      assert.equal(s.caughtUpUndo, null);
+    }),
+  );
+});
+
+test("handle jump command reveals evidence and copy handoff shows auto-clearing feedback", () => {
+  const a = incident("a", "checkout timeout");
+  story(
+    update,
+    start,
+    message(AppMessage.ReceivedSnapshot({ snapshot: snapshot(5, ["a"], [a]), at: at(10) })),
+    // Clicking a handle chip inside Stage/VisualLens dispatches RevealEvidence.
+    message(AppMessage.GotStageMessage({ message: Stage.Message.ClickedJumpHandle({ handle: "e_deadbeef" }) })),
+    Command.expectExact(RevealEvidence({ handle: "e_deadbeef" })),
+    Command.resolve(RevealEvidence, AppMessage.CompletedJumpHandle({ handle: "e_deadbeef", found: true })),
+    Command.expectNone(),
+    expect((s) => assert.equal(s.toast.shown, false)),
+    // Missing evidence handle shows calm notice toast.
+    message(AppMessage.GotStageMessage({ message: Stage.Message.ClickedJumpHandle({ handle: "e_missing1234" }) })),
+    Command.expectExact(RevealEvidence({ handle: "e_missing1234" })),
+    Command.resolve(RevealEvidence, AppMessage.CompletedJumpHandle({ handle: "e_missing1234", found: false })),
+    Command.expectExact(WaitBeforeDismissal({ n: 1 })),
+    expect((s) => {
+      assert.equal(s.toast.shown, true);
+      assert.match(s.toast.text, /e_missin…/);
+    }),
+    Command.resolve(WaitBeforeDismissal, AppMessage.ElapsedToast({ n: 1 })),
+    // CopiedHandoff turns on inline button confirmation and clears it cleanly on timeout.
+    message(AppMessage.CopiedHandoff({ handles: 2 })),
+    Command.expectExact(WaitBeforeDismissal({ n: 2 }), WaitBeforeClearCopyFeedback({ n: 1 })),
+    expect((s) => {
+      assert.equal(s.copyFeedback.shown, true);
+      assert.match(s.toast.text, /Copied OpenCode handoff \(2 handles/);
+    }),
+    Command.resolve(WaitBeforeClearCopyFeedback, AppMessage.ElapsedCopyFeedback({ n: 1 })),
+    Command.resolve(WaitBeforeDismissal, AppMessage.ElapsedToast({ n: 2 })),
+    expect((s) => {
+      assert.equal(s.copyFeedback.shown, false);
+      assert.equal(s.toast.shown, false);
     }),
   );
 });

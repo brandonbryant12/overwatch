@@ -437,3 +437,58 @@ test("wire schemas, derived lens, and handoff integrate env policy, DB origin, a
   assert.match(handoff.text, /`e_db000001` \(db · read-only\)/);
   assert.match(handoff.text, /ow_db/);
 });
+
+test("readyForKeypress deduplicates visible What's new incidents when expanded and surfaces all needsYou when caught up", () => {
+  const now = 1_700_100_000_000;
+  const hour = 3_600_000;
+  const inc = (overrides: Record<string, unknown>) => ({
+    id: "i", title: "Issue", app: "shop", environment: "prod", severity: "error", active: true, group: "needsYou",
+    decidedSeq: null, way: null, returned: null, firstSeq: 2, lastSeq: 2, firstMs: now - hour, lastMs: now - hour,
+    ...overrides,
+  });
+  const snap: m.WhatsNewSnapshot = {
+    seq: 20,
+    atMs: now,
+    environments: [{ app: "shop", environment: "prod" }],
+    incidents: [
+      inc({ id: "inc_new", title: "Fresh prod error", firstSeq: 19, lastSeq: 19, firstMs: now - 10 * 60_000 }),
+      inc({ id: "inc_ret", title: "Returned timeout", returned: { code: "again", reason: "recurred", seq: 18 }, firstSeq: 5, lastSeq: 18 }),
+      inc({ id: "inc_old", title: "Older ongoing error", firstSeq: 2, lastSeq: 2, firstMs: now - 48 * hour, lastMs: now - 48 * hour }),
+    ],
+    deploys: [{ app: "shop", environment: "prod", revision: "a1b2c3d4", previous: null, seq: 17 }],
+    outlook: { commits: [] },
+    fixes: [],
+  };
+
+  // Expanded What's new (first visit -> 24h): inc_new and inc_ret are visible in What's new, inc_old is not.
+  const expanded = m.whatsNew(snap, null, now, "since");
+  assert.ok(expanded.count > 0);
+  const partial = m.readyForKeypress(["inc_new", "inc_ret", "inc_old"], expanded);
+  assert.deepEqual(partial, { ids: ["inc_old"], coveredInWhatsNew: 2 });
+
+  // When every needsYou incident is already visible in What's new, Ready collapses cleanly (0 non-duplicates).
+  const allCovered = m.readyForKeypress(["inc_new", "inc_ret"], expanded);
+  assert.deepEqual(allCovered, { ids: [], coveredInWhatsNew: 2 });
+
+  // Once marked caught up (count === 0), Ready immediately surfaces all active needsYou incidents.
+  const caughtUp = m.whatsNew(snap, { seq: 20, atMs: now }, now, "since");
+  assert.equal(caughtUp.count, 0);
+  const restored = m.readyForKeypress(["inc_new", "inc_ret", "inc_old"], caughtUp);
+  assert.deepEqual(restored, { ids: ["inc_new", "inc_ret", "inc_old"], coveredInWhatsNew: 0 });
+});
+
+test("isEvidenceHandle and splitHandleRefs identify and split grounded evidence handles safely", () => {
+  assert.equal(m.isEvidenceHandle("e_12345678"), true);
+  assert.equal(m.isEvidenceHandle("e_db000001"), true);
+  assert.equal(m.isEvidenceHandle("e_12"), false);
+  assert.equal(m.isEvidenceHandle("inc_d0c4ab11"), false);
+
+  assert.deepEqual(m.splitHandleRefs("Plain text with no handles"), [{ kind: "text", value: "Plain text with no handles" }]);
+  assert.deepEqual(m.splitHandleRefs("Seen in e_1111aaaa and e_2222bbbb after rollout."), [
+    { kind: "text", value: "Seen in " },
+    { kind: "handle", value: "e_1111aaaa" },
+    { kind: "text", value: " and " },
+    { kind: "handle", value: "e_2222bbbb" },
+    { kind: "text", value: " after rollout." },
+  ]);
+});

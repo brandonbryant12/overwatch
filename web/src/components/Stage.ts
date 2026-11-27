@@ -42,6 +42,8 @@ export const Props = Schema.Struct({
   cachedAiLens: Schema.NullOr(LensSpec),
   caughtUp: Schema.NullOr(CaughtUpSchema),
   whatsNewWindow: WhatsNewWindowSchema,
+  canUndoCaughtUp: Schema.Boolean,
+  handoffCopied: Schema.Boolean,
 });
 export type Props = typeof Props.Type;
 
@@ -59,9 +61,11 @@ export const Message = TaggedEnum({
   ClickedAction: { action: ItemAction },
   ClickedPublish: { fixId: Schema.String },
   ClickedHandle: { handle: Schema.String },
+  ClickedJumpHandle: { handle: Schema.String },
   ClickedLensMode: { mode: LensModeSchema },
   ClickedGenerateLens: {},
   ClickedMarkCaughtUp: {},
+  ClickedUndoCaughtUp: {},
   ClickedToggleWhatsNewWindow: {},
   SucceededCopyHandle: { handle: Schema.String },
   FailedCopyHandle: { reason: Schema.String },
@@ -73,9 +77,11 @@ export const Events = TaggedEnum({
   Picked: { subject: Schema.String },
   RequestedAction: { action: ItemAction },
   RequestedPublish: { fixId: Schema.String },
+  RequestedJumpHandle: { handle: Schema.String },
   ChangedLensMode: { mode: LensModeSchema },
   RequestedGenerateLens: {},
   RequestedMarkCaughtUp: {},
+  RequestedUndoCaughtUp: {},
   RequestedToggleWhatsNewWindow: {},
   Copied: { text: Schema.String },
   FailedCopy: { reason: Schema.String },
@@ -105,9 +111,11 @@ export const update = (model: Model, message: Message): Step<Model, Message, Eve
     ClickedAction: ({ action }) => emit(model, Events.RequestedAction({ action })),
     ClickedPublish: ({ fixId }) => emit(model, Events.RequestedPublish({ fixId })),
     ClickedHandle: ({ handle }) => run(model, CopyHandle({ handle })),
+    ClickedJumpHandle: ({ handle }) => emit(model, Events.RequestedJumpHandle({ handle })),
     ClickedLensMode: ({ mode }) => emit(model, Events.ChangedLensMode({ mode })),
     ClickedGenerateLens: () => emit(model, Events.RequestedGenerateLens()),
     ClickedMarkCaughtUp: () => emit(model, Events.RequestedMarkCaughtUp()),
+    ClickedUndoCaughtUp: () => emit(model, Events.RequestedUndoCaughtUp()),
     ClickedToggleWhatsNewWindow: () => emit(model, Events.RequestedToggleWhatsNewWindow()),
     SucceededCopyHandle: ({ handle }) => emit(model, Events.Copied({ text: handle })),
     FailedCopyHandle: ({ reason }) => emit(model, Events.FailedCopy({ reason })),
@@ -175,6 +183,21 @@ const DbTableView = (h: H, columns: ReadonlyArray<string>, rows: ReadonlyArray<R
 const PolicyPills = (h: H, tags: ReadonlyArray<m.PolicyTag>) =>
   tags.map((t) => el(h, "span", { class: ["pill", "policy-pill", `policy-${t.tone}`], attrs: { title: t.title } }, t.label));
 
+const HandleJumpChip = (h: H, handle: string) =>
+  el(
+    h,
+    "button",
+    {
+      class: ["handle", "handle-jump"],
+      attrs: { type: "button", "data-handle-jump": handle, title: `${handle} · jump to evidence` },
+      on: [h.OnClick(Message.ClickedJumpHandle({ handle }))],
+    },
+    m.shortHandle(handle),
+  );
+
+const TextWithHandles = (h: H, text: string) =>
+  m.splitHandleRefs(text).map((seg) => (seg.kind === "handle" ? HandleJumpChip(h, seg.value) : seg.value));
+
 const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
   pieces.map((p) => {
     const isDb = m.isDbPiece(p);
@@ -186,7 +209,7 @@ const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
       el(
         h,
         "button",
-        { class: "handle", attrs: { type: "button", "data-handle": p.handle, title: `${p.handle} · click to copy` }, on: [h.OnClick(Message.ClickedHandle({ handle: p.handle }))] },
+        { class: "handle", attrs: { type: "button", "data-handle-copy": p.handle, title: `${p.handle} · click to copy` }, on: [h.OnClick(Message.ClickedHandle({ handle: p.handle }))] },
         m.shortHandle(p.handle),
       ),
       isDb && el(h, "span", { class: ["pill", "policy-pill", "policy-cyan", "db-badge"], attrs: { title: "Read-only SQL query output" } }, "DB ro"),
@@ -198,7 +221,7 @@ const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
       return el(
         h,
         "figure",
-        { class: ["evidence", "evidence-db"] },
+        { class: ["evidence", "evidence-db"], attrs: { "data-handle": p.handle } },
         caption,
         table.query ? el(h, "code", { class: "db-query", attrs: { title: table.query } }, table.query) : null,
         DbTableView(h, table.columns, shown),
@@ -215,7 +238,7 @@ const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
     return el(
       h,
       "figure",
-      { class: ["evidence", isDb && "evidence-db"] },
+      { class: ["evidence", isDb && "evidence-db"], attrs: { "data-handle": p.handle } },
       caption,
       el(h, "pre", {}, p.text),
     );
@@ -330,7 +353,7 @@ const VerdictPanel = (h: H, d: ItemDetail | null) => {
           { class: ["reading", x.verdict ?? "missing"] },
           el(h, "span", { class: "slot" }, String(x.slot)),
           el(h, "b", {}, x.verdict ? VERDICT[x.verdict] ?? "" : "No filing"),
-          el(h, "span", {}, f?.body?.cause ?? x.reason ?? ""),
+          el(h, "span", {}, ...TextWithHandles(h, f?.body?.cause ?? x.reason ?? "")),
         );
       }),
     ),
@@ -339,8 +362,14 @@ const VerdictPanel = (h: H, d: ItemDetail | null) => {
         h,
         "div",
         { class: "challenge" },
-        el(h, "b", {}, `Challenger: ${r.challenge.outcome ?? "did not file"}`),
-        el(h, "p", {}, r.challenge.reason ?? ""),
+        el(
+          h,
+          "div",
+          { class: "challenge-head" },
+          el(h, "b", {}, `Challenger: ${r.challenge.outcome ?? "did not file"}`),
+          ...((r.challenge.pieces ?? []).slice(0, 3).map((p) => HandleJumpChip(h, p.handle))),
+        ),
+        el(h, "p", {}, ...TextWithHandles(h, r.challenge.reason ?? "")),
         (r.challenge.pieces?.length ?? 0) > 0 &&
           el(
             h,
@@ -490,8 +519,24 @@ const ClaimsPanel = (h: H, d: ItemDetail | null) => {
         h,
         "article",
         { class: ["finding", f.verdict] },
-        el(h, "header", {}, el(h, "b", {}, VERDICT[f.verdict] ?? f.verdict), el(h, "span", {}, f.body?.cause ?? ""), g.length > 1 && el(h, "em", { class: "said" }, `${g.length} readings said this`)),
-        ...claims.flatMap((c) => [el(h, "p", { class: "claim" }, c.statement), ...Pieces(h, unseen(c.pieces ?? []))]),
+        el(h, "header", {}, el(h, "b", {}, VERDICT[f.verdict] ?? f.verdict), el(h, "span", {}, ...TextWithHandles(h, f.body?.cause ?? "")), g.length > 1 && el(h, "em", { class: "said" }, `${g.length} readings said this`)),
+        ...claims.flatMap((c) => {
+          const shownPieces = unseen(c.pieces ?? []);
+          const shownSet = new Set(shownPieces.map((p) => p.handle));
+          const citedElsewhere = (c.pieces ?? []).filter((p) => !shownSet.has(p.handle));
+          return [
+            el(
+              h,
+              "p",
+              { class: "claim" },
+              ...TextWithHandles(h, c.statement),
+              ...(citedElsewhere.length > 0
+                ? [el(h, "span", { class: "claim-refs" }, ...citedElsewhere.map((p) => HandleJumpChip(h, p.handle)))]
+                : []),
+            ),
+            ...Pieces(h, shownPieces),
+          ];
+        }),
         asideCount > 0 &&
           el(
             h,
@@ -606,13 +651,18 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
           h,
           "button",
           {
-            class: "copy-handoff-btn",
-            attrs: { type: "button", "data-action": "copyHandoff", title: "Copy structured OpenCode prompt with handles & MCP instructions (c · ⇧O for presets)" },
+            class: ["copy-handoff-btn", props.handoffCopied && "copied"],
+            attrs: {
+              type: "button",
+              "data-action": "copyHandoff",
+              "data-copied": props.handoffCopied ? "true" : undefined,
+              title: "Copy structured OpenCode prompt with handles & MCP instructions (c · ⇧O for presets)",
+            },
             on: [h.Disabled(off), h.OnClick(Message.ClickedAction({ action: "copyHandoff" }))],
           },
           CopyIcon(h),
-          " Copy ",
-          Kbd(h, "c"),
+          props.handoffCopied ? " Copied for OpenCode" : " Copy ",
+          !props.handoffCopied && Kbd(h, "c"),
         ),
         el(
           h,
@@ -644,6 +694,7 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
       },
       {
         onCopyHandle: (handle) => Message.ClickedHandle({ handle }),
+        onJumpHandle: (handle) => Message.ClickedJumpHandle({ handle }),
         onSwitchMode: (mode: LensMode) => Message.ClickedLensMode({ mode }),
         onGenerateAi: () => Message.ClickedGenerateLens(),
       },
@@ -712,13 +763,31 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
       h,
       "section",
       { class: "panel" },
-      el(h, "h3", {}, "History"),
+      el(h, "h3", {}, "History", history.length > 0 && el(h, "span", { class: "section-count" }, ` (${history.length})`)),
       history.length
         ? el(
           h,
-          "ol",
-          { class: "history" },
-          ...history.map((e) => el(h, "li", { class: ["ev", `ev-${e.kind}`] }, el(h, "span", { class: "ev-kind" }, eventText(e)), el(h, "time", {}, m.ago(e.atMs, now)))),
+          "div",
+          {},
+          el(
+            h,
+            "ol",
+            { class: "history" },
+            ...history.slice(0, 6).map((e) => el(h, "li", { class: ["ev", `ev-${e.kind}`] }, el(h, "span", { class: "ev-kind" }, eventText(e)), el(h, "time", {}, m.ago(e.atMs, now)))),
+          ),
+          history.length > 6 &&
+            el(
+              h,
+              "details",
+              { class: "disclosure" },
+              el(h, "summary", {}, `Show ${history.length - 6} earlier event${history.length - 6 === 1 ? "" : "s"} (${history.length} total)`),
+              el(
+                h,
+                "ol",
+                { class: "history" },
+                ...history.slice(6).map((e) => el(h, "li", { class: ["ev", `ev-${e.kind}`] }, el(h, "span", { class: "ev-kind" }, eventText(e)), el(h, "time", {}, m.ago(e.atMs, now)))),
+              ),
+            ),
         )
         : el(h, "p", { class: "note" }, "Loading history…"),
     ),
@@ -864,10 +933,18 @@ export const view = defineView<Model, Message, Props>((_model, props, h) => {
         ? null
         : Overview(
           h,
-          { snapshot, connection: props.connection, serverNow: props.serverNow, caughtUp: props.caughtUp, whatsNewWindow: props.whatsNewWindow },
+          {
+            snapshot,
+            connection: props.connection,
+            serverNow: props.serverNow,
+            caughtUp: props.caughtUp,
+            whatsNewWindow: props.whatsNewWindow,
+            canUndoCaughtUp: props.canUndoCaughtUp,
+          },
           {
             onPick: (subject) => Message.ClickedSubject({ subject }),
             onMarkCaughtUp: () => Message.ClickedMarkCaughtUp(),
+            onUndoCaughtUp: () => Message.ClickedUndoCaughtUp(),
             onToggleWindow: () => Message.ClickedToggleWhatsNewWindow(),
           },
         ),
