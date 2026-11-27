@@ -16,7 +16,7 @@ import { statfsSync } from "node:fs";
 import { Cause, Context, Deferred, Effect, Layer, Option, Predicate, Scope, Semaphore } from "effect";
 import { FetchHttpClient, HttpClient } from "effect/http";
 import type { ChildProcessSpawner } from "effect/process";
-import { AppConfig, DEFAULT_WORDS, LIMITS, type Source, type Words } from "./config.ts";
+import { AppConfig, DEFAULT_WORDS, LIMITS, policyFor, type Source, type Words } from "./config.ts";
 import { clock } from "./clock.ts";
 import { kubectl, parseEvents, parsePods, parseRevision, parseRollout, parseTop, streamLogs, type Pod, type Target } from "./kube.ts";
 import * as datadog from "./datadog.ts";
@@ -557,7 +557,7 @@ const make = Effect.gen(function* () {
           if (!before && firstAt.has(bucket)) yield* w.run("INSERT OR IGNORE INTO onsets (incident, at_ms) VALUES (?, ?)", id as Clean, firstAt.get(bucket)!);
           yield* afterChange(w, id, before, added, seq);
           // A problem's first admission is investigated automatically once the model has passed its trial.
-          if (!before && added > 0 && (yield* store.meta(approvalKey(config))) === "on") yield* queueInvestigation(w, id, "automatic");
+          if (!before && added > 0 && policyFor(config, source.app, source.environment).investigate && (yield* store.meta(approvalKey(config))) === "on") yield* queueInvestigation(w, id, "automatic");
           yield* announce(w, id, group, seq);
         }
         for (const id of s.uncertain) yield* w.run("UPDATE incidents SET exact = 0 WHERE id = ?", id as Clean);

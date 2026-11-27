@@ -6,7 +6,7 @@ import { Cause, Effect, Exit, FileSystem, Path, Predicate, Schedule } from "effe
 import { HttpClient } from "effect/http";
 import { randomBytes } from "node:crypto";
 import { AppConfig, type Config } from "./config.ts";
-import { effect, outbound, run as exec } from "./exec.ts";
+import { effect, outbound, run as exec, secret } from "./exec.ts";
 import { LABEL, launchctl } from "./launchd.ts";
 import { validate } from "./datadog.ts";
 import { kubectl } from "./kube.ts";
@@ -80,10 +80,10 @@ export const doctor = Effect.fn("doctor")(function* (store: StoreShape | null, e
     if (done.value.outcome === "failed" || !done.value.said.trim()) return yield* failed(`the model ${config.opencode.model} gave no answer`);
     return `${config.opencode.model} answered`; }));
   // Each role Overwatch runs: its own filing tool allowed, everything else denied. The investigator keeps the id "agent".
-  const fixer = Object.values(config.apps).some((a) => a.fixes);
+  const fixer = Object.values(config.apps).some((a) => a.fixes), read = config.databases.length ? [...READ, "ow_db"] : READ;
   const roles: ReadonlyArray<readonly [string, string, ReadonlyArray<string>]> = [
-    ["agent", "ow-investigator", [...READ, "ow_finding"]], ["agent:challenger", "ow-challenger", [...READ, "ow_challenge"]],
-    ["agent:responder", "ow-responder", READ], ...(fixer ? [["agent:fixer", "ow-fixer", ["ow_telemetry", "ow_proposal"]] as const] : [])];
+    ["agent", "ow-investigator", [...read, "ow_finding"]], ["agent:challenger", "ow-challenger", [...read, "ow_challenge"]],
+    ["agent:responder", "ow-responder", read], ...(fixer ? [["agent:fixer", "ow-fixer", ["ow_telemetry", "ow_proposal"]] as const] : [])];
   for (const [id, name, tools] of roles) {
     yield* check(id, `Add the ${name} agent (deny all, allow ${tools.map((t) => `ow_${t}`).join(", ")}) to your OpenCode configuration; see docs/setup.md`, Effect.gen(function* () {
       const peer = yield* need;
@@ -91,7 +91,7 @@ export const doctor = Effect.fn("doctor")(function* (store: StoreShape | null, e
       if (!agent) return yield* failed(`OpenCode has no ${name} agent`);
       const rules = (Array.isArray(agent.permissions) ? agent.permissions : []) as Array<Record<string, unknown>>;
       const effectOf = (action: string) => rules.findLast((r) => glob(String(r.action ?? "")).test(action) && String(r.resource ?? "*") === "*")?.effect ?? "allow";
-      const others = ["bash", "edit", "read", "webfetch", "ow_other", ...[...READ, "ow_finding", "ow_challenge", "ow_proposal"].filter((t) => !tools.includes(t)).map((t) => `ow_${t}`)];
+      const others = ["bash", "edit", "read", "webfetch", "ow_other", ...[...read, "ow_finding", "ow_challenge", "ow_proposal"].filter((t) => !tools.includes(t)).map((t) => `ow_${t}`)];
       const missing = tools.filter((t) => effectOf(`ow_${t}`) !== "allow");
       if (missing.length) return yield* failed(`${name} cannot use ${missing.map((t) => `ow_${t}`).join(", ")}`);
       for (const other of others) if (effectOf(other) !== "deny") return yield* failed(`${name} does not deny ${other}`);
@@ -137,6 +137,13 @@ export const doctor = Effect.fn("doctor")(function* (store: StoreShape | null, e
       return r.code !== 0 ? yield* failed(r.stderr.trim().slice(0, 300) || `kubectl exited ${r.code}`) : `${context} answered`; }));
   }
   for (const s of config.sources.filter((x) => x.kind === "datadog")) yield* check(`dd:${s.id}`, `Set valid Datadog keys in ${s.apiKey} and ${s.appKey} (datadog API and application keys)`, Effect.as(validate(s), `Datadog accepted the keys for ${s.id}`));
+  for (const db of config.databases) {
+    const bin = db.driver === "sqlite" ? "sqlite3" : db.driver === "postgres" ? "psql" : "mysql";
+    yield* check(`db:${db.id}`, db.driver === "sqlite" ? `Install ${bin} and ensure ${db.file} exists` : `Install ${bin} and set ${db.dsn}`, Effect.gen(function* () {
+      const v = yield* ok(bin, ["--version"], bin);
+      if (db.driver === "sqlite") return (yield* exists(db.file!)) ? `${v}; ${db.file}` : yield* failed(`${db.file} does not exist`);
+      return (yield* secret(db.dsn!)) ? `${v}; ${db.dsn} resolves` : yield* failed(`${db.dsn} is not set`); }));
+  }
   for (const [app, { checkout }] of Object.entries(config.apps)) yield* check(`checkout:${app}`, `Clone ${app} to ${checkout}, or fix apps.${app}.checkout`, Effect.map(ok("git", ["-C", checkout, "rev-parse", "--verify", "HEAD^{commit}"], "git rev-parse"), (head) => `${checkout} at ${head.slice(0, 12)}`));
   for (const w of config.watchers) {
     const checkout = config.apps[w.app]!.checkout;

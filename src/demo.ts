@@ -13,29 +13,23 @@ import { act, afterFinding, ask, hourly, keyed } from "./inbox.ts";
 import { adjudicate } from "./agents.ts";
 
 export const demoConfig = Effect.fn("demoConfig")(function* (port: number) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const join = path.join;
+  const fs = yield* FileSystem.FileSystem, path = yield* Path.Path, join = path.join;
   const dataDir = yield* scratch("overwatch-demo-");
   yield* fs.makeDirectory(join(dataDir, "checkout")).pipe(Effect.orDie);
   const pods = (context: string) => ({ type: "kubernetes", context, namespace: "shop", selector: "app=shop" });
-  return parseConfig(
-    {
-      version: 2,
-      dataDir,
-      port,
-      apps: {
-        shop: {
-          checkout: "checkout",
-          fixes: { remote: "origin", base: "main", paths: ["config/database.json", "config/payments.json"], verify: [["npm", "test", "--", "config"]] },
-          promotion: { staging: "staging", production: "production" },
-          environments: {
-            production: { sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
-            staging: { sources: { pods: pods("staging-east") } },
-            qa: { sources: { pods: pods("qa-east") } },},},},
-      watchers: [{ app: "shop", environment: "production", every: "2m" }, { app: "shop", environment: "staging", every: "2m" }, { app: "shop", environment: "qa", every: "10m" }],},
-    join(dataDir, "demo.json"),
-  ) as Config; });
+  return parseConfig({
+    version: 2, dataDir, port,
+    apps: {
+      shop: {
+        checkout: "checkout",
+        fixes: { remote: "origin", base: "main", paths: ["config/database.json", "config/payments.json"], verify: [["npm", "test", "--", "config"]] },
+        promotion: { staging: "staging", production: "production" },
+        environments: {
+          production: { sources: { pods: pods("prod-east"), disk: { type: "datadog", apiKey: "env:OW_DEMO_UNUSED", appKey: "env:OW_DEMO_UNUSED", query: "service:orders", metric: "avg:orders.disk.used{*}", readings: ["metrics"], capacity: { resource: "disk", unit: "bytes", limit: 500e9 } } } },
+          staging: { policy: { investigate: false, notify: false }, sources: { pods: pods("staging-east") } },
+          qa: { sources: { pods: pods("qa-east") } }, }, }, },
+    watchers: [{ app: "shop", environment: "production", every: "2m" }, { app: "shop", environment: "staging", every: "2m" }, { app: "shop", environment: "qa", every: "10m" }],
+  }, join(dataDir, "demo.json")) as Config; });
 
 export const seedDemo = Effect.gen(function* () {
   const store = yield* Store;
@@ -121,8 +115,7 @@ export const seedDemo = Effect.gen(function* () {
     const hTel = "e_d0c4ab11000000000000000000", hCode = "e_d0c4ab11100000000000000000";
     const lens = {
       source: "ai", title: "Payments timeout regression after a1b2c3d4e5f6", model: "private/glm-5.3", generatedAt: now - 3 * min,
-      summary: "Deploy a1b2c3d4e5f6 cut timeout_ms from 3000ms to 300ms; 42 checkout authorize spans timed out at the 300ms boundary.",
-      verifiedHandles: [hTel, hCode],
+      summary: "Deploy a1b2c3d4e5f6 cut timeout_ms from 3000ms to 300ms; 42 checkout authorize spans timed out at the 300ms boundary.", verifiedHandles: [hTel, hCode],
       blocks: [
         { kind: "causal_flow", title: "Causal chain", steps: [
           { label: "Config change", detail: "config/payments.yaml lowered timeout_ms 3000 → 300", tone: "warn", handle: hCode },
@@ -135,12 +128,9 @@ export const seedDemo = Effect.gen(function* () {
           { label: "POST /v2/authorize", service: "checkout", durationMs: 318, offsetMs: 0, status: "slow", handle: hTel },
           { label: "POST /v2/authorize", service: "checkout", durationMs: 642, offsetMs: 180, status: "slow", handle: hTel },
           { label: "POST /v2/authorize", service: "checkout", durationMs: 1280, offsetMs: 360, status: "error", handle: hTel }] },
-        { kind: "key_facts", title: "Verified facts", facts: [
-          { label: "Root setting", value: "timeout_ms: 300 (was 3000)", origin: "code", handle: hCode },
-          { label: "Error signature", value: "payments timeout after 300ms", origin: "telemetry", handle: hTel }] }], };
+        { kind: "key_facts", title: "Verified facts", facts: [{ label: "Root setting", value: "timeout_ms: 300 (was 3000)", origin: "code", handle: hCode }, { label: "Error signature", value: "payments timeout after 300ms", origin: "telemetry", handle: hTel }] }], };
     const lSeq = yield* w.event("lens", s("inc_d0c4ab11"), { source: "ai", demo: true });
-    yield* w.run("INSERT OR REPLACE INTO lenses (incident, spec, seq) VALUES ('inc_d0c4ab11', ?, ?)", json(lens), lSeq);
-  }));
+    yield* w.run("INSERT OR REPLACE INTO lenses (incident, spec, seq) VALUES ('inc_d0c4ab11', ?, ?)", json(lens), lSeq); }));
   // Its fix, as Overwatch would have proposed it: restore pool_size, verified in isolation, waiting for the owner's P.
   yield* store.tx((w) => Effect.gen(function* () {
     const job = "job_d0c0db050000000000000001", seq = yield* w.event("fix", "inc_d0c0db05" as Clean, { id: "fx_d0c0db05", state: "verified", demo: true });
@@ -157,33 +147,32 @@ export const seedDemo = Effect.gen(function* () {
     yield* w.run("UPDATE jobs SET state = 'completed' WHERE id = (SELECT job_id FROM asks WHERE key = 'rk_d0c3f00d0000000000000002')");
     yield* w.event("answered", s("inc_d0c3f00d"), { askSeq: 0, sessionId: "ses_d0c3f00d000000000002", answer, demo: true }); })); });
 
-type Spec = { subject: string; tag: string; title: string; lines: string[]; diff: string; votes: Array<[string, string, string, string]>; upheld: string };
+type Spec = { subject: string; tag: string; title: string; lines: string[]; diff: string; votes: Array<[string, string, string, string]>; upheld: string; db?: string };
 /** The production timeout: three readings (two real, one dissent) and a challenger that upheld. */
 const TIMEOUT: Spec = {
   subject: "inc_d0c4ab11", tag: "d0c4ab11", title: "ERROR checkout: payments timeout after 300ms",
   lines: ["ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 1)", "ERROR checkout: payments timeout after 300ms (POST /v2/authorize, attempt 2)"],
   diff: "config/payments.yaml @ a1b2c3d\n- timeout_ms: 3000\n+ timeout_ms: 300",
+  db: JSON.stringify([{ state: "active", wait_event: "ClientRead", count: 14, max_ms: 312 }, { state: "idle in transaction", wait_event: "Lock", count: 3, max_ms: 890 }]),
   votes: [
     ["real", "The a1b2c3d deploy cut the payments timeout from 3000 ms to 300 ms", "Every timeout follows the deploy and stops at exactly 300 ms", "telemetry"],
     ["real", "The timeout value changed in a1b2c3d", "The deployed config sets timeout_ms to 300, down from 3000", "code"],
     ["not_real", "The provider was slow for a few minutes", "Timeouts could be the provider's own slowness", "telemetry"]],
-  upheld: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.",};
+  upheld: "The 300 ms limit matches the cut-off of every failed call; the provider answered within 900 ms throughout.", };
 /** The connection pool: three of three real, upheld, observed. Eligible, so it has a draft fix. */
 const POOL: Spec = {
   subject: "inc_d0c0db05", tag: "d0c0db05", title: "ERROR orders: no free database connection (pool of 5 exhausted)",
   lines: ["ERROR orders: no free database connection (pool of 5 exhausted, 41 waiting)", "ERROR orders: no free database connection (pool of 5 exhausted, 38 waiting)"],
-  diff: "config/database.json @ a1b2c3d\n- \"pool_size\": 20,\n+ \"pool_size\": 5,",
+  diff: 'config/database.json @ a1b2c3d\n- "pool_size": 20,\n+ "pool_size": 5,',
   votes: [
     ["real", "a1b2c3d lowered pool_size from 20 to 5", "Exhaustion starts with the deploy and every error names a pool of 5", "telemetry"],
     ["real", "The pool is too small for the order rate since a1b2c3d", "41 requests wait for 5 connections at the peak", "telemetry"],
     ["real", "pool_size changed in the deploy", "Waiting requests track checkout traffic, not database latency", "telemetry"]],
-  upheld: "Database latency stayed under 4 ms; only the pool size changed, and every failure names it.",};
+  upheld: "Database latency stayed under 4 ms; only the pool size changed, and every failure names it.", };
 
 const investigated = Effect.fnUntraced(function* (spec: Spec) {
-  const store = yield* Store;
-  const s = (v: string) => v as Clean;
-  const { subject, lines, diff } = spec, job = `job_${spec.tag}0000000000000001`, code = { expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true };
-  const votes = spec.votes;
+  const store = yield* Store, s = (v: string) => v as Clean;
+  const { subject, lines, diff, votes } = spec, job = `job_${spec.tag}0000000000000001`, code = { expected: "a1b2c3d4e5f6", read: "a1b2c3d4e5f6", deployed: true };
   yield* store.tx((w) => Effect.gen(function* () {
     const seq = yield* w.event("investigation_queued", s(subject), { job, origin: "automatic", demo: true });
     yield* w.run("INSERT INTO jobs (id, kind, subject, title, state, created_seq, inputs) VALUES (?, 'investigation', ?, ?, 'completed', ?, ?)", s(job), s(subject), s(spec.title), seq, json({ planned: 3, demo: true }));
@@ -198,14 +187,19 @@ const investigated = Effect.fnUntraced(function* (spec: Spec) {
         yield* w.run("INSERT INTO origins (handle, origin) VALUES (?, ?)", s(handle), s(kind === "code" ? "code" : "telemetry"));
         pieces.push({ handle, source: kind === "code" ? "code" : "pods", text });
       }
+      if (n === 0 && spec.db) {
+        const handle = `e_${spec.tag}db00000000000000`;
+        yield* w.run("INSERT INTO evidence (handle, run_id, session_id, source, text, ordinal) VALUES (?, ?, ?, 'db:primary', ?, 9)", s(handle), s(run), s(session), s(spec.db));
+        yield* w.run("INSERT INTO origins (handle, origin) VALUES (?, 'telemetry')", s(handle));
+        pieces.push({ handle, source: "db:primary", text: spec.db });
+      }
       const body = { cause, ruled_out: verdict === "real" ? ["provider outage (status page green)", "database latency"] : [], not_checked: ["the provider's own logs"], next_check: "Restore timeout_ms to 3000 and watch the rate", impact: "checkout payments fail", affected: ["shop/production"], since: null, status: "investigated" };
       yield* w.run("INSERT INTO findings (id, run_id, verdict, claims, code, body) VALUES (?, ?, ?, ?, ?, ?)", s(finding), s(run), s(verdict), json([{ statement, pieces }]), json(code), json(body));
       yield* w.run("INSERT INTO work (id, job_id, kind, slot, priority, state, run_id, seq) VALUES (?, ?, 'reading', ?, 1, 'done', ?, ?)", s(`wk_${spec.tag}${n}`), s(job), n + 1, s(run), seq);
       readings.push({ slot: n + 1, sessionId: session, verdict: verdict as "real" | "not_real", findingId: finding, reason: null, telemetry: kind !== "code", observed: kind === "code" ? [] : lines });
     }
     const challenge = { outcome: "upheld" as const, reason: spec.upheld, pieces: [{ handle: `e_${spec.tag}00000000000000000000`, source: "pods", text: lines[0]! }] };
-    const decided = adjudicate(3, readings, challenge);
-    const at = yield* w.next();
+    const decided = adjudicate(3, readings, challenge), at = yield* w.next();
     const observations = new Set(readings.filter((r) => r.verdict === decided.verdict).flatMap((r) => r.observed)).size;
     const result = { verdict: decided.verdict, observed: decided.observed, planned: 3, counts: decided.counts, observations, readings: readings.map(({ telemetry: _, observed: __, ...r }) => r), challenge, seq: at };
     yield* w.event("adjudicated", s(subject), { job, result });

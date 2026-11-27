@@ -3,6 +3,7 @@
  * outside the grammar, duplicate watchers and anything beyond a limit are refused, offline, before anything runs.
  */
 import { Context, Effect, FileSystem, Layer, Predicate, Schema, SchemaGetter } from "effect";
+import { checkSql } from "./db.ts";
 import { ConfigError } from "./errors.ts";
 import { setRedactPatterns } from "./redact.ts";
 import { homedir } from "node:os";
@@ -37,13 +38,29 @@ export interface Fixes { readonly remote: string; readonly base: string; readonl
 export const FORBIDDEN = /(^|\/)(\.git|\.github|\.gitlab-ci\.yml|\.circleci|\.husky|\.buildkite)(\/|$)|(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|bun\.lockb?|Gemfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|requirements[^/]*\.txt|poetry\.lock|Pipfile(\.lock)?|pyproject\.toml|Makefile|Dockerfile|Jenkinsfile|[^/]*\.gradle(\.kts)?|pom\.xml|\.env[^/]*|[^/]*\.(pem|key|p12)|credentials[^/]*|\.npmrc)$/;
 export interface Words { readonly error: ReadonlyArray<string>; readonly warn: ReadonlyArray<string> }
 export const DEFAULT_WORDS: Words = { error: ["error", "fatal", "panic", "exception", "critical"], warn: ["warn", "warning"] };
+export type FixMode = "off" | "propose" | "draft_pr";
+export interface PolicyOverride { readonly investigate?: boolean; readonly readings?: 1 | 2 | 3 | 5; readonly notify?: boolean; readonly critical?: boolean; readonly fixMode?: FixMode; readonly genUi?: boolean }
+export interface Policy { readonly investigate: boolean; readonly readings: 1 | 2 | 3 | 5; readonly notify: boolean; readonly critical: boolean; readonly fixMode: FixMode; readonly genUi: boolean }
+export type DbDriver = "sqlite" | "postgres" | "mysql";
+export interface DbQuery { readonly sql: string; readonly params?: ReadonlyArray<string> }
+export interface DbTarget { readonly id: string; readonly app: string; readonly environment: string; readonly name: string; readonly driver: DbDriver; readonly file?: string; readonly dsn?: string; readonly allowSelect: boolean; readonly queries: Readonly<Record<string, DbQuery>> }
 export interface Watcher { readonly app: string; readonly environment: string; readonly everyMs: number; readonly sources: ReadonlyArray<Source> }
 export interface Config {
   readonly file: string; readonly dataDir: string; readonly port: number; readonly mcpToken: string | null;
   readonly opencode: { readonly url: string | null; readonly model: string | null; readonly password: string | null; readonly concurrency: number; readonly toolCalls: number; readonly genUi: boolean };
-  readonly readings: number; readonly redactPatterns: ReadonlyArray<string>;
-  readonly apps: Readonly<Record<string, { readonly checkout: string; readonly words: Words; readonly fixes?: Fixes; readonly promotion?: { readonly staging: string; readonly production: string }; readonly commitWatch?: CommitWatch }>>;
+  readonly readings: 1 | 2 | 3 | 5; readonly redactPatterns: ReadonlyArray<string>;
+  readonly apps: Readonly<Record<string, { readonly checkout: string; readonly words: Words; readonly fixes?: Fixes; readonly promotion?: { readonly staging: string; readonly production: string }; readonly commitWatch?: CommitWatch; readonly policy?: PolicyOverride }>>;
+  readonly envPolicies: Readonly<Record<string, PolicyOverride>>; readonly databases: ReadonlyArray<DbTarget>;
   readonly watchers: ReadonlyArray<Watcher>; readonly sources: ReadonlyArray<Source>;
+}
+
+/** Resolves effective behavior policy for one `(app, env)` by cascading `env.policy -> app.policy -> global/default`. */
+export function policyFor(config: Config, app: string, env: string): Policy {
+  const a = config.apps[app], ap = a?.policy, ep = config.envPolicies[`${app}/${env}`];
+  return {
+    investigate: ep?.investigate ?? ap?.investigate ?? true, readings: ep?.readings ?? ap?.readings ?? config.readings,
+    notify: ep?.notify ?? ap?.notify ?? true, critical: ep?.critical ?? ap?.critical ?? /^(prod|production)$/i.test(env),
+    fixMode: a?.fixes ? (ep?.fixMode ?? ap?.fixMode ?? a.fixes.mode ?? "propose") : "off", genUi: ep?.genUi ?? ap?.genUi ?? config.opencode.genUi, };
 }
 
 export { ConfigError };
@@ -102,13 +119,23 @@ const DatadogSource = Schema.Struct({
   readings: Schema.optionalKey(Schema.Array(Schema.Literals(DATADOG_READINGS)).pipe(Schema.check(Schema.isUnique()), Schema.annotate({ message: `must list some of: ${DATADOG_READINGS.join(", ")}` }))), });
 const SourceConfig = Schema.Union([KubeSource, DatadogSource]).annotate({ message: 'must be a Kubernetes source (type "kubernetes": context, namespace, selector) or a Datadog source (type "datadog": apiKey, appKey, query)' });
 const SourceName = Schema.String.pipe(Schema.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/, { message: 'a source name is letters, digits, "-" and "_"' })));
+const PolicyOverrideSchema = Schema.Struct({
+  investigate: Schema.optionalKey(Schema.Boolean), readings: Schema.optionalKey(Schema.Literals([1, 2, 3, 5]).annotate({ message: "must be 1, 2, 3 or 5" })),
+  notify: Schema.optionalKey(Schema.Boolean), critical: Schema.optionalKey(Schema.Boolean),
+  fixMode: Schema.optionalKey(Schema.Literals(["off", "propose", "draft_pr"]).annotate({ message: 'is "off", "propose" or "draft_pr"' })), genUi: Schema.optionalKey(Schema.Boolean), });
+const DbQueryConfig = Schema.Struct({ sql: Text, params: Schema.optionalKey(Schema.Array(SourceName).pipe(Schema.check(Schema.isUnique(), Schema.isMaxLength(20)))) });
+const DbTargetConfig = Schema.Struct({
+  driver: Schema.Literals(["sqlite", "postgres", "mysql"]).annotate({ message: 'is "sqlite", "postgres" or "mysql"' }),
+  file: Schema.optionalKey(Text), dsn: Schema.optionalKey(SecretRef), allowSelect: Schema.optionalKey(Schema.Boolean),
+  queries: Schema.optionalKey(Schema.Record(SourceName, DbQueryConfig)), });
 const AppConfigFile = Schema.Struct({
   checkout: Text,
-  environments: Schema.Record(Schema.String, Schema.Struct({ sources: Schema.Record(SourceName, SourceConfig) })),
+  environments: Schema.Record(Schema.String, Schema.Struct({ sources: Schema.Record(SourceName, SourceConfig), policy: Schema.optionalKey(PolicyOverrideSchema), databases: Schema.optionalKey(Schema.Record(SourceName, DbTargetConfig)) })),
   problemPatterns: Schema.optionalKey(Schema.Struct({ error: Schema.optionalKey(Words), warn: Schema.optionalKey(Words) })),
   fixes: Schema.optionalKey(FixesConfig),
   promotion: Schema.optionalKey(Schema.Struct({ staging: Text, production: Text })),
-  commitWatch: Schema.optionalKey(CommitWatchConfig), });
+  commitWatch: Schema.optionalKey(CommitWatchConfig),
+  policy: Schema.optionalKey(PolicyOverrideSchema), });
 const WatcherConfig = Schema.Struct({ app: Text, environment: Text, every: Schema.optionalKey(Duration) });
 /** The configuration file as written, version 2. */
 export const ConfigFile = Schema.Struct({
@@ -152,16 +179,32 @@ export function parseConfig(raw: unknown, file: string): Config {
     throw new ConfigError({ message });
   };
 
-  const apps: Record<string, { checkout: string; words: Words; fixes?: Fixes; promotion?: { staging: string; production: string }; commitWatch?: CommitWatch }> = {};
+  const apps: Record<string, { checkout: string; words: Words; fixes?: Fixes; promotion?: { staging: string; production: string }; commitWatch?: CommitWatch; policy?: PolicyOverride }> = {};
+  const envPolicies: Record<string, PolicyOverride> = {};
+  const databases: DbTarget[] = [];
   const envSources = new Map<string, Source[]>();
   for (const [app, a] of Object.entries(root.apps)) {
     const words: Words = { error: a.problemPatterns?.error ?? DEFAULT_WORDS.error, warn: a.problemPatterns?.warn ?? DEFAULT_WORDS.warn };
-    apps[app] = { checkout: path(a.checkout), words, ...(a.fixes ? { fixes: a.fixes } : {}), ...(a.commitWatch ? { commitWatch: a.commitWatch } : {}) };
+    if (a.policy?.fixMode && a.policy.fixMode !== "off" && !a.fixes) fail(`apps.${app}.policy.fixMode requires apps.${app}.fixes`);
+    apps[app] = { checkout: path(a.checkout), words, ...(a.fixes ? { fixes: a.fixes } : {}), ...(a.commitWatch ? { commitWatch: a.commitWatch } : {}), ...(a.policy ? { policy: a.policy } : {}) };
     if (a.promotion) {
       if (a.promotion.staging === a.promotion.production) fail(`apps.${app}.promotion names the same environment twice`);
       apps[app]!.promotion = a.promotion;
     }
     for (const [environment, e] of Object.entries(a.environments)) {
+      if (e.policy) {
+        if (e.policy.fixMode && e.policy.fixMode !== "off" && !a.fixes) fail(`apps.${app}.environments.${environment}.policy.fixMode requires apps.${app}.fixes`);
+        envPolicies[`${app}/${environment}`] = e.policy;
+      }
+      for (const [name, d] of Object.entries(e.databases ?? {})) {
+        const where = `apps.${app}.environments.${environment}.databases.${name}`;
+        if (d.driver === "sqlite" ? !d.file || d.dsn !== undefined : !d.dsn || d.file !== undefined)
+          fail(d.driver === "sqlite" ? `${where}: sqlite requires file and must not set dsn` : `${where}: ${d.driver} requires dsn and must not set file`);
+        const queries = d.queries ?? {};
+        if (!d.allowSelect && !Object.keys(queries).length) fail(`${where} must define at least one query or set allowSelect: true`);
+        for (const [qn, q] of Object.entries(queries)) { const err = checkSql(q.sql); if (err) fail(`${where}.queries.${qn}.sql: ${err}`); }
+        databases.push({ id: `${app}/${environment}/${name}`, app, environment, name, driver: d.driver, ...(d.file ? { file: path(d.file) } : {}), ...(d.dsn ? { dsn: d.dsn } : {}), allowSelect: d.allowSelect ?? false, queries });
+      }
       const list: Source[] = [];
       for (const [name, s] of Object.entries(e.sources)) {
         const where = `apps.${app}.environments.${environment}.sources.${name}`;
@@ -205,30 +248,28 @@ export function parseConfig(raw: unknown, file: string): Config {
   const redactPatterns = root.redactPatterns ?? [];
   setRedactPatterns(redactPatterns);
   return {
-    file: resolve(file),
-    dataDir: path(root.dataDir ?? join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "overwatch")),
+    file: resolve(file), dataDir: path(root.dataDir ?? join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "overwatch")),
     port: root.port ?? 7331, mcpToken: root.mcpToken ?? null, redactPatterns,
     opencode: {
       url: root.opencode?.url !== undefined ? root.opencode.url.replace(/\/+$/, "") : null,
       model: root.opencode?.model ?? null, password: root.opencode?.password ?? null,
-      concurrency: root.opencode?.concurrency ?? LIMITS.concurrentJobs,
-      toolCalls: root.opencode?.toolCalls ?? LIMITS.toolCallsPerRun,
-      genUi: root.opencode?.genUi ?? false, },
-    readings: root.readings ?? 3, apps, watchers, sources: watchers.flatMap((w) => w.sources), };
+      concurrency: root.opencode?.concurrency ?? LIMITS.concurrentJobs, toolCalls: root.opencode?.toolCalls ?? LIMITS.toolCallsPerRun, genUi: root.opencode?.genUi ?? false, },
+    readings: root.readings ?? 3, apps, envPolicies, databases, watchers, sources: watchers.flatMap((w) => w.sources), };
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => Predicate.isObject(v) && !Array.isArray(v);
+const expandRef = (p: string, base: string) => (isAbsolute(p) ? p : p.startsWith("~/") ? join(homedir(), p.slice(2)) : resolve(base, p));
 function deepMerge(base: Record<string, unknown>, over: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...base };
   for (const [k, v] of Object.entries(over)) out[k] = isRecord(v) && isRecord(out[k]) ? deepMerge(out[k], v) : v;
   return out;
 }
 
-/** Reads and validates the configuration file, resolving any `extends` base layers offline. */
-export const loadConfig = (file: string): Effect.Effect<Config, ConfigError, FileSystem.FileSystem> => Effect.gen(function* () {
+/** Reads a configuration file and resolves any `extends` base layers (expanding `~/`), before schema validation. */
+export const readMergedConfig = (file: string): Effect.Effect<Record<string, unknown>, ConfigError, FileSystem.FileSystem> => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const readLayer = (target: string, seen: Set<string>): Effect.Effect<Record<string, unknown>, ConfigError> => Effect.gen(function* () {
-    const abs = resolve(target);
+    const abs = target.startsWith("~/") ? join(homedir(), target.slice(2)) : resolve(target);
     if (seen.has(abs)) return yield* new ConfigError({ message: `circular extends in ${abs}` });
     const raw = yield* fs.readFileString(abs).pipe(Effect.mapError((e) => new ConfigError({ message: `cannot read ${abs}: ${e.reason._tag === "NotFound" ? "ENOENT" : e.reason._tag}` })));
     const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(raw).pipe(Effect.mapError(() => new ConfigError({ message: `${abs} is not valid JSON` })));
@@ -239,11 +280,16 @@ export const loadConfig = (file: string): Effect.Effect<Config, ConfigError, Fil
     if (!refs) return yield* new ConfigError({ message: `config.extends must be a path or list of paths` });
     const next = new Set(seen).add(abs);
     let merged: Record<string, unknown> = {};
-    for (const ref of refs) merged = deepMerge(merged, yield* readLayer(resolve(dirname(abs), ref), next));
+    for (const ref of refs) merged = deepMerge(merged, yield* readLayer(expandRef(ref, dirname(abs)), next));
     const { extends: _, ...rest } = value;
     return deepMerge(merged, rest);
   });
-  const merged = yield* readLayer(file, new Set());
+  return yield* readLayer(file, new Set());
+});
+
+/** Reads and validates the configuration file, resolving any `extends` base layers offline. */
+export const loadConfig = (file: string): Effect.Effect<Config, ConfigError, FileSystem.FileSystem> => Effect.gen(function* () {
+  const merged = yield* readMergedConfig(file);
   return yield* Effect.try({ try: () => parseConfig(merged, file), catch: (e) => (e instanceof ConfigError ? e : new ConfigError({ message: String(e) })) });
 });
 

@@ -198,19 +198,12 @@ let issue: (p: Permit) => void = () => undefined;
  * spent by its one use. Constructed anywhere else, it is never live: `issue` is private to this module.
  */
 export class Permit {
-  readonly kind: string;
-  readonly seq: number;
+  readonly kind: string; readonly seq: number;
   /** The exact arguments this permit authorizes (operation, repository, branch, head, base): all must be in the call. */
   readonly bind: ReadonlyArray<string>;
   #live = false;
-  static {
-    issue = (p) => void (p.#live = true);
-  }
-  constructor(kind: string, seq: number, bind: ReadonlyArray<string> = []) {
-    this.kind = kind;
-    this.seq = seq;
-    this.bind = bind;
-  }
+  static { issue = (p) => void (p.#live = true); }
+  constructor(kind: string, seq: number, bind: ReadonlyArray<string> = []) { this.kind = kind; this.seq = seq; this.bind = bind; }
   spend(kind: string, args: ReadonlyArray<string> = []) {
     if (!this.#live || this.kind !== kind) throw new Error(`an outbound ${kind} needs a committed intent`);
     const missing = this.bind.find((b) => !args.includes(b));
@@ -230,10 +223,7 @@ const orDieSql = <A, R>(effect: Effect.Effect<A, SqlError.SqlError, R>): Effect.
   Effect.catch(effect, (e) => Effect.die(new Error(reason(e), { cause: e })));
 
 /** A statement's outcome: rows changed and the last row inserted. */
-export interface Changed {
-  readonly changes: number;
-  readonly lastInsertRowid: number;
-}
+export interface Changed { readonly changes: number; readonly lastInsertRowid: number }
 const changed = (raw: unknown): Changed => {
   const r = Predicate.isObject(raw) && !Array.isArray(raw) ? (raw as { changes?: number | bigint; lastInsertRowid?: number | bigint }) : {};
   return { changes: Number(r.changes ?? 0), lastInsertRowid: Number(r.lastInsertRowid ?? 0) };
@@ -247,70 +237,38 @@ const changed = (raw: unknown): Changed => {
 export class Writer {
   #sql: SqlClient.SqlClient | null;
   readonly permits: Permit[] = [];
-  constructor(sql: SqlClient.SqlClient) {
-    this.#sql = sql;
-  }
-  end() {
-    this.#sql = null;
-  }
-  get #open(): Effect.Effect<SqlClient.SqlClient> {
-    return Effect.suspend(() => (this.#sql ? Effect.succeed(this.#sql) : Effect.die(new Error("this writer's transaction has ended"))));
-  }
+  constructor(sql: SqlClient.SqlClient) { this.#sql = sql; }
+  end() { this.#sql = null; }
+  get #open(): Effect.Effect<SqlClient.SqlClient> { return Effect.suspend(() => (this.#sql ? Effect.succeed(this.#sql) : Effect.die(new Error("this writer's transaction has ended")))); }
   run(query: string, ...params: ReadonlyArray<Param>): Effect.Effect<Changed> {
-    return this.#open.pipe(
-      Effect.flatMap((sql) => orDieSql(Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw))),
-      Effect.map(changed),
-      Effect.tap(() => Effect.sync(tick)));
+    return this.#open.pipe(Effect.flatMap((sql) => orDieSql(Effect.suspend(() => sql.unsafe(query, params.map(normal)).raw))), Effect.map(changed), Effect.tap(() => Effect.sync(tick)));
   }
   /** The seq the next event will have: AUTOINCREMENT never reuses one, and this writer is the only one. */
   next(): Effect.Effect<number> {
-    return this.#open.pipe(
-      Effect.flatMap((sql) => sql.unsafe<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")),
-      Effect.orDie,
-      Effect.map((rows) => (rows[0]?.seq ?? 0) + 1));
+    return this.#open.pipe(Effect.flatMap((sql) => sql.unsafe<{ seq: number }>("SELECT seq FROM sqlite_sequence WHERE name = 'events'")), Effect.orDie, Effect.map((rows) => (rows[0]?.seq ?? 0) + 1));
   }
   /** Records an outbound effect's intent; the permit for it is live once this transaction commits. */
   permit(kind: string, subject: string | null, data: unknown = {}, bind: ReadonlyArray<string> = []): Effect.Effect<Permit> {
-    return Effect.map(this.event("intent", subject, { kind, bind, ...(data as object) }), (seq) => {
-      const p = new Permit(kind, seq, bind);
-      this.permits.push(p);
-      return p; });
+    return Effect.map(this.event("intent", subject, { kind, bind, ...(data as object) }), (seq) => { const p = new Permit(kind, seq, bind); this.permits.push(p); return p; });
   }
   /** Appends to the log and returns its seq. */
   event(kind: string, subject: string | null, data: unknown, actor = "overwatch"): Effect.Effect<number> {
-    return Effect.suspend(() =>
-      this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data)),
-    ).pipe(Effect.map((r) => r.lastInsertRowid));
+    return Effect.suspend(() => this.run("INSERT INTO events (at_ms, kind, subject, actor, data) VALUES (?, ?, ?, ?, ?)", clock.now(), kind as Clean, subject as Clean | null, actor as Clean, json(data))).pipe(Effect.map((r) => r.lastInsertRowid));
   }}
 
 type Value = number | string | null;
 
 /** The database, owned by this process: reads, the one way to change it, and its maintenance. */
 export interface StoreShape {
-  readonly file: string;
+  readonly file: string; readonly seq: Effect.Effect<number>; readonly changes: Stream.Stream<void>; readonly checkpoint: Effect.Effect<void>; readonly liveBytes: Effect.Effect<number>;
   readonly all: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Effect.Effect<T[]>;
   readonly get: <T = Record<string, unknown>>(query: string, ...params: ReadonlyArray<Value>) => Effect.Effect<T | undefined>;
-  readonly seq: Effect.Effect<number>;
   readonly meta: (key: string) => Effect.Effect<string | null>;
-  /** One change: one IMMEDIATE transaction, admitted by the guard. Listeners hear of it after it commits. */
   readonly tx: <A, E, R>(work: (w: Writer) => Effect.Effect<A, E, R>) => Effect.Effect<A, E | Full, R>;
-  /** One outbound effect's intent, in its own transaction; the returned permit is live. */
   readonly permit: (kind: string, subject: string | null, data?: unknown, bind?: ReadonlyArray<string>) => Effect.Effect<Permit, Full>;
-  /**
-   * Admission for every write: set by the owner of the disk check, it runs before each transaction opens, so a
-   * failure record, a deadline or a page action is refused by the same rule as a slice. Only maintenance (making
-   * room) passes without it.
-   */
   readonly setGuard: (guard: Effect.Effect<void, Full> | null) => Effect.Effect<void>;
-  /** One element after each committed transaction. */
-  readonly changes: Stream.Stream<void>;
-  /** Lets the write-ahead log go back to the file system (tests measure the file). */
-  readonly checkpoint: Effect.Effect<void>;
-  /** A consistent standalone copy. Never overwrites a file. */
   readonly backup: (target: string) => Effect.Effect<{ file: string; seq: number }, BackupError>;
   readonly restore: (source: string) => Effect.Effect<{ file: string; seq: number }, Incompatible | Full>;
-  /** The bytes the database holds: its pages in use (free pages are reused before the file grows) and its log. */
-  readonly liveBytes: Effect.Effect<number>;
   readonly reclaim: (maxBytes?: number) => Effect.Effect<number>;
   readonly expire: (now: number) => Effect.Effect<number>;
   readonly retain: (now: number, over: Effect.Effect<boolean>, keepEvents?: number) => Effect.Effect<void>;
@@ -489,12 +447,8 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         return { file: source, seq: yield* seq }; }));
 
   const shape: StoreShape = {
-    file,
-    all,
-    get,
-    seq,
+    file, all, get, seq, tx, restore, expire,
     meta: (key) => Effect.map(get<{ value: string }>("SELECT value FROM meta WHERE key = ?", key), (row) => row?.value ?? null),
-    tx,
     permit: (kind, subject, data = {}, bind = []) => tx((w) => w.permit(kind, subject, data, bind)),
     setGuard: (next) => Effect.sync(() => void (guard = next)),
     changes: Stream.fromPubSub(commits),
@@ -504,21 +458,9 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         const at = yield* seq;
         yield* Effect.suspend(() => sql.unsafe("VACUUM INTO ?", [target]).raw).pipe(Effect.mapError((e) => new BackupError({ message: reason(e) })));
         return { file: target, seq: at }; }),
-    restore,
     liveBytes: Effect.gen(function* () {
-      const wal = yield* fs.stat(`${file}-wal`).pipe(
-        Effect.map((info) => Number(info.size)),
-        Effect.orElseSucceed(() => 0), // no log yet
-      );
+      const wal = yield* fs.stat(`${file}-wal`).pipe(Effect.map((info) => Number(info.size)), Effect.orElseSucceed(() => 0));
       return ((yield* pragma("page_count")) - (yield* pragma("freelist_count"))) * (yield* pragma("page_size")) + wal; }),
-    /**
-     * Gives free pages back to the file system: at most `maxBytes` per call, for any page size. Incremental vacuum
-     * moves pages from the end of the file into free slots and truncates it; with auto-vacuum every (usable / 5)th
-     * page is a pointer-map page that goes too, so fewer data pages are asked for than fit in the bound. Then the
-     * write-ahead log is checkpointed and truncated. A full VACUUM is not used after start: it rewrites the whole file
-     * into a copy (up to twice the space, on a disk that may be short of it) and holds the only connection for as long
-     * as that takes, so no poll could commit meanwhile. Returns the free pages left.
-     */
     reclaim: (maxBytes = LIMITS.reclaimBytes) => Effect.gen(function* () {
         if ((yield* pragma("freelist_count")) === 0) return 0;
         const size = yield* pragma("page_size"), budget = Math.floor(maxBytes / size), perMap = Math.floor(size / 5);
@@ -528,30 +470,16 @@ const own = Effect.fn("Store.own")(function* (dataDir: string) {
         yield* all(`PRAGMA incremental_vacuum(${pages})`);
         yield* exec("PRAGMA wal_checkpoint(TRUNCATE)").pipe(Effect.orDie);
         return yield* pragma("freelist_count"); }),
-    /**
-     * Age: what has outlived its use goes, on every pass, whatever the disk: trial messages and uncited trial
-     * evidence after seven days; real messages and uncited evidence after fourteen; coverage rows and hourly counts
-     * after thirty. A finding and the evidence it cites are never removed (the citations table restricts it). One
-     * audited transaction, only when something is due.
-     */
-    expire,
-    /**
-     * Makes room under pressure: old events (counts and the sequence are kept), then what age allows. Nothing else is
-     * removed; if that is not enough, the caller pauses collection. Cited evidence is never removed.
-     */
     retain: (now, over, keepEvents = 10_000) => Effect.gen(function* () {
         if (yield* over) {
           const throughSeq = Math.max(0, (yield* seq) - keepEvents);
-          yield* maintain(
-            (w) => Effect.gen(function* () {
-                yield* w.run("UPDATE maintenance SET active = 1");
-                const removed = (yield* w.run("DELETE FROM events WHERE seq <= ?", throughSeq)).changes;
-                yield* w.run("UPDATE maintenance SET active = 0");
-                return removed; }),
-            "events",
-            throughSeq);
+          yield* maintain((w) => Effect.gen(function* () {
+            yield* w.run("UPDATE maintenance SET active = 1");
+            const removed = (yield* w.run("DELETE FROM events WHERE seq <= ?", throughSeq)).changes;
+            yield* w.run("UPDATE maintenance SET active = 0");
+            return removed; }), "events", throughSeq);
         }
-        if (yield* over) yield* expire(now); }),};
+        if (yield* over) yield* expire(now); }), };
   return shape; });
 
 /** The database service: owned for as long as the layer's scope lasts. */

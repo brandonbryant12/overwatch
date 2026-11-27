@@ -8,24 +8,8 @@ import { Clock, Effect, Fiber, FileSystem, Option, Path, PlatformError, Redacted
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import type { Permit } from "./store.ts";
 
-export interface Result {
-  readonly code: number;
-  readonly stdout: string;
-  readonly stderr: string;
-  /** Killed at its time limit (the code is then 137). */
-  readonly timedOut?: boolean;
-  readonly elapsedMs?: number;
-}
-export interface Options {
-  readonly cwd?: string;
-  readonly timeoutMs?: number;
-  readonly maxBytes?: number;
-  readonly env?: Record<string, string | undefined>;
-  /** Only `env`, not the service's own environment. */
-  readonly exactEnv?: boolean;
-  /** The program and its descendants are one process group, killed whole. */
-  readonly group?: boolean;
-}
+export interface Result { readonly code: number; readonly stdout: string; readonly stderr: string; readonly timedOut?: boolean; readonly elapsedMs?: number }
+export interface Options { readonly cwd?: string; readonly timeoutMs?: number; readonly maxBytes?: number; readonly env?: Record<string, string | undefined>; readonly exactEnv?: boolean; readonly group?: boolean }
 
 /** What kind of outbound effect a command is, or null for a read. */
 export function outbound(command: string, args: ReadonlyArray<string>): string | null {
@@ -78,16 +62,7 @@ const start = (command: string, args: ReadonlyArray<string>, o: Options): Effect
     return { code: Option.isNone(outcome) ? 137 : outcome.value[2], stdout: read.stdout, stderr: read.stderr, timedOut: Option.isNone(outcome), elapsedMs };
   }));
 
-export interface StreamRead {
-  readonly code: number;
-  readonly stderr: string;
-  /** Stopped at the byte cap: what was not read is unknown. */
-  readonly capped: boolean;
-  /** The last line had no newline (a killed or capped command): it was dropped. */
-  readonly cutTail: boolean;
-  /** The caller stopped the read. */
-  readonly stopped: boolean;
-}
+export interface StreamRead { readonly code: number; readonly stderr: string; readonly capped: boolean; readonly cutTail: boolean; readonly stopped: boolean }
 
 /**
  * Streams a read line by line, calling `line` for each complete one. Raw bytes count toward `maxBytes`; past it the
@@ -135,14 +110,7 @@ export const secret = (ref: string): Effect.Effect<Redacted.Redacted<string> | n
 export const scratch = (prefix: string) => FileSystem.FileSystem.use((fs) => fs.makeTempDirectory({ prefix: `${prefix}${process.pid}-` })).pipe(Effect.orDie);
 
 /** Whether a process is gone (not merely someone else's). */
-const gone = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ESRCH";
-  }
-};
+const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH"; } };
 /** At start: remove the scratch of processes that no longer run (a killed verify, demo, trial or calibration). */
 export const sweep = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;

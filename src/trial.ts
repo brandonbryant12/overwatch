@@ -161,7 +161,10 @@ export function approvalKey(config: Config): string {
 
 /** The fix gate: bound to the model, the fixer's tool and policy revision, and one app's fix policy and verify commands. */
 export function fixGateKey(config: Config, app: string): string {
-  return `fixgate:${createHash("sha256").update(JSON.stringify({ model: config.opencode.model, url: config.opencode.url, agent: "ow-fixer", tools: 1, policy: config.apps[app]?.fixes ?? null })).digest("hex").slice(0, 32)}`;
+  const a = config.apps[app], appMode = a?.policy?.fixMode;
+  const envModes = Object.entries(config.envPolicies).filter(([k, p]) => k.startsWith(`${app}/`) && p.fixMode !== undefined).sort(([x], [y]) => (x < y ? -1 : 1)).map(([k, p]) => [k.slice(app.length + 1), p.fixMode]);
+  const extra = { ...(appMode !== undefined ? { appFixMode: appMode } : {}), ...(envModes.length ? { envFixModes: Object.fromEntries(envModes) } : {}) };
+  return `fixgate:${createHash("sha256").update(JSON.stringify({ model: config.opencode.model, url: config.opencode.url, agent: "ow-fixer", tools: 1, policy: a?.fixes ?? null, ...extra })).digest("hex").slice(0, 32)}`;
 }
 
 const finish = Effect.fnUntraced(function* (job: string, run: string | null, state: string, reason: string | null) {

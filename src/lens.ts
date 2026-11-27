@@ -6,7 +6,7 @@
 import { Effect, Option, Predicate, Schedule, Schema } from "effect";
 import { randomBytes } from "node:crypto";
 import { clock } from "./clock.ts";
-import { AppConfig } from "./config.ts";
+import { AppConfig, policyFor } from "./config.ts";
 import { apiError } from "./errors.ts";
 import { after, emptyFolder, OpenCodeClient } from "./opencode.ts";
 import { commits, type CommitSummary } from "./outlook.ts";
@@ -14,7 +14,7 @@ import { clean, errorText } from "./redact.ts";
 import { json, Store, sql, type Clean } from "./store.ts";
 
 const Tone = Schema.Literals(["neutral", "warn", "error", "ok"]);
-const Origin = Schema.Literals(["telemetry", "code", "history", "generated"]);
+const Origin = Schema.Literals(["telemetry", "code", "history", "generated", "db"]);
 const OptHandle = Schema.optionalKey(Schema.String);
 export const LensBlockSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("causal_flow"), title: Schema.String, steps: Schema.Array(Schema.Struct({ label: Schema.String, detail: Schema.String, tone: Tone, handle: OptHandle })) }),
@@ -25,14 +25,8 @@ export const LensBlockSchema = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("key_facts"), title: Schema.String, facts: Schema.Array(Schema.Struct({ label: Schema.String, value: Schema.String, origin: Origin, handle: OptHandle })) }),
 ]);
 export const LensSpecSchema = Schema.Struct({
-  source: Schema.Literals(["ai", "derived"]),
-  title: Schema.String,
-  summary: Schema.String,
-  model: Schema.optionalKey(Schema.String),
-  generatedAt: Schema.Finite,
-  verifiedHandles: Schema.Array(Schema.String),
-  blocks: Schema.Array(LensBlockSchema),
-});
+  source: Schema.Literals(["ai", "derived"]), title: Schema.String, summary: Schema.String,
+  model: Schema.optionalKey(Schema.String), generatedAt: Schema.Finite, verifiedHandles: Schema.Array(Schema.String), blocks: Schema.Array(LensBlockSchema), });
 export type LensBlock = typeof LensBlockSchema.Type;
 export type LensSpec = typeof LensSpecSchema.Type;
 
@@ -45,14 +39,10 @@ export function verifyLens(spec: LensSpec, valid: ReadonlySet<string>): LensSpec
     const { handle: _, ...rest } = item;
     return rest as T;
   };
-  const blocks: LensBlock[] = spec.blocks.map((b) => {
-    if (b.kind === "causal_flow") return { ...b, steps: b.steps.map(keep) };
-    if (b.kind === "span_waterfall") return { ...b, spans: b.spans.map(keep) };
-    if (b.kind === "metric_compare") return { ...b, rows: b.rows.map(keep) };
-    if (b.kind === "commit_risk") return { ...b, commits: b.commits.map(keep) };
-    if (b.kind === "timeline") return { ...b, events: b.events.map(keep) };
-    return { ...b, facts: b.facts.map(keep) };
-  });
+  const blocks: LensBlock[] = spec.blocks.map((b) =>
+    b.kind === "causal_flow" ? { ...b, steps: b.steps.map(keep) } : b.kind === "span_waterfall" ? { ...b, spans: b.spans.map(keep) }
+      : b.kind === "metric_compare" ? { ...b, rows: b.rows.map(keep) } : b.kind === "commit_risk" ? { ...b, commits: b.commits.map(keep) }
+      : b.kind === "timeline" ? { ...b, events: b.events.map(keep) } : { ...b, facts: b.facts.map(keep) });
   for (const h of spec.verifiedHandles) if (valid.has(h)) used.add(h);
   return { ...spec, verifiedHandles: [...used].sort(), blocks };
 }
@@ -146,11 +136,10 @@ export const generateLens = Effect.fn("generateLens")(function* (id: string) {
   const store = yield* Store, config = yield* AppConfig;
   const inc = yield* store.get<{ id: string; app: string; environment: string; title: string; count: number; exact: number }>("SELECT id, app, environment, title, count, exact FROM incidents WHERE id = ?", id);
   if (!inc) return yield* apiError(404, `no item ${id}`);
+  if (!policyFor(config, inc.app, inc.environment).genUi) return yield* apiError(403, `AI lens generation is disabled for ${inc.app}/${inc.environment} (genUi)`);
   const oc = yield* (yield* OpenCodeClient).connect;
   if (!oc) return yield* apiError(503, "OpenCode is not running; start OpenCode to generate an AI lens");
-  const ev = yield* evidenceOf(id);
-  const valid = new Set(ev.map((e) => e.handle));
-  const emptyDir = yield* emptyFolder(config.dataDir);
+  const ev = yield* evidenceOf(id), valid = new Set(ev.map((e) => e.handle)), emptyDir = yield* emptyFolder(config.dataDir);
   const session = `ses_${randomBytes(12).toString("hex")}`, msg = `msg_${randomBytes(12).toString("hex")}`;
   const evidenceText = ev.slice(0, 20).map((e) => `[${e.handle} | ${e.origin} | ${e.source}] ${clean(e.text, 240)}`).join("\n");
   const prompt = `Return ONLY valid JSON matching LensSpec {source:"ai",title,summary,generatedAt,verifiedHandles,blocks} for ${inc.app}/${inc.environment} problem "${inc.title}" (${inc.exact ? inc.count : `${inc.count}+`}). Allowed block kinds: causal_flow, span_waterfall, metric_compare, commit_risk, timeline, key_facts. Cite ONLY these evidence handles (never invent handles or quotes):\n${evidenceText || "(no evidence handles yet)"}`;
@@ -162,36 +151,30 @@ export const generateLens = Effect.fn("generateLens")(function* (id: string) {
     return done.value.said.trim();
   }).pipe(Effect.catchTags({ Unavailable: (e) => apiError(503, errorText(e, 200)), PeerError: (e) => apiError(503, errorText(e, 200)) }));
   const raw = said.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-  const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(LensSpecSchema))(raw).pipe(
-    Effect.mapError(() => apiError(503, "model returned invalid LensSpec JSON; falling back to derived lens")));
+  const parsed = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(LensSpecSchema))(raw).pipe(Effect.mapError(() => apiError(503, "model returned invalid LensSpec JSON; falling back to derived lens")));
   const grounded = verifyLens({ ...parsed, source: "ai", model: config.opencode.model ?? parsed.model ?? "opencode", generatedAt: clock.now() }, valid);
   yield* store.tx((w) => Effect.gen(function* () {
     const seq = yield* w.event("lens", id as Clean, { source: "ai", handles: grounded.verifiedHandles.length, blocks: grounded.blocks.length });
-    yield* w.run("INSERT OR REPLACE INTO lenses (incident, spec, seq) VALUES (?, ?, ?)", id as Clean, json(grounded), seq);
-  }));
-  return { lens: grounded };
-});
+    yield* w.run("INSERT OR REPLACE INTO lenses (incident, spec, seq) VALUES (?, ?, ?)", id as Clean, json(grounded), seq); }));
+  return { lens: grounded }; });
 
 /** GET /v2/items/:id/handoff: structured, evidence-grounded mission brief for an interactive OpenCode session. */
 export const buildHandoff = Effect.fn("buildHandoff")(function* (id: string) {
   const config = yield* AppConfig;
   const inc = yield* sql.get<{ id: string; app: string; environment: string; title: string; severity: string; count: number; exact: number }>("SELECT id, app, environment, title, severity, count, exact FROM incidents WHERE id = ?", id);
   if (!inc) return yield* apiError(404, `no item ${id}`);
-  const app = config.apps[inc.app];
-  const checkout = app?.checkout ?? "";
+  const app = config.apps[inc.app], checkout = app?.checkout ?? "";
   const deployRow = yield* sql.get<{ revision: string; previous: string | null }>("SELECT revision, previous FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", inc.app, inc.environment);
   const deploy = deployRow?.revision ?? null, previousDeploy = deployRow?.previous ?? null;
-  const ev = yield* evidenceOf(id);
-  const handles = ev.slice(0, 12).map((e) => ({ handle: e.handle, source: e.source, origin: e.origin ?? "generated", text: clean(e.text, 240) }));
+  const ev = yield* evidenceOf(id), handles = ev.slice(0, 12).map((e) => ({ handle: e.handle, source: e.source, origin: e.origin ?? "generated", text: clean(e.text, 240) }));
   const inv = yield* sql.get<{ result: string | null }>("SELECT result FROM jobs WHERE kind = 'investigation' AND subject = ? AND state = 'completed' ORDER BY created_seq DESC LIMIT 1", id);
   const fix = yield* sql.get<{ id: string; state: string; data: string }>("SELECT id, state, data FROM fixes WHERE incident = ? ORDER BY seq DESC LIMIT 1", id);
   const res = inv?.result ? (JSON.parse(inv.result) as { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null }) : null;
-  const mcpTools = ["ow_get", "ow_search", "ow_brief", "ow_outlook", "ow_act"];
+  const hasDb = config.databases.some((d) => d.app === inc.app && d.environment === inc.environment);
+  const mcpTools = ["ow_get", "ow_search", "ow_brief", "ow_outlook", ...(hasDb ? ["ow_db"] : []), "ow_act"];
   const commands: string[] = [];
-  if (checkout && deploy && previousDeploy) {
-    commands.push(`git -C ${checkout} log --stat ${previousDeploy}..${deploy}`);
-    commands.push(`git -C ${checkout} diff ${previousDeploy}..${deploy}`);
-  } else if (checkout && deploy) commands.push(`git -C ${checkout} show --stat ${deploy}`);
+  if (checkout && deploy && previousDeploy) commands.push(`git -C ${checkout} log --stat ${previousDeploy}..${deploy}`, `git -C ${checkout} diff ${previousDeploy}..${deploy}`);
+  else if (checkout && deploy) commands.push(`git -C ${checkout} show --stat ${deploy}`);
   for (const v of app?.fixes?.verify ?? []) commands.push(v.join(" "));
   const verdictLine = res ? `${res.verdict.replace("_", " ")} (${res.counts.real ?? 0}/${res.planned} real${res.challenge?.outcome ? `, challenger ${res.challenge.outcome}` : ""})` : "not yet investigated";
   const fixLine = fix ? `${fix.state} (${fix.id}${Predicate.isString((JSON.parse(fix.data) as { summary?: string }).summary) ? `: ${(JSON.parse(fix.data) as { summary?: string }).summary}` : ""})` : "none";
@@ -200,17 +183,14 @@ export const buildHandoff = Effect.fn("buildHandoff")(function* (id: string) {
     `Count: ${inc.exact ? inc.count : `${inc.count}+`}${checkout ? ` | Checkout: ${checkout}` : ""}${deploy ? ` | Deployed: ${deploy.slice(0, 12)}${previousDeploy ? ` (prev ${previousDeploy.slice(0, 12)})` : ""}` : ""}.`,
     `Investigation: ${verdictLine}. Fix: ${fixLine}.`,
     ...(handles.length ? [`Top evidence: ${handles.slice(0, 4).map((h) => `${h.handle} (${h.origin}/${h.source})`).join(", ")}.`] : []),
-    `Read full detail with ow_get {"id": "${id}"}; search history with ow_search; check outlook/commits with ow_outlook; ask the owner before any ow_act.`,
+    `Read full detail with ow_get {"id": "${id}"}; search history with ow_search; check outlook/commits with ow_outlook${hasDb ? "; run read-only DB queries with ow_db" : ""}; ask the owner before any ow_act.`,
   ].join("\n");
   const markdown = [
-    `# Overwatch Handoff: ${inc.title}`,
-    `- **ID**: \`${id}\` | **Target**: \`${inc.app}/${inc.environment}\` | **Count**: ${inc.exact ? inc.count : `${inc.count}+`} (${inc.severity})`,
-    ...(checkout ? [`- **Checkout**: \`${checkout}\``] : []),
-    ...(deploy ? [`- **Revision**: \`${deploy}\`${previousDeploy ? ` (previous \`${previousDeploy}\`)` : ""}`] : []),
+    `# Overwatch Handoff: ${inc.title}`, `- **ID**: \`${id}\` | **Target**: \`${inc.app}/${inc.environment}\` | **Count**: ${inc.exact ? inc.count : `${inc.count}+`} (${inc.severity})`,
+    ...(checkout ? [`- **Checkout**: \`${checkout}\``] : []), ...(deploy ? [`- **Revision**: \`${deploy}\`${previousDeploy ? ` (previous \`${previousDeploy}\`)` : ""}`] : []),
     `- **Investigation**: ${verdictLine} | **Fix**: ${fixLine}`,
     ...(handles.length ? ["", "## Evidence Handles", ...handles.map((h) => `- \`${h.handle}\` (${h.origin}, ${h.source}): ${h.text}`)] : []),
     ...(commands.length ? ["", "## Local Commands", "```sh", ...commands, "```"] : []),
-    "", "## Overwatch MCP Tools", `Use \`ow_get {"id":"${id}"}\`, \`ow_search\`, \`ow_brief\`, \`ow_outlook\`, and confirm before \`ow_act\`.`,
+    "", "## Overwatch MCP Tools", `Use \`ow_get {"id":"${id}"}\`, \`ow_search\`, \`ow_brief\`, \`ow_outlook\`${hasDb ? ", `ow_db`" : ""}, and confirm before \`ow_act\`.`,
   ].join("\n");
-  return { id, title: inc.title, app: inc.app, env: inc.environment, checkout, deploy, previousDeploy, handles, mcpTools, commands, prompt, markdown };
-});
+  return { id, title: inc.title, app: inc.app, env: inc.environment, checkout, deploy, previousDeploy, handles, mcpTools, commands, prompt, markdown }; });

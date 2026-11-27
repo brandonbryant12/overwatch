@@ -7,9 +7,9 @@
  * deadline is bounded by that delay on the monotonic clock, also after a restart, so a wall clock set back cannot
  * postpone one.
  */
-import { Effect, Predicate } from "effect";
+import { Effect, Option, Predicate } from "effect";
 import { createHash, randomBytes } from "node:crypto";
-import { AppConfig } from "./config.ts";
+import { AppConfig, policyFor, type Config } from "./config.ts";
 import { clock } from "./clock.ts";
 import { ApiError, apiError, type Full } from "./errors.ts";
 import { clean } from "./redact.ts";
@@ -64,31 +64,32 @@ const openJobs = Effect.gen(function* () {
 
 /** An incident's group now, for deciding whether a change moved it into Needs you. */
 export const groupNow = Effect.fnUntraced(function* (id: string) {
-  const row = yield* sql.get<Row>("SELECT id, way, active, severity, environment FROM incidents WHERE id = ?", id);
-  return row ? groupOf(row, yield* openJobs) : null; });
+  const row = yield* sql.get<Row>("SELECT id, way, active, severity, app, environment FROM incidents WHERE id = ?", id);
+  return row ? groupOf(row, yield* openJobs, Option.getOrUndefined(yield* Effect.serviceOption(AppConfig))) : null; });
 
 /** A row's group, or null once the owner has put it away. Running work wins over an undecided error. */
-function groupOf(row: Pick<Row, "way" | "active" | "severity" | "environment" | "id">, open: ReadonlySet<string> & { undecided?: ReadonlySet<string> }): Group | null {
+function groupOf(row: Pick<Row, "way" | "active" | "severity" | "app" | "environment" | "id">, open: ReadonlySet<string> & { undecided?: ReadonlySet<string> }, config?: Config): Group | null {
   if (row.way) return null;
   if (open.has(row.id)) return "working";
-  if (row.active && row.severity === "error" && production(row.environment)) return "needsYou";
-  // An investigation that could not decide a production problem leaves it for the owner.
-  if (open.undecided?.has(row.id) && production(row.environment)) return "needsYou";
+  const crit = config ? policyFor(config, row.app, row.environment).critical : production(row.environment);
+  if (row.active && row.severity === "error" && crit) return "needsYou";
+  // An investigation that could not decide a critical problem leaves it for the owner.
+  if (open.undecided?.has(row.id) && crit) return "needsYou";
   return row.active ? "new" : "quiet";
 }
 
 /** GET /v2/inbox */
 export const inbox = Effect.gen(function* () {
-  const open = yield* openJobs;
+  const open = yield* openJobs, cfg = Option.getOrUndefined(yield* Effect.serviceOption(AppConfig));
   const groups: Record<Group, string[]> = { needsYou: [], new: [], working: [], quiet: [] };
-  for (const row of yield* sql.all<Row>("SELECT id, way, active, severity, environment FROM incidents WHERE way IS NULL ORDER BY first_seq, id")) {
-    groups[groupOf(row, open)!].push(row.id);
+  for (const row of yield* sql.all<Row>("SELECT id, way, active, severity, app, environment FROM incidents WHERE way IS NULL ORDER BY first_seq, id")) {
+    groups[groupOf(row, open, cfg)!].push(row.id);
   }
   return { seq: yield* sql.seq, groups }; });
 
 /** The incident fields the page shows, for every incident in the snapshot. */
 export const rows = Effect.gen(function* () {
-  const open = yield* openJobs;
+  const open = yield* openJobs, cfg = Option.getOrUndefined(yield* Effect.serviceOption(AppConfig));
   const hour = Math.floor(clock.now() / HOUR);
   const spark = new Map<string, number[]>();
   for (const h of yield* sql.all<{ incident: string; hour: number; count: number }>("SELECT incident, hour, count FROM hourly WHERE hour > ?", hour - 24)) {
@@ -98,7 +99,7 @@ export const rows = Effect.gen(function* () {
   }
   return (yield* sql.all<Row>("SELECT * FROM incidents ORDER BY seq, id")).map((r) => ({
     id: r.id, title: r.title, count: r.count, exact: r.exact === 1, severity: r.severity, app: r.app, environment: r.environment,
-    source: r.source, active: r.active === 1, group: groupOf(r, open), decidedSeq: r.decided_seq, way: publicWay(parse<Way>(r.way)), returned: parse<{ seq: number; causeSeq: number; code: string; reason: string }>(r.returned),
+    source: r.source, active: r.active === 1, group: groupOf(r, open, cfg), decidedSeq: r.decided_seq, way: publicWay(parse<Way>(r.way)), returned: parse<{ seq: number; causeSeq: number; code: string; reason: string }>(r.returned),
     seenSeq: r.seen_seq, firstSeq: r.first_seq, lastSeq: r.seq, firstMs: r.first_ms, lastMs: r.last_ms, spark: spark.get(r.id) ?? Array(24).fill(0),})); });
 
 /** Distinct admissions of a problem over the trailing day, by the event time of each occurrence. */
@@ -385,6 +386,8 @@ export const notify = Effect.fnUntraced(function* (w: Writer, subject: string, c
 export const announce = Effect.fnUntraced(function* (w: Writer, subject: string, before: string | null, causeSeq: number) {
   if (before === "needsYou" || (yield* groupNow(subject)) !== "needsYou") return;
   const inc = (yield* sql.get<{ title: string; app: string; environment: string }>("SELECT title, app, environment FROM incidents WHERE id = ?", subject))!;
+  const cfg = Option.getOrUndefined(yield* Effect.serviceOption(AppConfig));
+  if (cfg && !policyFor(cfg, inc.app, inc.environment).notify) return;
   yield* notify(w, subject, causeSeq, `Overwatch: ${inc.app}/${inc.environment} needs you`, inc.title); });
 
 /**

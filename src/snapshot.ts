@@ -9,7 +9,7 @@
  */
 import { Effect } from "effect";
 import { commits, comparisons, forecasts } from "./outlook.ts";
-import { AppConfig, LIMITS } from "./config.ts";
+import { AppConfig, LIMITS, policyFor } from "./config.ts";
 import { clock } from "./clock.ts";
 import { approvalKey } from "./trial.ts";
 import { inbox, rows as incidentRows } from "./inbox.ts";
@@ -24,16 +24,7 @@ export interface CollectorView {
 
 export type Health = "quiet" | "attention" | "partial" | "stale" | "signed_out";
 
-interface SourceRow {
-  id: string;
-  checkpoint_ms: number | null;
-  failure: string | null;
-  streak: number;
-  next_ms: number | null;
-  suspended: number;
-  endpoint: string | null;
-  fix: string | null;
-}
+interface SourceRow { id: string; checkpoint_ms: number | null; failure: string | null; streak: number; next_ms: number | null; suspended: number; endpoint: string | null; fix: string | null }
 
 export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorView | null, live: boolean) {
   const store = yield* Store;
@@ -70,13 +61,9 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
         else if (r!.state !== "ok") worse("partial");
       }}
     return {
-      app: w.app,
-      environment: w.environment,
-      subject: `env:${w.app}/${w.environment}`,
-      health,
-      readings: measured,
-      freshForMs: limit,
-      excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),}; });
+      app: w.app, environment: w.environment, subject: `env:${w.app}/${w.environment}`, health, readings: measured, freshForMs: limit,
+      excluded: w.sources.flatMap((s) => s.excluded.map((r) => `${s.name}:${r}`)),
+      policy: { ...policyFor(config, w.app, w.environment), databases: config.databases.filter((d) => d.app === w.app && d.environment === w.environment).map((d) => d.name) }, }; });
 
   const sources = config.sources.map((s) => {
     const r = rows.get(s.id);
@@ -98,35 +85,31 @@ export const snapshot = Effect.fn("snapshot")(function* (collector: CollectorVie
   )).map((c) => ({ source: c.source, reading: c.reading, fromMs: c.from_ms, toMs: c.to_ms, state: c.state, missed: c.missed }));
 
   return {
-    version: 2,
-    seq: yield* store.seq,
-    atMs: now,
-    live,
-    paused: collector?.paused ?? null,
+    version: 2, seq: yield* store.seq, atMs: now, live, paused: collector?.paused ?? null,
     pausedFix: collector?.paused === "disk"
       ? `Free disk space (collection needs ${LIMITS.freeFloorBytes / 1024 ** 2} MiB free) or move dataDir to a larger disk; the database is kept under ${LIMITS.databaseBudgetBytes / 1024 ** 3} GiB by dropping old history, never evidence a finding cites`
       : null,
     automation: (yield* store.meta(approvalKey(config))) === "on",
-    environments,
-    sources,
-    incidents: yield* incidentRows,
-    inbox: yield* inbox,
-    coverage,
+    environments, sources, incidents: yield* incidentRows, inbox: yield* inbox, coverage,
     metrics: (yield* store.all<{ source: string; name: string; value: number; at_ms: number; breach: number }>("SELECT * FROM metrics ORDER BY source, name")).map((m) => ({ source: m.source, name: m.name, value: m.value, atMs: m.at_ms, breach: m.breach === 1 })),
     deploys: yield* store.all("SELECT app, environment, revision, previous, seq FROM deploys ORDER BY seq"),
     outlook: { forecasts: yield* forecasts, comparisons: yield* comparisons, commits: yield* commits },
-    causes,
+    causes, fixes: yield* latestFixes,
     // Real work at the top; the trial's calibration work in its own namespace.
-    jobs: yield* jobs(false),
-    findings: yield* findings(false),
-    trial: { jobs: yield* jobs(true), findings: yield* findings(true) },}; });
+    jobs: yield* jobs(false), findings: yield* findings(false), trial: { jobs: yield* jobs(true), findings: yield* findings(true) }, }; });
+
+const latestFixes = Effect.map(
+  sql.all<{ id: string; incident: string; state: string; seq: number; pr_url: string | null }>(
+    `SELECT f.id, f.incident, f.state, f.seq, json_extract(f.data, '$.pr.url') AS pr_url FROM fixes f
+     WHERE f.id = (SELECT k.id FROM fixes k WHERE k.incident = f.incident ORDER BY k.seq DESC, k.rowid DESC LIMIT 1) ORDER BY f.seq, f.id`),
+  (rows) => rows.map((f) => ({ id: f.id, incident: f.incident, state: f.state, seq: f.seq, prUrl: f.pr_url })));
 
 const jobs = Effect.fnUntraced(function* (trial: boolean) {
-  return (yield* sql.all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null }>(
-      `SELECT j.id, j.state, j.kind, j.subject, j.reason, (SELECT session_id FROM runs r WHERE r.job_id = j.id ORDER BY attempt DESC LIMIT 1) AS session_id
-       FROM jobs j WHERE (j.kind = 'trial') = ? ORDER BY j.created_seq, j.id`,
-      trial ? 1 : 0,
-    )).map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason })); });
+  return (yield* sql.all<{ id: string; state: string; session_id: string | null; kind: string; subject: string; reason: string | null; verdict: string | null; seq: number }>(
+      `SELECT j.id, j.state, j.kind, j.subject, j.reason, j.created_seq AS seq, json_extract(j.result, '$.verdict') AS verdict,
+         (SELECT session_id FROM runs r WHERE r.job_id = j.id ORDER BY attempt DESC LIMIT 1) AS session_id
+       FROM jobs j WHERE (j.kind = 'trial') = ? ORDER BY j.created_seq, j.id`, trial ? 1 : 0,
+    )).map((j) => ({ id: j.id, kind: j.kind, subject: j.subject, state: j.state, sessionId: j.session_id, reason: j.reason, verdict: j.verdict, seq: j.seq })); });
 
 const findings = Effect.fnUntraced(function* (trial: boolean) {
   return (yield* sql.all<{ id: string; verdict: string; claims: string; code: string }>(

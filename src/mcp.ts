@@ -11,10 +11,12 @@
 import { Cause, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import { McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import type { ChildProcessSpawner } from "effect/process";
 import { timingSafeEqual } from "node:crypto";
 import { brief } from "./brief.ts";
 import { Collector } from "./collect.ts";
 import { AppConfig } from "./config.ts";
+import { queryOwnerDb } from "./db.ts";
 import { secret } from "./exec.ts";
 import { Fixes } from "./fixes.ts";
 import { act, basisOf, detail, inbox, search } from "./inbox.ts";
@@ -30,7 +32,7 @@ import { inputSchema, type Owner, TOOLS, Tools } from "./tools.ts";
 const Failure = Schema.Struct({ error: Schema.String });
 
 /** Each tool as MCP lists it: its closed input schema from its parameters Schema. Arguments reach `Tools.call` as sent. */
-const READS = new Set(["ow_telemetry", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search", "ow_brief", "ow_outlook"]);
+const READS = new Set(["ow_telemetry", "ow_db", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search", "ow_brief", "ow_outlook"]);
 const definitions = TOOLS.map((t) =>
   Tool.dynamic(t.name, { description: t.description, parameters: inputSchema(t.parameters), success: Schema.Unknown, failure: Failure }).annotate(Tool.Readonly, READS.has(t.name)));
 const toolkit = Toolkit.make(...definitions);
@@ -42,8 +44,8 @@ const owner = Effect.gen(function* () {
   const collector = yield* Collector;
   const fixes = yield* Fixes;
   const opencode = yield* OpenCodeClient;
-  const services = yield* Effect.context<Store | AppConfig>();
-  const local = <A, E>(e: Effect.Effect<A, E, Store | AppConfig>) => Effect.provide(e, services);
+  const services = yield* Effect.context<Store | AppConfig | ChildProcessSpawner.ChildProcessSpawner>();
+  const local = <A, E>(e: Effect.Effect<A, E, Store | AppConfig | ChildProcessSpawner.ChildProcessSpawner>) => Effect.provide(e, services);
   return {
     exists: (sessionId) => Effect.flatMap(opencode.connect, (oc) => (oc ? oc.exists(sessionId) : Effect.succeed(false))),
     inbox: local(inbox),
@@ -55,6 +57,7 @@ const owner = Effect.gen(function* () {
           return { ...(yield* snapshot(collector.view, true)), action }; })),
     brief: (b) => local(brief(b.audience ?? "owner", b.afterSeq, b.throughSeq)),
     outlook: local(Effect.all({ forecasts, comparisons, commits })),
+    db: (req) => local(Effect.flatMap(AppConfig, (c) => queryOwnerDb(c.databases, req))),
   } satisfies Owner; });
 
 /** An item in full, as the page and the owner tools see it: its fix attempts, staging comparison, and visual lenses. */

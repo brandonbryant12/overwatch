@@ -15,8 +15,9 @@
 import { Context, Effect, Layer, Option, Predicate, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { createHash, randomBytes } from "node:crypto";
-import { AppConfig, LIMITS } from "./config.ts";
+import { AppConfig, LIMITS, type DbTarget } from "./config.ts";
 import { clock } from "./clock.ts";
+import { queryDb, queryOwnerDb, type DbRequest } from "./db.ts";
 import { type ApiError, Refusal } from "./errors.ts";
 import { run as exec } from "./exec.ts";
 import { afterFinding } from "./inbox.ts";
@@ -27,14 +28,15 @@ export { Refusal };
 
 export interface Code { readonly expected: string | null; readonly read: string | null; readonly deployed: boolean }
 export type Origin = "telemetry" | "code" | "history" | "generated";
-export interface RunContext { readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>; readonly repo: string | null; readonly deadline: number; readonly role?: "investigator" | "challenger" | "responder" | "fixer"; readonly options?: Options }
+export interface RunContext { readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>; readonly repo: string | null; readonly deadline: number; readonly role?: "investigator" | "challenger" | "responder" | "fixer"; readonly options?: Options; readonly databases?: ReadonlyArray<DbTarget> }
 export interface Options { readonly commits: ReadonlyArray<{ sha: string; subject: string }>; readonly keys: ReadonlyArray<{ path: string; key: string }> }
 export type Proposal = { kind: "revert"; commit: string } | { kind: "setting"; path: string; key: string } | { kind: "abstain" };
-export interface Owner { readonly exists: (sessionId: string) => Effect.Effect<boolean>; readonly inbox: Effect.Effect<unknown, ApiError | Full>; readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>; readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>; readonly brief?: (args: { audience?: string; afterSeq?: number; throughSeq?: number }) => Effect.Effect<unknown, ApiError | Full>; readonly outlook?: Effect.Effect<unknown, ApiError | Full> }
+export interface Owner { readonly exists: (sessionId: string) => Effect.Effect<boolean>; readonly inbox: Effect.Effect<unknown, ApiError | Full>; readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>; readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>; readonly brief?: (args: { audience?: string; afterSeq?: number; throughSeq?: number }) => Effect.Effect<unknown, ApiError | Full>; readonly outlook?: Effect.Effect<unknown, ApiError | Full>; readonly db?: (args: DbRequest) => Effect.Effect<unknown, Refusal | ApiError | Full> }
 export interface Piece { readonly handle: string; readonly source: string; readonly text: string }
 
 const Int = Schema.Int, Text = Schema.String, Texts = Schema.Array(Schema.String), Empty = Schema.Record(Schema.String, Schema.Never);
 const Telemetry = Schema.Struct({ source: Text, since: Schema.optionalKey(Schema.NullOr(Int)), until: Schema.optionalKey(Schema.NullOr(Int)), query: Schema.optionalKey(Text), cursor: Schema.optionalKey(Text) });
+const DbInput = Schema.Struct({ target: Text, query: Schema.optionalKey(Text), params: Schema.optionalKey(Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Number, Schema.Boolean]))), sql: Schema.optionalKey(Text) });
 const CodeSearch = Schema.Struct({ pattern: Text, path: Schema.optionalKey(Text) });
 const CodeRead = Schema.Struct({ path: Text, from: Int, to: Int });
 const History = Schema.Struct({ path: Schema.optionalKey(Text), ref: Schema.optionalKey(Text) });
@@ -52,6 +54,7 @@ const FindingShape = Schema.Struct({ ...findingFields, claims: Schema.Array(Sche
 /** Every tool: its name, what the model is told, and its parameters. */
 export const TOOLS = [
   { name: "ow_telemetry", description: "Read this investigation's telemetry as evidence pieces, 50 per call, oldest first. To read further, call again with the same arguments and cursor set to nextCursor.", parameters: Telemetry },
+  { name: "ow_db", description: "Run a read-only named query (or SELECT when allowed) on a configured database target.", parameters: DbInput },
   { name: "ow_code_search", description: "Search the pinned commit for literal text.", parameters: CodeSearch },
   { name: "ow_code_read", description: "Read lines of a file at the pinned commit.", parameters: CodeRead },
   { name: "ow_history", description: "Commits at the pinned commit.", parameters: History },
@@ -319,10 +322,26 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         if (!id) return yield* refusal("id is required");
         return yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) }); });
 
+      const runDb = Effect.fnUntraced(function* (run: RunRow, context: RunContext, args: unknown) {
+        const input = yield* decode(DbInput, args, "ow_db");
+        const dbs = context.databases ?? [];
+        const target = dbs.find((d) => d.name === input.target || d.id === input.target);
+        if (!target) return yield* refusal(`unknown database target "${clean(input.target, 60)}" for this environment; available: ${dbs.map((d) => d.name).join(", ") || "none"}`);
+        const res = yield* queryDb(target, input);
+        const page = yield* deliver(run, `db:${target.name}`, [res.output], "telemetry");
+        return { pieces: page.pieces, truncated: res.truncated || page.truncated }; });
+
+      const ownerDb = Effect.fnUntraced(function* (sessionId: string, args: unknown, o: Owner | null) {
+        if (!o || !(yield* o.exists(sessionId))) return yield* refusal("OpenCode does not know this session");
+        const input = yield* decode(DbInput, args, "ow_db");
+        if (o.db) return yield* o.db(input);
+        return cfg._tag === "Some" ? yield* queryOwnerDb(cfg.value.databases, input) : yield* refusal("ow_db is not available"); });
+
       const call = Effect.fnUntraced(function* (sessionId: unknown, name: string, args: unknown, owner: Owner | null) {
         if (!Predicate.isString(sessionId) || !sessionId) return yield* refusal("the call carries no OpenCode session id");
         if (OWNER_TOOLS.includes(name)) return yield* ownerCall(sessionId, name, args, owner);
         const run = yield* store.get<RunRow>("SELECT id, session_id, state, calls, code FROM runs WHERE session_id = ?", sessionId);
+        if (!run && name === "ow_db") return yield* ownerDb(sessionId, args, owner);
         const context = run ? contexts.get(run.id) : undefined;
         if (!run || run.state !== "active" || !context) return yield* refusal("this session has no active Overwatch investigation");
         if (run.calls >= maxCalls) return yield* refusal(`this investigation has used its ${maxCalls} tool calls`);
@@ -337,6 +356,8 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         switch (name) {
           case "ow_telemetry":
             return yield* telemetry(run, context, args);
+          case "ow_db":
+            return yield* runDb(run, context, args);
           case "ow_code_read":
           case "ow_code_search":
           case "ow_history":

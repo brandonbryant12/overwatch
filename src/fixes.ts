@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { delimiter, posix } from "node:path";
 import { converse, Slots, withSlot } from "./agents.ts";
-import { AppConfig, FORBIDDEN, LIMITS, type Fixes as Policy } from "./config.ts";
+import { AppConfig, FORBIDDEN, LIMITS, policyFor, type Fixes as Policy } from "./config.ts";
 import { clock } from "./clock.ts";
 import { type ApiError, apiError, FixStop, type Full, Superseded, type Unavailable, Unresolved } from "./errors.ts";
 import { effect, run as exec, scratch } from "./exec.ts";
@@ -71,9 +71,9 @@ export const admission = Effect.fnUntraced(function* (incident: string, jobId: s
   const job = yield* sql.get<{ subject: string; kind: string; state: string; result: string | null }>("SELECT subject, kind, state, result FROM jobs WHERE id = ?", jobId);
   if (!job) return yield* apiError(404, `no investigation ${jobId}`);
   if (job.kind !== "investigation" || job.subject !== incident) return yield* apiError(409, "that investigation is not about this problem");
-  const policy = config.apps[inc.app]?.fixes;
+  const policy = config.apps[inc.app]?.fixes, fixMode = policyFor(config, inc.app, inc.environment).fixMode;
   const halt = (state: "blocked" | "ineligible", reason: string) => ({ state, reason: reason as string | null, inc, policy, previous: null as string | null, deployed: null as string | null });
-  if (!policy) return halt("blocked", `fix proposals are not enabled for ${inc.app} (apps.${inc.app}.fixes)`);
+  if (!policy || fixMode === "off") return halt("blocked", !policy ? `fix proposals are not enabled for ${inc.app} (apps.${inc.app}.fixes)` : `fix proposals are turned off for ${inc.app}/${inc.environment} (policy.fixMode)`);
   const gates = yield* gatesStand(inc.app);
   if (gates) return halt("blocked", gates);
   const r = job.result ? (JSON.parse(job.result) as { verdict: string; observed: boolean; planned: number; counts: Record<string, number>; challenge: { outcome: string | null } | null }) : null;
@@ -265,9 +265,9 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
       /** Eligibility, the fixer's selection, derivation, the whole-tree check and the isolated verify: a verified candidate, or the rule that stopped it. */
       const drive = Effect.fnUntraced(function* (start: Row) {
         let r = start;
-        const policy = config.apps[r.app]?.fixes;
+        const policy = config.apps[r.app]?.fixes, fixMode = policyFor(config, r.app, r.environment).fixMode;
         const outcome = yield* Effect.exit(Effect.gen(function* () {
-            if (!policy) return yield* stop("blocked", `fix proposals are no longer enabled for ${r.app}`);
+            if (!policy || fixMode === "off") return yield* stop("blocked", !policy ? `fix proposals are no longer enabled for ${r.app}` : `fix proposals are turned off for ${r.app}/${r.environment}`);
             if (r.state === "queued") {
               const again = yield* admission(r.incident, r.job_id);
               if (again.state !== "queued") return void (yield* update(r, again.state, again.reason));
@@ -292,7 +292,7 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
               }
               yield* update(r, "verified", null, { head: r.candidate }, { verification: results, repo: (yield* repository(r.app)).name });
               // Opt-in human-on-the-loop: open a draft PR automatically using the exact same permit-gated pipeline (never merges).
-              if (policy.mode === "draft_pr") yield* publish(r.id).pipe(Effect.ignore);
+              if (fixMode === "draft_pr") yield* publish(r.id).pipe(Effect.ignore);
             }}));
         if (Exit.isSuccess(outcome)) return;
         if (Cause.hasInterruptsOnly(outcome.cause)) return yield* Effect.failCause(outcome.cause as Cause.Cause<never>);
@@ -504,41 +504,24 @@ export class Fixes extends Context.Service<Fixes, FixesShape>()("overwatch/Fixes
         return { passed, attempted: 2, verified }; });
 
       return Fixes.of({
-        request: (incident, b) =>
-          local(Effect.gen(function* () {
-              const jobId = Predicate.isString(b.jobId) ? b.jobId : "";
-              yield* admission(incident, jobId); // 404 and 409 before a receipt is taken
-              return { op: "fix", subject: incident, body: { jobId }, change: (w) => local(Effect.map(admit(w, incident, jobId, "manual"), (attemptId) => ({ attemptId }))) } satisfies Plan<{ attemptId: string }, Full>; })),
-        /**
-         * The owner's keypress. Its transaction checks that the item is the one the owner was shown (basisSeq), the
-         * problem is not put away, both gates stand and the deployment is still the finding's; then the host steps run
-         * while the owner waits (publish()). A repeat reconciles and continues.
-         */
-        publication: (id, basis) =>
-          local(Effect.gen(function* () {
-              yield* row(id);
-              return {
-                op: "publish",
-                subject: id,
-                body: {},
-                change: (w) =>
-                  local(Effect.gen(function* () {
-                      const r = yield* row(id), decided = (yield* store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = ?", r.incident))?.decided_seq;
-                      if (basis === null) return yield* apiError(400, "basisSeq (the item's decidedSeq you were shown) is required to publish");
-                      if (basis !== decided) return yield* apiError(409, "this item was decided again since you looked; look again");
-                      const why = yield* unready(r);
-                      if (why) return yield* apiError(409, why);
-                      yield* w.event("publish", r.incident as Clean, { id });
-                      return { attemptId: id } as { attemptId: string; fix?: View }; })),
-                after: () => local(Effect.map(publish(id), (fix) => ({ attemptId: id, fix }))),
-              } satisfies Plan<{ attemptId: string; fix?: View }, Full>; })),
+        request: (incident, b) => local(Effect.gen(function* () {
+          const jobId = Predicate.isString(b.jobId) ? b.jobId : "";
+          yield* admission(incident, jobId); // 404 and 409 before a receipt is taken
+          return { op: "fix", subject: incident, body: { jobId }, change: (w) => local(Effect.map(admit(w, incident, jobId, "manual"), (attemptId) => ({ attemptId }))) } satisfies Plan<{ attemptId: string }, Full>; })),
+        publication: (id, basis) => local(Effect.gen(function* () {
+          yield* row(id);
+          return { op: "publish", subject: id, body: {}, change: (w) => local(Effect.gen(function* () {
+            const r = yield* row(id), decided = (yield* store.get<{ decided_seq: number }>("SELECT decided_seq FROM incidents WHERE id = ?", r.incident))?.decided_seq;
+            if (basis === null) return yield* apiError(400, "basisSeq (the item's decidedSeq you were shown) is required to publish");
+            if (basis !== decided) return yield* apiError(409, "this item was decided again since you looked; look again");
+            const why = yield* unready(r);
+            if (why) return yield* apiError(409, why);
+            yield* w.event("publish", r.incident as Clean, { id });
+            return { attemptId: id } as { attemptId: string; fix?: View }; })),
+            after: () => local(Effect.map(publish(id), (fix) => ({ attemptId: id, fix }))) } satisfies Plan<{ attemptId: string; fix?: View }, Full>; })),
         view: (id) => view(id),
-        forItem: (incident) => Effect.gen(function* () {
-            const out: View[] = [];
-            for (const r of yield* store.all<Row>("SELECT * FROM fixes WHERE incident = ? ORDER BY seq", incident)) out.push(toView(r, config.apps[r.app]?.fixes?.base ?? "main"));
-            return out; }),
-        tick,
-        calibrate: (investigationPassed) => local(calibrate(investigationPassed)),}); }),
+        forItem: (incident) => Effect.map(store.all<Row>("SELECT * FROM fixes WHERE incident = ? ORDER BY seq", incident), (rows) => rows.map((r) => toView(r, config.apps[r.app]?.fixes?.base ?? "main"))),
+        tick, calibrate: (investigationPassed) => local(calibrate(investigationPassed)), }); }),
   ).pipe(Layer.provide(Layer.mergeAll(Tools.layer, OpenCodeClient.layer, Slots.layer)));
 }
 
@@ -743,25 +726,17 @@ const FIXER_NUDGE = "You have not filed a proposal yet. File exactly one ow_prop
 
 /** A disposable calibration repository: settings.json with timeout 30, then a commit lowering it to 3. */
 const seed = Effect.fnUntraced(function* (repo: string) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  return yield* Effect.acquireUseRelease(
-    scratch("ow-calibration-work-"),
-    (work) =>
-      Effect.gen(function* () {
-        const git = (...a: string[]) => exec("git", ["-C", work, "-c", "user.name=Overwatch", "-c", "user.email=overwatch@localhost", "-c", "commit.gpgsign=false", ...a]);
-        yield* git("init", "-q");
-        yield* fs.writeFileString(path.join(work, "settings.json"), '{"timeout":30,"retries":2}\n');
-        yield* git("add", "settings.json");
-        yield* git("commit", "-qm", "stable timeout");
-        const stable = (yield* git("rev-parse", "HEAD")).stdout.trim();
-        yield* fs.writeFileString(path.join(work, "settings.json"), '{"timeout":3,"retries":2}\n');
-        yield* git("commit", "-qam", "lower the timeout");
-        const regressed = (yield* git("rev-parse", "HEAD")).stdout.trim();
-        yield* exec("git", ["init", "-q", "--bare", repo]);
-        yield* exec("git", ["-C", repo, "fetch", "-q", work, "HEAD:refs/heads/main"]);
-        return { stable, regressed };
-      }).pipe(Effect.orDie),
-    (work) => fs.remove(work, { recursive: true, force: true }).pipe(Effect.ignore),
-  );
-});
+  const fs = yield* FileSystem.FileSystem, path = yield* Path.Path;
+  return yield* Effect.acquireUseRelease(scratch("ow-calibration-work-"), (work) => Effect.gen(function* () {
+    const git = (...a: string[]) => exec("git", ["-C", work, "-c", "user.name=Overwatch", "-c", "user.email=overwatch@localhost", "-c", "commit.gpgsign=false", ...a]);
+    yield* git("init", "-q");
+    yield* fs.writeFileString(path.join(work, "settings.json"), '{"timeout":30,"retries":2}\n');
+    yield* git("add", "settings.json");
+    yield* git("commit", "-qm", "stable timeout");
+    const stable = (yield* git("rev-parse", "HEAD")).stdout.trim();
+    yield* fs.writeFileString(path.join(work, "settings.json"), '{"timeout":3,"retries":2}\n');
+    yield* git("commit", "-qam", "lower the timeout");
+    const regressed = (yield* git("rev-parse", "HEAD")).stdout.trim();
+    yield* exec("git", ["init", "-q", "--bare", repo]);
+    yield* exec("git", ["-C", repo, "fetch", "-q", work, "HEAD:refs/heads/main"]);
+    return { stable, regressed }; }).pipe(Effect.orDie), (work) => fs.remove(work, { recursive: true, force: true }).pipe(Effect.ignore)); });

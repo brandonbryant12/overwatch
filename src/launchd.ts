@@ -4,10 +4,11 @@
  * path (OW_LAUNCHD_PLIST) and the launchctl executable (OW_LAUNCHCTL) can be replaced, so tests use a temporary
  * home and a fake; nothing here runs with privileges.
  */
-import { Effect, FileSystem, PlatformError, Predicate, Schema } from "effect";
+import { Effect, FileSystem, PlatformError, Predicate } from "effect";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readMergedConfig } from "./config.ts";
 import { ConfigError, LaunchdError } from "./errors.ts";
 import { run as exec } from "./exec.ts";
 
@@ -45,9 +46,7 @@ export function plist(configFile: string, dataDir: string, env: NodeJS.ProcessEn
  * keychain first.
  */
 export const envSecrets = Effect.fn("launchd.envSecrets")(function* (configFile: string) {
-  const fs = yield* FileSystem.FileSystem;
-  const text = yield* fs.readFileString(configFile);
-  const value = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))(text);
+  const value = yield* readMergedConfig(configFile);
   const found: string[] = [];
   const walk = (v: unknown, path: string) => {
     if (Predicate.isString(v) && v.startsWith("env:")) found.push(`${path} (${v})`);
