@@ -31,7 +31,7 @@ export type Origin = "telemetry" | "code" | "history" | "generated";
 export interface RunContext { readonly telemetry: Readonly<Record<string, ReadonlyArray<{ at: number; text: string; origin?: Origin }>>>; readonly repo: string | null; readonly deadline: number; readonly role?: "investigator" | "challenger" | "responder" | "fixer"; readonly options?: Options; readonly databases?: ReadonlyArray<DbTarget> }
 export interface Options { readonly commits: ReadonlyArray<{ sha: string; subject: string }>; readonly keys: ReadonlyArray<{ path: string; key: string }> }
 export type Proposal = { kind: "revert"; commit: string } | { kind: "setting"; path: string; key: string } | { kind: "abstain" };
-export interface Owner { readonly exists: (sessionId: string) => Effect.Effect<boolean>; readonly inbox: Effect.Effect<unknown, ApiError | Full>; readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>; readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>; readonly brief?: (args: { audience?: string; afterSeq?: number; throughSeq?: number }) => Effect.Effect<unknown, ApiError | Full>; readonly outlook?: Effect.Effect<unknown, ApiError | Full>; readonly db?: (args: DbRequest) => Effect.Effect<unknown, Refusal | ApiError | Full> }
+export interface Owner { readonly exists: (sessionId: string) => Effect.Effect<boolean>; readonly inbox: Effect.Effect<unknown, ApiError | Full>; readonly get: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly handoff?: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly search: (text: string) => Effect.Effect<unknown, ApiError | Full>; readonly act: (id: string, body: Record<string, unknown>) => Effect.Effect<unknown, ApiError | Full>; readonly correct?: (args: { app: string; text: string; incident?: string; environment?: string }) => Effect.Effect<unknown, ApiError | Full>; readonly investigate?: (id: string) => Effect.Effect<unknown, ApiError | Full>; readonly brief?: (args: { audience?: string; afterSeq?: number; throughSeq?: number }) => Effect.Effect<unknown, ApiError | Full>; readonly outlook?: Effect.Effect<unknown, ApiError | Full>; readonly db?: (args: DbRequest) => Effect.Effect<unknown, Refusal | ApiError | Full> }
 export interface Piece { readonly handle: string; readonly source: string; readonly text: string }
 
 const Int = Schema.Int, Text = Schema.String, Texts = Schema.Array(Schema.String), Empty = Schema.Record(Schema.String, Schema.Never);
@@ -43,7 +43,7 @@ const History = Schema.Struct({ path: Schema.optionalKey(Text), ref: Schema.opti
 const ChallengeInput = Schema.Struct({ outcome: Schema.Literals(["upheld", "disproved", "unsure"]), reason: Text, evidence: Texts });
 const Kind = Schema.Literals(["revert", "setting", "abstain"]);
 const ProposalInput = Schema.Struct({ kind: Kind, commit: Schema.optionalKey(Text), path: Schema.optionalKey(Text), key: Schema.optionalKey(Text) });
-const GetInput = Schema.Struct({ id: Text }), SearchInput = Schema.Struct({ text: Text });
+const GetInput = Schema.Struct({ id: Text }), SearchInput = Schema.Struct({ text: Text }), CorrectInput = Schema.Struct({ app: Text, text: Text, incident: Schema.optionalKey(Text), environment: Schema.optionalKey(Text) });
 const ActInput = Schema.Struct({ id: Text, action: Schema.Literals(["done", "later", "never", "undo", "seen"]), until: Schema.optionalKey(Int), when: Schema.optionalKey(Text), reason: Schema.optionalKey(Text), actionSeq: Schema.optionalKey(Int), throughSeq: Schema.optionalKey(Int) });
 const BriefInput = Schema.Struct({ audience: Schema.optionalKey(Schema.Literals(["owner", "team"])), afterSeq: Schema.optionalKey(Int), throughSeq: Schema.optionalKey(Int) });
 const Claim = Schema.Struct({ statement: Text, evidence: Texts });
@@ -65,14 +65,17 @@ export const TOOLS = [
     parameters: ProposalInput,},
   { name: "ow_inbox", description: "The owner's inbox: four groups of problem IDs, as the page shows them.", parameters: Empty },
   { name: "ow_get", description: "One problem in full: counts, way out, history, findings, investigations, questions.", parameters: GetInput },
+  { name: "ow_handoff", description: "Structured investigation context pack for a problem: checkout, deploy SHAs, diff hints, grounded evidence handles, env policy, MCP tools, starter prompt.", parameters: GetInput },
   { name: "ow_search", description: "Literal, case-insensitive search over problems, evidence, findings and questions.", parameters: SearchInput },
   { name: "ow_act", description: "Put a problem away (done, later, never), undo the current way out (with its actionSeq), or mark it seen. Confirm with the owner first.", parameters: ActInput },
+  { name: "ow_correct", description: "Persist a cleaned playbook correction for an app (optionally tied to an incident or environment) and rebuild playbooks. Confirm with the owner first.", parameters: CorrectInput },
+  { name: "ow_investigate", description: "Queue a manual multi-reader investigation + challenger pass for a problem (including watch-only environments). Confirm with the owner first.", parameters: GetInput },
   { name: "ow_brief", description: "Owner or team brief of what changed between two event sequence numbers.", parameters: BriefInput },
   { name: "ow_outlook", description: "Capacity forecasts, staging-vs-production comparisons, and recent watched commits with risk flags.", parameters: Empty },
   { name: "ow_finding", description: "File the finding. Each claim cites evidence handles you were given.", parameters: FindingInput },
 ] as const;
 export type ToolName = (typeof TOOLS)[number]["name"];
-const OWNER_TOOLS: ReadonlyArray<string> = ["ow_inbox", "ow_get", "ow_search", "ow_act", "ow_brief", "ow_outlook"];
+const OWNER_TOOLS: ReadonlyArray<string> = ["ow_inbox", "ow_get", "ow_handoff", "ow_search", "ow_act", "ow_correct", "ow_investigate", "ow_brief", "ow_outlook"];
 
 /** A tool's parameters as a closed JSON Schema object, for MCP's tools/list. */
 export const inputSchema = (parameters: Schema.Top): Record<string, unknown> => {
@@ -300,27 +303,26 @@ export class Tools extends Context.Service<Tools, ToolsShape>()("overwatch/Tools
         if (yield* store.get("SELECT 1 FROM runs WHERE session_id = ?", sessionId)) return yield* refusal("this session is run by Overwatch; owner tools are for the owner's own sessions");
         if (!o || !(yield* o.exists(sessionId))) return yield* refusal("OpenCode does not know this session");
         if (name === "ow_inbox") return yield* decode(Empty, args, name).pipe(Effect.andThen(o.inbox));
-        if (name === "ow_get") {
+        if (name === "ow_get" || name === "ow_handoff" || name === "ow_investigate") {
           const { id } = yield* decode(GetInput, args, name);
-          if (!id) return yield* refusal("id is required");
-          return yield* o.get(id);
+          const fn = name === "ow_get" ? o.get : name === "ow_handoff" ? o.handoff : o.investigate;
+          return !id ? yield* refusal("id is required") : fn ? yield* fn(id) : yield* refusal(`${name} is not available`);
+        }
+        if (name === "ow_correct") {
+          const c = yield* decode(CorrectInput, args, name);
+          return !c.app || !c.text.trim() ? yield* refusal("app and text are required") : o.correct ? yield* o.correct(c) : yield* refusal("ow_correct is not available");
         }
         if (name === "ow_search") {
           const { text } = yield* decode(SearchInput, args, name);
-          if (!text) return yield* refusal("text is required");
-          return yield* o.search(text);
+          return text ? yield* o.search(text) : yield* refusal("text is required");
         }
         if (name === "ow_brief") {
           const b = yield* decode(BriefInput, args, name);
           return o.brief ? yield* o.brief(b) : yield* refusal("ow_brief is not available");
         }
-        if (name === "ow_outlook") {
-          yield* decode(Empty, args, name);
-          return o.outlook ? yield* o.outlook : yield* refusal("ow_outlook is not available");
-        }
+        if (name === "ow_outlook") { yield* decode(Empty, args, name); return o.outlook ? yield* o.outlook : yield* refusal("ow_outlook is not available"); }
         const { id, until, ...rest } = yield* decode(ActInput, args, name);
-        if (!id) return yield* refusal("id is required");
-        return yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) }); });
+        return id ? yield* o.act(id, { ...rest, ...(until === undefined ? {} : { untilMs: until }) }) : yield* refusal("id is required"); });
 
       const runDb = Effect.fnUntraced(function* (run: RunRow, context: RunContext, args: unknown) {
         const input = yield* decode(DbInput, args, "ow_db");

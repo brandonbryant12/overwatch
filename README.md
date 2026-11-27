@@ -54,8 +54,10 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
   read-only SQL inspection (`postgres`, `mysql`, `sqlite`) scoped per `(app, env)` with named parameterized templates
   by default, opt-in guarded `allowSelect`, engine-level read-only flags, env-only credentials, and strict refusal for
   fixers; answers to your questions where you asked them; "Was this right?" corrections that reach the next
-  investigation; briefs to copy; local notifications; and owner MCP tools (`ow_inbox`, `ow_get`, `ow_search`, `ow_act`,
-  `ow_brief`, `ow_outlook`, `ow_db`) plus a skill so any OpenCode session of yours can read and act on the inbox.
+  investigation; briefs to copy; local notifications; and owner-only MCP tools (`ow_inbox`, `ow_get`, `ow_handoff`,
+  `ow_search`, `ow_act`, `ow_correct`, `ow_investigate`, `ow_brief`, `ow_outlook`, `ow_db`) plus a skill so any local
+  OpenCode session of yours can pull grounded handoff packs, queue on-demand investigations (including watch-only envs),
+  teach new playbook rules, and act on the inbox end to end.
 - **Per-app / per-env policies & fixes**: configure `investigate`, `readings`, `notify`, `critical` (including names
   beyond `prod`/`production`), `fixMode` (`"off"`, `"propose"`, `"draft_pr"`), and `genUi` via an `env -> app -> global`
   cascade. For an app that opts into `fixes`, a confirmed problem that began after one deployment gets a verified

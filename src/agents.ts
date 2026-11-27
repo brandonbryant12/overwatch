@@ -218,6 +218,8 @@ export interface AgentsShape {
   readonly investigate: (subject: string) => Effect.Effect<Plan<{ jobId: string; subject: string }, Full>, ApiError>;
   /** POST /v2/items/:id/corrections */
   readonly correct: (subject: string, body: Record<string, unknown>) => Effect.Effect<Plan<{ app: string; seq: number; jobId: unknown; text: string }>, ApiError>;
+  /** MCP ow_correct: persist a cleaned playbook correction and rebuild playbooks. */
+  readonly addCorrection: (input: { app: string; text: string; incident?: string; environment?: string }) => Effect.Effect<{ app: string; subject: string; seq: number; jobId: string; text: string }, ApiError | Full>;
   /** POST /v2/notifications/:id/retry */
   readonly retry: (id: string) => Effect.Effect<Plan<{ id: string; requeued: boolean }>, ApiError>;
   /** GET /v2/jobs/:id */
@@ -515,6 +517,12 @@ export class Agents extends Context.Service<Agents, AgentsShape>()("overwatch/Ag
             Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : apiError(503, `OpenCode did not open the session (${errorText(Cause.squash(cause), 200)}); check that it is running, then try again`))); });
 
       const incident = (subject: string) => store.get("SELECT 1 FROM incidents WHERE id = ?", subject);
+      const writeCorrection = (w: Writer, app: string, subject: string, text: string, jobId?: string) => Effect.gen(function* () {
+        const seq = yield* w.next(), date = new Date(clock.now()).toISOString().slice(0, 10), line = clean(text.trim(), 1000), jid = jobId ?? id("job");
+        if (!jobId) yield* w.run("INSERT INTO jobs (id, kind, subject, title, state, reason, created_seq) VALUES (?, 'correction', ?, ?, 'completed', NULL, ?)", jid as Clean, subject as Clean, clean(line, 200), seq);
+        if ((yield* w.event("corrected", subject as Clean, { date, seq, app, subject, jobId: jid, text: line })) !== seq) return yield* Effect.die(new Error("the event log moved during a correction"));
+        yield* w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (?, ?, ?, ?, ?, ?)", seq, app as Clean, subject as Clean, jid as Clean, line as Clean, date as Clean);
+        return { app, seq, jobId: jid, text: line as string }; });
 
       // At start: the playbooks are rebuilt, and every scheduled notice gets its live deadline.
       yield* playbooks;
@@ -547,10 +555,20 @@ export class Agents extends Context.Service<Agents, AgentsShape>()("overwatch/Ag
           if (!Predicate.isString(text) || !text.trim() || text.length > 1000) return yield* apiError(400, "text is required (at most 1,000 characters)");
           return { op: "correct", subject, body: { jobId, text }, change: (w) => Effect.gen(function* () {
             const app = (yield* store.get<{ app: string }>("SELECT app FROM incidents WHERE id = ?", subject))!.app;
-            const seq = yield* w.next(), date = new Date(clock.now()).toISOString().slice(0, 10), line = clean(text.trim(), 1000);
-            if ((yield* w.event("corrected", subject as Clean, { date, seq, app, subject, jobId, text: line })) !== seq) return yield* Effect.die(new Error("the event log moved during a correction"));
-            yield* w.run("INSERT INTO corrections (seq, app, subject, job_id, text, date) VALUES (?, ?, ?, ?, ?, ?)", seq, app as Clean, subject as Clean, jobId as Clean, line as Clean, date as Clean);
-            return { app, seq, jobId: jobId as unknown, text: line as string }; }), after: (r) => Effect.as(playbooks, r) } satisfies Plan<{ app: string; seq: number; jobId: unknown; text: string }>; }),
+            return yield* writeCorrection(w, app, subject, text, jobId as string); }), after: (r) => Effect.as(playbooks, r) } satisfies Plan<{ app: string; seq: number; jobId: unknown; text: string }>; }),
+        addCorrection: ({ app, text, incident: incId, environment }) => local(Effect.gen(function* () {
+          if (!(app in config.apps)) return yield* apiError(404, `unknown app ${app}`);
+          if (!text.trim() || text.length > 1000) return yield* apiError(400, "text is required (at most 1,000 characters)");
+          let subject = environment === undefined ? `app:${app}` : `env:${app}/${environment}`, jobId: string | undefined;
+          if (incId !== undefined) {
+            const inc = yield* store.get<{ app: string; environment: string }>("SELECT app, environment FROM incidents WHERE id = ?", incId);
+            if (!inc) return yield* apiError(404, `no item ${incId}`);
+            if (inc.app !== app || (environment !== undefined && inc.environment !== environment)) return yield* apiError(400, `incident ${incId} belongs to ${inc.app}/${inc.environment}`);
+            subject = incId;
+            jobId = (yield* store.get<{ id: string }>("SELECT id FROM jobs WHERE kind = 'investigation' AND subject = ? AND state = 'completed' ORDER BY created_seq DESC LIMIT 1", incId))?.id;
+          } else if (environment !== undefined && !config.watchers.some((w) => w.app === app && w.environment === environment)) return yield* apiError(404, `unknown environment ${app}/${environment}`);
+          const saved = yield* store.tx((w) => writeCorrection(w, app, subject, text, jobId));
+          return yield* Effect.as(playbooks, { ...saved, subject }); })),
         retry: (nid) => Effect.gen(function* () {
           if (!(yield* store.get("SELECT 1 FROM notifications WHERE id = ?", nid))) return yield* apiError(404, `no notification ${nid}`);
           return { op: "retry", subject: nid, body: {}, change: (w) => Effect.gen(function* () {

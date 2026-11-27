@@ -163,7 +163,7 @@ export const buildHandoff = Effect.fn("buildHandoff")(function* (id: string) {
   const config = yield* AppConfig;
   const inc = yield* sql.get<{ id: string; app: string; environment: string; title: string; severity: string; count: number; exact: number }>("SELECT id, app, environment, title, severity, count, exact FROM incidents WHERE id = ?", id);
   if (!inc) return yield* apiError(404, `no item ${id}`);
-  const app = config.apps[inc.app], checkout = app?.checkout ?? "";
+  const app = config.apps[inc.app], checkout = app?.checkout ?? "", policy = policyFor(config, inc.app, inc.environment);
   const deployRow = yield* sql.get<{ revision: string; previous: string | null }>("SELECT revision, previous FROM deploys WHERE app = ? AND environment = ? ORDER BY seq DESC LIMIT 1", inc.app, inc.environment);
   const deploy = deployRow?.revision ?? null, previousDeploy = deployRow?.previous ?? null;
   const ev = yield* evidenceOf(id), handles = ev.slice(0, 12).map((e) => ({ handle: e.handle, source: e.source, origin: e.origin ?? "generated", text: clean(e.text, 240) }));
@@ -171,7 +171,7 @@ export const buildHandoff = Effect.fn("buildHandoff")(function* (id: string) {
   const fix = yield* sql.get<{ id: string; state: string; data: string }>("SELECT id, state, data FROM fixes WHERE incident = ? ORDER BY seq DESC LIMIT 1", id);
   const res = inv?.result ? (JSON.parse(inv.result) as { verdict: string; counts: Record<string, number>; planned: number; challenge: { outcome: string | null } | null }) : null;
   const hasDb = config.databases.some((d) => d.app === inc.app && d.environment === inc.environment);
-  const mcpTools = ["ow_get", "ow_search", "ow_brief", "ow_outlook", ...(hasDb ? ["ow_db"] : []), "ow_act"];
+  const mcpTools = ["ow_get", "ow_handoff", "ow_search", "ow_brief", "ow_outlook", ...(hasDb ? ["ow_db"] : []), "ow_investigate", "ow_correct", "ow_act"];
   const commands: string[] = [];
   if (checkout && deploy && previousDeploy) commands.push(`git -C ${checkout} log --stat ${previousDeploy}..${deploy}`, `git -C ${checkout} diff ${previousDeploy}..${deploy}`);
   else if (checkout && deploy) commands.push(`git -C ${checkout} show --stat ${deploy}`);
@@ -181,16 +181,16 @@ export const buildHandoff = Effect.fn("buildHandoff")(function* (id: string) {
   const prompt = [
     `Overwatch focus: ${id} (${inc.app}/${inc.environment} — ${inc.title}).`,
     `Count: ${inc.exact ? inc.count : `${inc.count}+`}${checkout ? ` | Checkout: ${checkout}` : ""}${deploy ? ` | Deployed: ${deploy.slice(0, 12)}${previousDeploy ? ` (prev ${previousDeploy.slice(0, 12)})` : ""}` : ""}.`,
-    `Investigation: ${verdictLine}. Fix: ${fixLine}.`,
+    `Investigation: ${verdictLine}. Fix: ${fixLine}. Policy: investigate=${policy.investigate}, readings=${policy.readings}, fixMode=${policy.fixMode}.`,
     ...(handles.length ? [`Top evidence: ${handles.slice(0, 4).map((h) => `${h.handle} (${h.origin}/${h.source})`).join(", ")}.`] : []),
-    `Read full detail with ow_get {"id": "${id}"}; search history with ow_search; check outlook/commits with ow_outlook${hasDb ? "; run read-only DB queries with ow_db" : ""}; ask the owner before any ow_act.`,
+    `Read full detail with ow_get {"id": "${id}"}; search history with ow_search; check outlook/commits with ow_outlook${hasDb ? "; run read-only DB queries with ow_db" : ""}; ask the owner before ow_investigate, ow_correct, or ow_act.`,
   ].join("\n");
   const markdown = [
     `# Overwatch Handoff: ${inc.title}`, `- **ID**: \`${id}\` | **Target**: \`${inc.app}/${inc.environment}\` | **Count**: ${inc.exact ? inc.count : `${inc.count}+`} (${inc.severity})`,
     ...(checkout ? [`- **Checkout**: \`${checkout}\``] : []), ...(deploy ? [`- **Revision**: \`${deploy}\`${previousDeploy ? ` (previous \`${previousDeploy}\`)` : ""}`] : []),
-    `- **Investigation**: ${verdictLine} | **Fix**: ${fixLine}`,
+    `- **Investigation**: ${verdictLine} | **Fix**: ${fixLine} | **Policy**: investigate=${policy.investigate}, readings=${policy.readings}, fixMode=${policy.fixMode}`,
     ...(handles.length ? ["", "## Evidence Handles", ...handles.map((h) => `- \`${h.handle}\` (${h.origin}, ${h.source}): ${h.text}`)] : []),
     ...(commands.length ? ["", "## Local Commands", "```sh", ...commands, "```"] : []),
-    "", "## Overwatch MCP Tools", `Use \`ow_get {"id":"${id}"}\`, \`ow_search\`, \`ow_brief\`, \`ow_outlook\`${hasDb ? ", `ow_db`" : ""}, and confirm before \`ow_act\`.`,
+    "", "## Overwatch MCP Tools", `Use \`ow_get {"id":"${id}"}\`, \`ow_handoff {"id":"${id}"}\`, \`ow_search\`, \`ow_brief\`, \`ow_outlook\`${hasDb ? ", `ow_db`" : ""}, and confirm before \`ow_investigate\`, \`ow_correct\`, or \`ow_act\`.`,
   ].join("\n");
-  return { id, title: inc.title, app: inc.app, env: inc.environment, checkout, deploy, previousDeploy, handles, mcpTools, commands, prompt, markdown }; });
+  return { id, title: inc.title, app: inc.app, env: inc.environment, policy, checkout, deploy, previousDeploy, handles, mcpTools, commands, prompt, markdown }; });

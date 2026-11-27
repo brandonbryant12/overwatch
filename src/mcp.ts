@@ -13,6 +13,7 @@ import { McpProtocol, McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { ChildProcessSpawner } from "effect/process";
 import { timingSafeEqual } from "node:crypto";
+import { Agents } from "./agents.ts";
 import { brief } from "./brief.ts";
 import { Collector } from "./collect.ts";
 import { AppConfig } from "./config.ts";
@@ -20,7 +21,7 @@ import { queryOwnerDb } from "./db.ts";
 import { secret } from "./exec.ts";
 import { Fixes } from "./fixes.ts";
 import { act, basisOf, detail, inbox, search } from "./inbox.ts";
-import { lensesFor } from "./lens.ts";
+import { buildHandoff, lensesFor } from "./lens.ts";
 import { OpenCodeClient } from "./opencode.ts";
 import { commits, comparisons, forecasts } from "./outlook.ts";
 import { errorText } from "./redact.ts";
@@ -32,7 +33,7 @@ import { inputSchema, type Owner, TOOLS, Tools } from "./tools.ts";
 const Failure = Schema.Struct({ error: Schema.String });
 
 /** Each tool as MCP lists it: its closed input schema from its parameters Schema. Arguments reach `Tools.call` as sent. */
-const READS = new Set(["ow_telemetry", "ow_db", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_search", "ow_brief", "ow_outlook"]);
+const READS = new Set(["ow_telemetry", "ow_db", "ow_code_search", "ow_code_read", "ow_history", "ow_inbox", "ow_get", "ow_handoff", "ow_search", "ow_brief", "ow_outlook"]);
 const definitions = TOOLS.map((t) =>
   Tool.dynamic(t.name, { description: t.description, parameters: inputSchema(t.parameters), success: Schema.Unknown, failure: Failure }).annotate(Tool.Readonly, READS.has(t.name)));
 const toolkit = Toolkit.make(...definitions);
@@ -41,20 +42,18 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 /** The owner's tools call exactly what the page calls: the inbox, an item in full, search, and a decision. */
 const owner = Effect.gen(function* () {
-  const collector = yield* Collector;
-  const fixes = yield* Fixes;
-  const opencode = yield* OpenCodeClient;
+  const agents = yield* Agents, collector = yield* Collector, fixes = yield* Fixes, opencode = yield* OpenCodeClient;
   const services = yield* Effect.context<Store | AppConfig | ChildProcessSpawner.ChildProcessSpawner>();
   const local = <A, E>(e: Effect.Effect<A, E, Store | AppConfig | ChildProcessSpawner.ChildProcessSpawner>) => Effect.provide(e, services);
   return {
     exists: (sessionId) => Effect.flatMap(opencode.connect, (oc) => (oc ? oc.exists(sessionId) : Effect.succeed(false))),
     inbox: local(inbox),
     get: (id) => local(Effect.provideService(itemOf(id), Fixes, fixes)),
+    handoff: (id) => local(buildHandoff(id)),
     search: (text) => local(search(text)),
-    act: (id, body) =>
-      local(Effect.gen(function* () {
-          const action = yield* act(id, body, yield* basisOf(body));
-          return { ...(yield* snapshot(collector.view, true)), action }; })),
+    act: (id, body) => local(Effect.gen(function* () { const action = yield* act(id, body, yield* basisOf(body)); return { ...(yield* snapshot(collector.view, true)), action }; })),
+    correct: (c) => agents.addCorrection(c),
+    investigate: (id) => local(Effect.flatMap(agents.investigate(id), (p) => Effect.flatMap(Store, (s) => s.tx((w) => p.change(w, ""))))),
     brief: (b) => local(brief(b.audience ?? "owner", b.afterSeq, b.throughSeq)),
     outlook: local(Effect.all({ forecasts, comparisons, commits })),
     db: (req) => local(Effect.flatMap(AppConfig, (c) => queryOwnerDb(c.databases, req))),
