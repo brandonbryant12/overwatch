@@ -12,7 +12,7 @@ import { clean, truncate } from "./redact.ts";
 
 const MAX_SQL = 2_000, TIMEOUT_MS = 10_000, MAX_BYTES = 65_536;
 const SAFE_PARAM = /^[A-Za-z0-9._:@/-]{1,120}$/;
-const FORBIDDEN_SQL = /\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|execute|prepare|deallocate|attach|detach|pragma|vacuum|reindex|lock|set|reset|replace|merge|upsert|load_extension|into\s+outfile|into\s+dumpfile|load_file|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|dblink|query_to_xml)\b/i;
+const FORBIDDEN_SQL = /\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|execute|prepare|deallocate|attach|detach|pragma|vacuum|reindex|lock|set|set_config|reset|replace|merge|upsert|load_extension|into\s+outfile|into\s+dumpfile|load_file|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|pg_terminate_backend|pg_cancel_backend|lo_import|lo_export|dblink|query_to_xml)\b/i;
 
 /** Returns null when `sql` is a single read-only statement allowed by `ow_db`, or the reason it is refused. */
 export function checkSql(sql: string): string | null {
@@ -25,7 +25,7 @@ export function checkSql(sql: string): string | null {
   const body = s.replace(/;\s*$/, "");
   if (body.includes(";")) return "only a single SQL statement is allowed";
   if (!/^(select|with|explain|show)\b/i.test(body)) return "only SELECT, WITH, EXPLAIN, or SHOW statements are allowed";
-  if (/\bexplain\b(?:\s+analyze\b|\s*\([^)]*\banalyze\b)/i.test(body)) return "EXPLAIN ANALYZE is not allowed";
+  if (/\bexplain\b(?:\s+analy[sz]e\b|\s*\([^)]*\banaly[sz]e\b)/i.test(body)) return "EXPLAIN ANALYZE is not allowed";
   const bad = FORBIDDEN_SQL.exec(body);
   return bad ? `disallowed SQL keyword or function: ${bad[1]}` : null;
 }
@@ -43,7 +43,7 @@ export function renderQuery(template: string, declared?: ReadonlyArray<string>, 
     else return { error: `parameter "${k}" must be a finite number, boolean, or safe identifier string` };
   }
   let missing: string | null = null;
-  const sql = template.replace(/(^|[^:]):([A-Za-z0-9_]+)/g, (m, pre: string, name: string) => (name in bound ? `${pre}${bound[name]}` : ((missing ??= name), m)));
+  const sql = template.replace(/(^|[^:]):([A-Za-z_][A-Za-z0-9_]*)/g, (m, pre: string, name: string) => (name in bound ? `${pre}${bound[name]}` : ((missing ??= name), m)));
   if (missing) return { error: `undeclared parameter placeholder ":${missing}"` };
   const err = checkSql(sql);
   return err ? { error: err } : { sql: sql.trim().replace(/;\s*$/, "") };

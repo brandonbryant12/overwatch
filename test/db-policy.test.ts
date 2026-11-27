@@ -175,6 +175,8 @@ test("checkSql attack corpus and renderQuery parameter binding", () => {
     "VACUUM", "REINDEX", "LOCK TABLE orders", "SET statement_timeout = 0", "RESET ALL",
     "\\! id", "SELECT 1 \\g /tmp/out", ".shell id", "SELECT 1\n.shell id",
     "EXPLAIN ANALYZE SELECT 1", "EXPLAIN (ANALYZE, BUFFERS) SELECT 1",
+    "EXPLAIN ANALYSE SELECT 1", "EXPLAIN (ANALYSE true) SELECT 1",
+    "SELECT set_config('statement_timeout', '0', false)",
     "SELECT pg_read_file('/etc/passwd')", "SELECT pg_ls_dir('.')",
     "SELECT pg_terminate_backend(123)", "SELECT pg_cancel_backend(123)",
     "SELECT lo_import('/etc/passwd')", "SELECT lo_export(1, '/tmp/x')",
@@ -182,10 +184,10 @@ test("checkSql attack corpus and renderQuery parameter binding", () => {
     "SELECT load_extension('/tmp/evil.so')", "SELECT 1\0",
   ]) assert.ok(checkSql(bad) !== null, `expected rejected: ${bad}`);
 
-  // renderQuery safe binding + Postgres ::type preservation
-  const r = renderQuery("SELECT id::text FROM orders WHERE service = :svc AND limit_n <= :n AND active = :ok", ["svc", "n", "ok"], { svc: "checkout-api", n: 25, ok: true });
+  // renderQuery safe binding + Postgres ::type preservation + ISO timestamp literals
+  const r = renderQuery("SELECT id::text FROM orders WHERE created_at >= '2026-01-01T00:00:00Z' AND service = :svc AND limit_n <= :n AND active = :ok", ["svc", "n", "ok"], { svc: "checkout-api", n: 25, ok: true });
   assert.ok("sql" in r);
-  assert.equal(r.sql, "SELECT id::text FROM orders WHERE service = 'checkout-api' AND limit_n <= 25 AND active = TRUE");
+  assert.equal(r.sql, "SELECT id::text FROM orders WHERE created_at >= '2026-01-01T00:00:00Z' AND service = 'checkout-api' AND limit_n <= 25 AND active = TRUE");
   // Rejections
   assert.ok("error" in renderQuery("SELECT * FROM t WHERE id = :id", ["id"], {}));
   assert.ok("error" in renderQuery("SELECT * FROM t WHERE id = :id", ["id"], { id: 1, extra: 2 }));
