@@ -36,7 +36,7 @@ import * as BriefSheet from "./components/BriefSheet.ts";
 import * as CorrectSheet from "./components/CorrectSheet.ts";
 import * as Dock from "./components/Dock.ts";
 import * as Finder from "./components/Finder.ts";
-import { BriefIcon, KeyboardIcon, SearchIcon, ThemeIcon } from "./components/Glyphs.ts";
+import { BriefIcon, KeyboardIcon, OverviewIcon, SearchIcon, ThemeIcon } from "./components/Glyphs.ts";
 import * as HandoffSheet from "./components/HandoffSheet.ts";
 import * as Inbox from "./components/Inbox.ts";
 import * as KeysSheet from "./components/KeysSheet.ts";
@@ -48,7 +48,7 @@ import { buildOpenCodeHandoff } from "./handoff.ts";
 import * as m from "./model.ts";
 import { type ActionBody, Overwatch, ServiceEvents } from "./services/Overwatch.ts";
 import { PageWindow } from "./services/PageWindow.ts";
-import { Command, Dom, el, type H, Option, TaggedEnum, TaggedUnion, Update } from "./ui.ts";
+import { Command, Dom, el, type H, Mount, Option, TaggedEnum, TaggedUnion, Update } from "./ui.ts";
 
 // ---------------------------------------------------------------- model
 
@@ -63,6 +63,8 @@ const Command_ = Schema.Literals([
   "theme", "help", "open", "brief", "investigate", "correct", "fix", "publish", "copyHandoff", "handoffSheet", "lens",
 ]);
 const LensModeSchema = Schema.Literals(["auto", "ai", "derived"]);
+const CaughtUpSchema = Schema.Struct({ seq: Schema.Number, atMs: Schema.Number });
+const WhatsNewWindowSchema = Schema.Literals(["since", "24h"]);
 
 /** What is open over the page, what it was opened with, and the sheet's own state. */
 export const Overlay = TaggedUnion({
@@ -105,12 +107,20 @@ export const AppModel = Schema.Struct({
   lensMode: LensModeSchema,
   lensLoading: Schema.Boolean,
   aiLenses: Schema.Record(Schema.String, LensSpec),
+  /** Browser-remembered "What's new" caught-up checkpoint and window toggle. */
+  caughtUp: Schema.NullOr(CaughtUpSchema),
+  whatsNewWindow: WhatsNewWindowSchema,
   /** The bar's own state. */
   dock: Dock.Model,
 });
 export type AppModel = typeof AppModel.Type;
 
-export const AppProps = Schema.Struct({ initialTheme: Schema.NullOr(Theme), initialCollapsed: Collapsed, now: Sample });
+export const AppProps = Schema.Struct({
+  initialTheme: Schema.NullOr(Theme),
+  initialCollapsed: Collapsed,
+  initialCaughtUp: Schema.optional(Schema.NullOr(CaughtUpSchema)),
+  now: Sample,
+});
 export type AppProps = typeof AppProps.Type;
 
 // ---------------------------------------------------------------- messages
@@ -125,6 +135,9 @@ export const AppMessage = TaggedEnum({
   FailedStatus: {},
   // Keys and the top bar
   PressedKey: { command: Command_ },
+  ClickedOverview: {},
+  ClickedMarkCaughtUp: {},
+  ToggledWhatsNewWindow: {},
   ClickedFind: {},
   ClickedBrief: {},
   ClickedTheme: {},
@@ -356,13 +369,27 @@ export const Remember = Command.define("Remember", {
     }).pipe(Effect.ignore, Effect.as(AppMessage.CompletedRemember())),
 });
 
-const ScrollToTop = Command.define("ScrollToTop", {
+export const ScrollToTop = Command.define("ScrollToTop", {
   messages: [AppMessage.CompletedScrollToTop],
   execute: Effect.gen(function* () {
     const page = yield* PageWindow;
     yield* page.scrollToTop;
     return AppMessage.CompletedScrollToTop();
   }),
+});
+
+/** Plain left-click on `.brand` returns to Overview without a full page reload; middle/modifier clicks keep `href="/"`. */
+const BrandClick = Mount.defineStream("BrandClick", {
+  messages: [AppMessage.ClickedOverview],
+  execute: ({ element }) =>
+    Dom.streamFromEventFilterMapPreventDefault({
+      target: element,
+      type: "click",
+      filterMapEvent: (event) =>
+        event instanceof MouseEvent && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+          ? Option.some(AppMessage.ClickedOverview())
+          : Option.none(),
+    }),
 });
 
 // ---------------------------------------------------------------- update
@@ -405,6 +432,8 @@ export const init = (props: AppProps): Return => ({
     lensMode: "auto",
     lensLoading: false,
     aiLenses: {},
+    caughtUp: props.initialCaughtUp ?? null,
+    whatsNewWindow: "since",
     dock: Dock.init,
   },
 });
@@ -468,6 +497,8 @@ const foldStage = Update.foldChild({
         RequestedPublish: ({ fixId }) => AppMessage.RequestedPublish({ fixId }),
         ChangedLensMode: ({ mode }) => AppMessage.ChangedLensMode({ mode }),
         RequestedGenerateLens: () => AppMessage.RequestedGenerateLens(),
+        RequestedMarkCaughtUp: () => AppMessage.ClickedMarkCaughtUp(),
+        RequestedToggleWhatsNewWindow: () => AppMessage.ToggledWhatsNewWindow(),
         Copied: ({ text }) => AppMessage.CopiedText({ text }),
         FailedCopy: ({ reason }) => AppMessage.FailedCopy({ reason }),
       }),
@@ -721,6 +752,14 @@ const step = (model: AppModel, message: AppMessage): Return => {
       }
       return go(model);
     }
+    case "ClickedOverview": return go({ ...model, focus: null }, ScrollToTop());
+    case "ClickedMarkCaughtUp": {
+      if (model.snapshot === null) return go(model);
+      const caughtUp = { seq: model.snapshot.seq, atMs: model.snapshot.atMs };
+      return go({ ...model, caughtUp, whatsNewWindow: "since" }, Remember({ key: "ow-caught-up", value: JSON.stringify(caughtUp) }));
+    }
+    case "ToggledWhatsNewWindow":
+      return go({ ...model, whatsNewWindow: model.whatsNewWindow === "since" ? "24h" : "since" });
     case "ClickedFind": return openFind("");
     case "ClickedBrief": return openBrief();
     case "ClickedTheme": return toggleTheme();
@@ -932,6 +971,9 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
   const quiet = Math.round(silence(model.last, model.now) / 1000);
   const serverNow = m.serverNow(model.anchor, model.now.monoMs);
   const detail = detailOf(model);
+  const unseenCount = model.snapshot !== null && model.focus !== null
+    ? m.whatsNew(model.snapshot, model.caughtUp, serverNow ?? model.snapshot.atMs, "since").count
+    : 0;
   const overlay = model.overlay;
   const opened = String(model.opened);
   const sheet = () => {
@@ -988,7 +1030,7 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
           el(
             h,
             "a",
-            { class: "brand", attrs: { href: "/", "aria-label": "Overwatch" } },
+            { class: "brand", attrs: { href: "/", "aria-label": "Overwatch" }, on: [h.OnMount(BrandClick())] },
             el(h, "img", { attrs: { src: "logo.svg", alt: "", width: "28", height: "28" } }),
             el(h, "span", { class: "wordmark" }, "Overwatch", el(h, "i", {}, ".")),
           ),
@@ -1016,6 +1058,19 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
             h,
             "div",
             { class: "tools" },
+            el(
+              h,
+              "button",
+              {
+                class: ["tool-button", "overview-btn", model.focus === null && "active"],
+                attrs: { type: "button", "data-open-overview": "", title: "Overview", "aria-label": "Overview" },
+                on: [h.OnClick(AppMessage.ClickedOverview())],
+              },
+              OverviewIcon(h),
+              el(h, "span", {}, "Overview"),
+              unseenCount > 0 && model.focus !== null &&
+                el(h, "span", { class: "unseen-dot", attrs: { "data-unseen-count": String(unseenCount) } }, String(unseenCount)),
+            ),
             el(
               h,
               "button",
@@ -1071,6 +1126,8 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
               lensMode: model.lensMode,
               lensLoading: model.lensLoading,
               cachedAiLens: model.focus !== null ? (model.aiLenses[model.focus] ?? null) : null,
+              caughtUp: model.caughtUp,
+              whatsNewWindow: model.whatsNewWindow,
             },
             toParentMessage: (message) => AppMessage.GotStageMessage({ message }),
           }),

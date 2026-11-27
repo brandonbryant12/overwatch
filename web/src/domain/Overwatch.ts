@@ -31,7 +31,12 @@ export const Incident = Schema.Struct({
   group: Maybe(Schema.String),
   decidedSeq: Maybe(Schema.Number),
   way: Maybe(Way),
-  returned: Maybe(Schema.Struct({ code: Schema.String, reason: Schema.String })),
+  returned: Maybe(Schema.Struct({
+    code: Schema.String,
+    reason: Schema.String,
+    seq: Maybe(Schema.Number),
+    causeSeq: Maybe(Schema.Number),
+  })),
   seenSeq: Maybe(Schema.Number),
   firstSeq: Schema.Number,
   lastSeq: Schema.Number,
@@ -49,6 +54,17 @@ export const Reading = Schema.Struct({
   okMs: Schema.NullOr(Schema.Number),
 });
 
+export const EnvPolicy = Schema.Struct({
+  investigate: Maybe(Schema.Boolean),
+  readings: Maybe(Schema.Number),
+  notify: Maybe(Schema.Boolean),
+  critical: Maybe(Schema.Boolean),
+  fixMode: Maybe(Schema.String),
+  genUi: Maybe(Schema.Boolean),
+  databases: Maybe(Schema.Array(Schema.String)),
+});
+export type EnvPolicy = typeof EnvPolicy.Type;
+
 export const Environment = Schema.Struct({
   app: Schema.String,
   environment: Schema.String,
@@ -57,6 +73,7 @@ export const Environment = Schema.Struct({
   readings: Schema.Array(Reading),
   freshForMs: Schema.Number,
   excluded: Schema.Array(Schema.String),
+  policy: Maybe(EnvPolicy),
 });
 export type Environment = typeof Environment.Type;
 
@@ -117,6 +134,27 @@ export const Outlook = Schema.Struct({
 });
 export type Outlook = typeof Outlook.Type;
 
+export const Job = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  subject: Schema.String,
+  state: Schema.String,
+  sessionId: Maybe(Schema.String),
+  reason: Maybe(Schema.String),
+  verdict: Maybe(Schema.String),
+  seq: Maybe(Schema.Number),
+});
+export type Job = typeof Job.Type;
+
+export const SnapshotFix = Schema.Struct({
+  id: Schema.String,
+  incident: Schema.String,
+  state: Schema.String,
+  seq: Schema.Number,
+  prUrl: Maybe(Schema.String),
+});
+export type SnapshotFix = typeof SnapshotFix.Type;
+
 export const Snapshot = Schema.Struct({
   seq: Schema.Number,
   atMs: Schema.Number,
@@ -137,6 +175,8 @@ export const Snapshot = Schema.Struct({
   deploys: Schema.Array(Schema.Struct({ app: Schema.String, environment: Schema.String, revision: Schema.String, previous: Maybe(Schema.String), seq: Schema.Number })),
   outlook: Maybe(Outlook),
   causes: Schema.Array(Schema.Struct({ kind: Schema.String, sources: Schema.Array(Schema.String), fix: Maybe(Schema.String) })),
+  jobs: Maybe(Schema.Array(Job)),
+  fixes: Maybe(Schema.Array(SnapshotFix)),
 });
 export type Snapshot = typeof Snapshot.Type;
 
@@ -150,7 +190,12 @@ export type Decided = typeof Decided.Type;
 /** A heartbeat: the service is there, and its clock. */
 export const Heartbeat = Schema.Struct({ atMs: Schema.optional(Schema.Number) });
 
-export const Piece = Schema.Struct({ handle: Schema.String, source: Schema.String, text: Schema.String });
+export const Piece = Schema.Struct({
+  handle: Schema.String,
+  source: Schema.String,
+  text: Schema.String,
+  origin: Maybe(Schema.String),
+});
 export type Piece = typeof Piece.Type;
 
 export const Challenge = Schema.Struct({

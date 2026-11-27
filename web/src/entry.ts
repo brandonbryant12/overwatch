@@ -16,16 +16,26 @@ const Remembered = Schema.fromJsonString(Schema.Struct({
   quiet: Schema.optionalKey(Schema.Boolean),
 }));
 
+const RememberedCaughtUp = Schema.fromJsonString(Schema.Struct({
+  seq: Schema.Number,
+  atMs: Schema.Number,
+}));
+
 const flags = Effect.gen(function* () {
   const store = yield* KeyValueStore.KeyValueStore;
   const groups = yield* store.get("ow-groups").pipe(
     Effect.map((text) => Option.flatMap(Option.fromNullishOr(text), Schema.decodeUnknownOption(Remembered))),
     Effect.orElseSucceed(() => Option.none()),
   );
+  const caughtUp = yield* store.get("ow-caught-up").pipe(
+    Effect.map((text) => Option.flatMap(Option.fromNullishOr(text), Schema.decodeUnknownOption(RememberedCaughtUp))),
+    Effect.orElseSucceed(() => Option.none()),
+  );
   const remembered = Option.getOrElse(groups, () => ({}));
   return {
     initialTheme: Schema.decodeUnknownOption(Theme)(document.documentElement.dataset.theme).pipe(Option.getOrNull),
     initialCollapsed: { needsYou: false, new: false, working: true, quiet: true, ...remembered },
+    initialCaughtUp: Option.getOrNull(caughtUp),
     now: { wallMs: yield* Clock.currentTimeMillis, monoMs: Number(yield* Clock.currentTimeNanos) / 1e6 },
   };
 });

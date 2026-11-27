@@ -53,21 +53,49 @@ export function buildOpenCodeHandoff(
   const incident = detail?.incident ?? snapshot?.incidents.find((x) => x.id === focus);
   const env = focus.startsWith("env:") ? snapshot?.environments.find((x) => x.subject === focus) : null;
   const source = focus.startsWith("src:") ? snapshot?.sources.find((x) => x.subject === focus) : null;
+  const targetEnv = env ?? (incident ? snapshot?.environments.find((x) => x.app === incident.app && x.environment === incident.environment) ?? null : null);
+
+  const detailPieces = new Map(
+    [
+      ...(detail?.findings.flatMap((f) => f.claims?.flatMap((c) => c.pieces ?? []) ?? []) ?? []),
+      ...(detail?.investigations.flatMap((inv) => inv.result?.challenge?.pieces ?? []) ?? []),
+    ].map((p) => [p.handle, p] as const),
+  );
+  const bundleHandles = new Map(
+    (bundle?.handles ?? [])
+      .filter((h): h is Exclude<typeof h, string> => typeof h !== "string")
+      .map((h) => [h.handle, h] as const),
+  );
+  const isDbHandle = (handle: string): boolean => {
+    const bh = bundleHandles.get(handle);
+    if (bh && m.isDbPiece(bh)) return true;
+    const dp = detailPieces.get(handle);
+    return dp ? m.isDbPiece(dp) : false;
+  };
+  const formatHandleTag = (handle: string): string => (isDbHandle(handle) ? `\`${handle}\` (db · read-only)` : `\`${handle}\``);
 
   const handles = bundle?.handles.length
     ? bundle.handles.map((h) => (typeof h === "string" ? h : h.handle))
     : [...knownHandles(detail)];
-  const mcpTools = bundle?.mcpTools.length
-    ? bundle.mcpTools
+  const hasDb = (targetEnv?.policy?.databases?.length ?? 0) > 0 || handles.some(isDbHandle);
+  const baseTools = bundle?.mcpTools.length
+    ? [...bundle.mcpTools]
     : ["ow_get", "ow_search", "ow_inbox", "ow_outlook", "ow_brief", "ow_act"];
+  const mcpTools = hasDb && !baseTools.includes("ow_db") ? [...baseTools, "ow_db"] : baseTools;
+
+  const policyPills = targetEnv ? m.policyTags(targetEnv) : [];
+  const policyText = policyPills.length > 0
+    ? `${policyPills.map((t) => t.label).join(" · ")}${targetEnv?.policy?.databases?.length ? ` (databases: ${targetEnv.policy.databases.join(", ")})` : ""}`
+    : null;
 
   if (preset === "mcp_only") {
     lines.push(`# Overwatch Handoff · \`${focus}\``);
     if (incident) lines.push(`- Subject: ${incident.title} (${incident.app}/${incident.environment})`);
     else if (env) lines.push(`- Environment: ${env.app}/${env.environment} (${env.health})`);
     else if (source) lines.push(`- Source: ${source.id} (${source.kind})`);
+    if (policyText) lines.push(`- Policy: ${policyText}`);
     if (bundle?.checkout) lines.push(`- Checkout: \`${bundle.checkout}\``);
-    if (handles.length) lines.push(`- Evidence handles: ${handles.slice(0, 8).map((h) => `\`${h}\``).join(", ")}`);
+    if (handles.length) lines.push(`- Evidence handles: ${handles.slice(0, 8).map(formatHandleTag).join(", ")}`);
     lines.push(`- MCP tools: ${mcpTools.map((t) => `\`${t}\``).join(", ")}`);
     lines.push("", presetGoal(preset, focus));
     return { text: lines.join("\n"), handleCount: handles.length, subject: focus };
@@ -88,6 +116,7 @@ export function buildOpenCodeHandoff(
     lines.push("");
     lines.push(`- **Subject**: \`${incident.id}\` (${incident.app} / ${incident.environment})`);
     lines.push(`- **Count**: ${m.countText(incident.count, incident.exact)} (${incident.exact ? "exact" : "lower bound"}, severity: ${incident.severity}, active: ${incident.active ? "yes" : "quiet"})`);
+    if (policyText) lines.push(`- **Policy**: ${policyText}`);
     if (bundle?.checkout) lines.push(`- **Checkout**: \`${bundle.checkout}\``);
     if (deploy) lines.push(`- **Deploy**: \`${deploy.slice(0, 12)}\`${prevDeploy ? ` (previous \`${prevDeploy.slice(0, 12)}\`)` : ""}`);
     if (latestInv) {
@@ -99,7 +128,7 @@ export function buildOpenCodeHandoff(
       lines.push(`- **Fix candidate**: \`${latestFix.id}\` (${m.FIX_LABEL[latestFix.state] ?? latestFix.state})${latestFix.pr ? ` · Draft #${latestFix.pr.number}` : ""}`);
     }
     if (handles.length > 0) {
-      lines.push("", "## Evidence Handles", ...handles.slice(0, 10).map((h) => `- \`${h}\``));
+      lines.push("", "## Evidence Handles", ...handles.slice(0, 10).map((h) => `- ${formatHandleTag(h)}`));
     }
     const commands = [
       ...(bundle?.commands ?? []),
@@ -121,12 +150,14 @@ export function buildOpenCodeHandoff(
     lines.push("");
     lines.push(`- **Subject**: \`${env.subject}\``);
     lines.push(`- **Health**: ${m.HEALTH_LABEL[env.health] ?? env.health}`);
+    if (policyText) lines.push(`- **Policy**: ${policyText}`);
     if (envSources.length) {
       lines.push(`- **Sources**: ${envSources.map((s) => `${s.id} (${s.failure ?? "ok"})`).join(", ")}`);
     }
     const repairs = envSources.map((s) => s.fix).filter((x): x is string => Boolean(x));
     if (repairs.length) lines.push("", "## Repair Commands", ...repairs.map((r) => `- \`${r}\``));
     lines.push("", "## Next Step", presetGoal(preset, env.subject));
+    if (hasDb) lines.push("", `_Overwatch MCP tools available: ${mcpTools.join(", ")}._`);
     return { text: lines.join("\n"), handleCount: 0, subject: env.subject };
   }
 

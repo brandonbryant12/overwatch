@@ -271,6 +271,30 @@ export function synthesizeIncidentLens(
     blocks.push({ kind: "metric_compare", title: "Delta", rows: comparisons });
   }
 
+  // 3b. Read-only database evidence summary (bounded key_facts with origin: "db").
+  const dbPieces = uniquePieces.filter((p) => m.isDbPiece(p));
+  if (dbPieces.length > 0) {
+    const dbFacts: Array<KeyFactItem> = dbPieces.slice(0, 3).map((p) => {
+      const parsed = m.parseDbEvidence(p.text);
+      let value: string;
+      if (parsed) {
+        const countStr = `${parsed.rows.length} row${parsed.rows.length === 1 ? "" : "s"}`;
+        const first = parsed.rows[0];
+        const preview = first
+          ? parsed.columns.slice(0, 2).map((col, idx) => `${col}=${first[idx] ?? ""}`).join(", ")
+          : "";
+        value = preview ? `${countStr} · ${preview.slice(0, 64)}` : countStr;
+      } else {
+        const firstLine = p.text.split("\n").map((l) => l.trim()).find(Boolean) ?? "read-only query output";
+        value = firstLine.length > 72 ? `${firstLine.slice(0, 71)}…` : firstLine;
+      }
+      return { label: p.source, value, origin: "db", handle: p.handle };
+    });
+    const dbBlock: LensBlock = { kind: "key_facts", title: "Database evidence", facts: dbFacts };
+    if (blocks.length >= 3) blocks[2] = dbBlock;
+    else blocks.push(dbBlock);
+  }
+
   // 4. Matching commits from outlook.commits (when commit watcher is active).
   const appCommits = (snapshot.outlook?.commits ?? []).filter((c) => c.app === incident.app).slice(0, 3);
   if (appCommits.length > 0) {

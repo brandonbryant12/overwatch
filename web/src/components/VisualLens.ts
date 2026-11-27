@@ -99,7 +99,7 @@ const renderSpanWaterfall = <M>(h: H<M>, block: SpanWaterfallBlock, valid: Reado
         h,
         "span",
         { class: "lens-submeta" },
-        ...[
+        [
           block.p50Ms != null ? `p50 ${block.p50Ms}ms` : null,
           block.slowMs != null ? `threshold ${block.slowMs}ms` : null,
         ].filter(Boolean).join(" · "),

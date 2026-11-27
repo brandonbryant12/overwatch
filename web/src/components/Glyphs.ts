@@ -154,6 +154,17 @@ export const SearchIcon = <M>(h: H<M>) =>
 export const ClearIcon = <M>(h: H<M>) =>
   Icon(h, "0 0 48 48", el(h, "circle", { attrs: { cx: "24", cy: "24", r: "18" } }), Path(h, "M16 24.5l5.5 5.5L32.5 19"));
 
+/** Compact 2x2 grid icon for Overview in topbar. */
+export const OverviewIcon = <M>(h: H<M>) =>
+  Icon(
+    h,
+    "0 0 20 20",
+    el(h, "rect", { attrs: { x: "3", y: "3", width: "6", height: "6", rx: "1.2" } }),
+    el(h, "rect", { attrs: { x: "11", y: "3", width: "6", height: "6", rx: "1.2" } }),
+    el(h, "rect", { attrs: { x: "3", y: "11", width: "6", height: "6", rx: "1.2" } }),
+    el(h, "rect", { attrs: { x: "11", y: "11", width: "6", height: "6", rx: "1.2" } }),
+  );
+
 /** Compact document icon for Brief in topbar. */
 export const BriefIcon = <M>(h: H<M>) =>
   Icon(h, "0 0 20 20", el(h, "rect", { attrs: { x: "4", y: "2.5", width: "12", height: "15", rx: "2" } }), Path(h, "M7 7h6M7 10.5h6M7 14h4"));

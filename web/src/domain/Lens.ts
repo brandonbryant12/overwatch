@@ -10,7 +10,7 @@ const Maybe = <S extends Schema.Top>(schema: S) => Schema.optional(Schema.NullOr
 export const LensTone = Schema.Literals(["neutral", "warn", "error", "ok"]);
 export type LensTone = typeof LensTone.Type;
 
-export const LensOrigin = Schema.Literals(["telemetry", "code", "history", "generated"]);
+export const LensOrigin = Schema.Literals(["telemetry", "code", "history", "generated", "db"]);
 export type LensOrigin = typeof LensOrigin.Type;
 
 export const CausalStep = Schema.Struct({

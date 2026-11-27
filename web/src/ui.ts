@@ -41,7 +41,7 @@ type Kid = Html | string | false | null | undefined;
  */
 export const el = <M>(
   h: H<M>,
-  tag: "a" | "article" | "b" | "button" | "code" | "dd" | "defs" | "del" | "details" | "dialog" | "div" | "dl" | "dt" | "em" | "figcaption" | "figure" | "footer" | "form" | "g" | "h1" | "h2" | "h3" | "h4" | "header" | "i" | "img" | "input" | "ins" | "kbd" | "label" | "li" | "line" | "linearGradient" | "main" | "nav" | "ol" | "option" | "p" | "path" | "polygon" | "polyline" | "pre" | "rect" | "section" | "select" | "small" | "span" | "stop" | "summary" | "svg" | "text" | "textarea" | "time" | "title" | "ul" | "circle",
+  tag: "a" | "article" | "b" | "button" | "code" | "dd" | "defs" | "del" | "details" | "dialog" | "div" | "dl" | "dt" | "em" | "figcaption" | "figure" | "footer" | "form" | "g" | "h1" | "h2" | "h3" | "h4" | "header" | "i" | "img" | "input" | "ins" | "kbd" | "label" | "li" | "line" | "linearGradient" | "main" | "nav" | "ol" | "option" | "p" | "path" | "polygon" | "polyline" | "pre" | "rect" | "section" | "select" | "small" | "span" | "stop" | "summary" | "svg" | "table" | "tbody" | "td" | "text" | "textarea" | "th" | "thead" | "time" | "title" | "tr" | "ul" | "circle",
   spec: {
     readonly class?: ReadonlyArray<string | false | null | undefined> | string;
     readonly attrs?: Readonly<Record<string, string | undefined>>;

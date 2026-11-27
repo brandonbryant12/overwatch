@@ -351,3 +351,413 @@ export function outlookNext(x: (Partial<Forecast> & Partial<Comparison>) | null 
 
 /** Subjects other than problems: environments ("env:") and sources ("src:"). */
 export const isIncident = (subject: string | null): subject is string => subject !== null && !subject.startsWith("env:") && !subject.startsWith("src:");
+
+// ---------------------------------------------------------------- What's new
+
+export interface CaughtUp {
+  readonly seq: number;
+  readonly atMs: number;
+}
+
+export type WhatsNewWindow = "since" | "24h";
+export type WhatsNewKind = "fix" | "returned" | "new" | "change" | "quieted";
+
+export interface WhatsNewItem {
+  readonly id: string;
+  readonly kind: WhatsNewKind;
+  readonly subject: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly badge?: string;
+  readonly tone: "ok" | "warn" | "error" | "accent" | "neutral";
+}
+
+export interface WhatsNewGroup {
+  readonly kind: WhatsNewKind;
+  readonly label: string;
+  readonly items: ReadonlyArray<WhatsNewItem>;
+}
+
+export interface WhatsNewSummary {
+  readonly window: WhatsNewWindow;
+  readonly sinceSeq: number;
+  readonly sinceAtMs: number;
+  readonly count: number;
+  readonly groups: ReadonlyArray<WhatsNewGroup>;
+  readonly overflow: ReadonlyArray<WhatsNewItem>;
+}
+
+/** Narrow structural view of a Snapshot needed for What's new computation. */
+export interface WhatsNewSnapshot {
+  readonly seq: number;
+  readonly atMs: number;
+  readonly environments: ReadonlyArray<{ readonly app: string; readonly environment: string }>;
+  readonly incidents: ReadonlyArray<{
+    readonly id: string;
+    readonly title: string;
+    readonly app: string;
+    readonly environment: string;
+    readonly severity: string;
+    readonly active: boolean;
+    readonly group?: string | null | undefined;
+    readonly decidedSeq?: number | null | undefined;
+    readonly way?: unknown;
+    readonly returned?: { readonly code: string; readonly reason: string; readonly seq?: number | null | undefined; readonly causeSeq?: number | null | undefined } | null | undefined;
+    readonly firstSeq: number;
+    readonly lastSeq: number;
+    readonly firstMs: number;
+    readonly lastMs: number;
+  }>;
+  readonly deploys: ReadonlyArray<{
+    readonly app: string;
+    readonly environment: string;
+    readonly revision: string;
+    readonly previous?: string | null | undefined;
+    readonly seq: number;
+  }>;
+  readonly outlook?: {
+    readonly commits?: ReadonlyArray<{
+      readonly app: string;
+      readonly sha: string;
+      readonly committedAt: number;
+      readonly subject: string;
+      readonly deployedEnvs: ReadonlyArray<string>;
+    }> | null | undefined;
+  } | null | undefined;
+  readonly fixes?: ReadonlyArray<{
+    readonly id: string;
+    readonly incident: string;
+    readonly state: string;
+    readonly seq: number;
+    readonly prUrl?: string | null | undefined;
+  }> | null | undefined;
+}
+
+const WHATS_NEW_GROUP_MAX = 3;
+const WHATS_NEW_VISIBLE_MAX = 8;
+
+/**
+ * Calm "What's new" digest computed purely from the latest snapshot and the browser's caught-up checkpoint.
+ * First visit (`caughtUp === null`) or sequence reset (`caughtUp.seq > snapshot.seq`) falls back to the last 24h.
+ * Bounded to at most 3 visible items per group and 8 visible items total; overflow goes behind a disclosure.
+ */
+export function whatsNew(
+  snapshot: WhatsNewSnapshot,
+  caughtUp: CaughtUp | null,
+  nowMs: number,
+  mode: WhatsNewWindow = "since",
+): WhatsNewSummary {
+  const use24h = mode === "24h" || caughtUp === null || caughtUp.seq > snapshot.seq;
+  const window: WhatsNewWindow = use24h ? "24h" : "since";
+  const sinceSeq = use24h ? 0 : caughtUp.seq;
+  const sinceAtMs = use24h ? nowMs - DAY : caughtUp.atMs;
+
+  const incById = new Map(snapshot.incidents.map((i) => [i.id, i]));
+  const rawGroups: Array<{ readonly kind: WhatsNewKind; readonly label: string; readonly items: ReadonlyArray<WhatsNewItem> }> = [];
+
+  // 1. Verified / Draft Fixes
+  const fixItems: Array<WhatsNewItem> = [...(snapshot.fixes ?? [])]
+    .filter((f) => f.seq > sinceSeq && (f.state === "verified" || ((f.state === "draft" || f.state === "published") && Boolean(f.prUrl))))
+    .sort((a, b) => b.seq - a.seq)
+    .map((f) => {
+      const inc = incById.get(f.incident);
+      return {
+        id: `fix:${f.id}`,
+        kind: "fix",
+        subject: f.incident,
+        title: inc?.title ?? f.incident,
+        detail: inc ? `${inc.app} / ${inc.environment}` : f.id,
+        badge: f.state === "verified" ? "⇧P ready" : "PR draft",
+        tone: "ok",
+      };
+    });
+  if (fixItems.length > 0) rawGroups.push({ kind: "fix", label: "Fixes ready", items: fixItems });
+
+  // 2. Returned
+  const returnedItems: Array<WhatsNewItem> = snapshot.incidents
+    .filter((inc) => inc.returned != null && !inc.way && (inc.returned.seq ?? inc.decidedSeq ?? inc.lastSeq) > sinceSeq)
+    .sort((a, b) => (b.returned?.seq ?? b.decidedSeq ?? b.lastSeq) - (a.returned?.seq ?? a.decidedSeq ?? a.lastSeq))
+    .map((inc) => ({
+      id: `ret:${inc.id}`,
+      kind: "returned",
+      subject: inc.id,
+      title: inc.title,
+      detail: `${inc.app} / ${inc.environment} · ${inc.returned!.reason}`,
+      badge: RETURN_LABEL[inc.returned!.code] ?? "Back",
+      tone: "accent",
+    }));
+  if (returnedItems.length > 0) rawGroups.push({ kind: "returned", label: "Returned", items: returnedItems });
+
+  // 3. New problems
+  const newItems: Array<WhatsNewItem> = snapshot.incidents
+    .filter((inc) => !inc.way && !inc.returned && inc.group !== "quiet" && (use24h ? inc.firstMs >= sinceAtMs : inc.firstSeq > sinceSeq))
+    .sort((a, b) => b.firstSeq - a.firstSeq)
+    .map((inc) => ({
+      id: `new:${inc.id}`,
+      kind: "new",
+      subject: inc.id,
+      title: inc.title,
+      detail: `${inc.app} / ${inc.environment} · ${ago(inc.firstMs, nowMs)}`,
+      badge: inc.severity,
+      tone: inc.severity === "error" ? "error" : inc.severity === "warn" ? "warn" : "neutral",
+    }));
+  if (newItems.length > 0) rawGroups.push({ kind: "new", label: "New problems", items: newItems });
+
+  // 4. Commits & deploys
+  const allCommits = snapshot.outlook?.commits ?? [];
+  const changeItems: Array<WhatsNewItem> = allCommits.length > 0
+    ? [...allCommits]
+      .filter((c) => c.committedAt > sinceAtMs)
+      .sort((a, b) => b.committedAt - a.committedAt)
+      .map((c) => {
+        const targetEnv = c.deployedEnvs[0] ?? snapshot.environments.find((e) => e.app === c.app)?.environment ?? "prod";
+        return {
+          id: `commit:${c.app}:${c.sha}`,
+          kind: "change",
+          subject: `env:${c.app}/${targetEnv}`,
+          title: c.subject,
+          detail: `${c.app} · ${c.sha.slice(0, 8)} · ${ago(c.committedAt, nowMs)}`,
+          badge: c.deployedEnvs.length > 0 ? c.deployedEnvs.join(", ") : "unreleased",
+          tone: c.deployedEnvs.length > 0 ? "ok" : "warn",
+        };
+      })
+    : [...snapshot.deploys]
+      .filter((d) => d.seq > sinceSeq)
+      .sort((a, b) => b.seq - a.seq)
+      .map((d) => ({
+        id: `deploy:${d.app}:${d.environment}:${d.seq}`,
+        kind: "change",
+        subject: `env:${d.app}/${d.environment}`,
+        title: `Deployed ${d.revision.slice(0, 8)}${d.previous ? ` ← ${d.previous.slice(0, 8)}` : ""}`,
+        detail: `${d.app} / ${d.environment}`,
+        badge: "deploy",
+        tone: "neutral",
+      }));
+  if (changeItems.length > 0) rawGroups.push({ kind: "change", label: allCommits.length > 0 ? "Commits" : "Deploys", items: changeItems });
+
+  // 5. Quieted
+  const quietedItems: Array<WhatsNewItem> = snapshot.incidents
+    .filter((inc) => !inc.active && !inc.way && inc.group === "quiet" && inc.lastSeq > sinceSeq)
+    .sort((a, b) => b.lastSeq - a.lastSeq)
+    .map((inc) => ({
+      id: `quiet:${inc.id}`,
+      kind: "quieted",
+      subject: inc.id,
+      title: inc.title,
+      detail: `${inc.app} / ${inc.environment} · quiet`,
+      badge: "quieted",
+      tone: "ok",
+    }));
+  if (quietedItems.length > 0) rawGroups.push({ kind: "quieted", label: "Quieted", items: quietedItems });
+
+  const groups: Array<WhatsNewGroup> = [];
+  const overflow: Array<WhatsNewItem> = [];
+  let visible = 0;
+
+  for (const g of rawGroups) {
+    const shownItems: Array<WhatsNewItem> = [];
+    for (const item of g.items) {
+      if (shownItems.length < WHATS_NEW_GROUP_MAX && visible < WHATS_NEW_VISIBLE_MAX) {
+        shownItems.push(item);
+        visible++;
+      } else {
+        overflow.push(item);
+      }
+    }
+    if (shownItems.length > 0) groups.push({ kind: g.kind, label: g.label, items: shownItems });
+  }
+
+  return { window, sinceSeq, sinceAtMs, count: visible + overflow.length, groups, overflow };
+}
+
+// ---------------------------------------------------------------- Policy pills
+
+export interface PolicyTag {
+  readonly id: "watch_only" | "draft_pr" | "db_ro" | "no_alerts" | "critical";
+  readonly label: string;
+  readonly title: string;
+  readonly tone: "muted" | "accent" | "cyan" | "warn";
+  readonly highSignal: boolean;
+}
+
+export interface PolicyLike {
+  readonly investigate?: boolean | null | undefined;
+  readonly readings?: number | null | undefined;
+  readonly notify?: boolean | null | undefined;
+  readonly critical?: boolean | null | undefined;
+  readonly fixMode?: string | null | undefined;
+  readonly genUi?: boolean | null | undefined;
+  readonly databases?: ReadonlyArray<string> | null | undefined;
+}
+
+/** At most 3 calm pills describing non-default per-environment behavior policies. */
+export function policyTags(env: { readonly environment: string; readonly policy?: PolicyLike | null | undefined }): ReadonlyArray<PolicyTag> {
+  const p = env.policy;
+  if (!p) return [];
+  const tags: Array<PolicyTag> = [];
+  if (p.fixMode === "draft_pr") {
+    tags.push({
+      id: "draft_pr",
+      label: "draft PR",
+      title: "Opens draft PRs after verification; never merges",
+      tone: "accent",
+      highSignal: true,
+    });
+  }
+  if ((p.databases?.length ?? 0) > 0) {
+    tags.push({
+      id: "db_ro",
+      label: "DB ro",
+      title: `Read-only SQL queries only (${p.databases!.join(", ")})`,
+      tone: "cyan",
+      highSignal: true,
+    });
+  }
+  if (p.investigate === false && (p.fixMode == null || p.fixMode === "off")) {
+    tags.push({
+      id: "watch_only",
+      label: "watch only",
+      title: "Monitors and counts only; auto-investigation and fixes are off",
+      tone: "muted",
+      highSignal: false,
+    });
+  }
+  if (p.critical === true && !/^(prod|production)$/i.test(env.environment)) {
+    tags.push({
+      id: "critical",
+      label: "critical",
+      title: "Treated as production-critical; active errors route to Needs you",
+      tone: "warn",
+      highSignal: false,
+    });
+  }
+  if (p.notify === false && p.critical === true) {
+    tags.push({
+      id: "no_alerts",
+      label: "no alerts",
+      title: "Critical environment with desktop notifications muted",
+      tone: "warn",
+      highSignal: false,
+    });
+  }
+  return tags.slice(0, 3);
+}
+
+// ---------------------------------------------------------------- Read-only DB evidence
+
+export const isDbPiece = (piece: { readonly origin?: string | null | undefined; readonly source: string }): boolean =>
+  piece.origin === "db" || /^db[:/]|^db$/i.test(piece.source);
+
+export interface DbTable {
+  readonly query?: string;
+  readonly columns: ReadonlyArray<string>;
+  readonly rows: ReadonlyArray<ReadonlyArray<string>>;
+}
+
+const formatDbCell = (value: unknown): string =>
+  value === null || value === undefined ? "NULL" : typeof value === "object" ? JSON.stringify(value) : String(value);
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
+
+const objectsToTable = (items: ReadonlyArray<Record<string, unknown>>, query?: string): DbTable | null => {
+  const colSet = new Set<string>();
+  for (const item of items) for (const key of Object.keys(item)) colSet.add(key);
+  const columns = [...colSet];
+  if (columns.length === 0) return null;
+  const rows = items.map((item) => columns.map((c) => formatDbCell(item[c])));
+  return { ...(query ? { query } : {}), columns, rows };
+};
+
+const splitPipeRow = (line: string): Array<string> => {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+};
+
+/**
+ * Parses read-only DB query output into a structured table when recognizable (JSON row arrays, `{ query?, columns?, rows? }`,
+ * TSV from psql/mysql, or pipe-separated tables with optional leading `-- SQL` / `SQL:` header). Returns null otherwise.
+ */
+export function parseDbEvidence(text: string): DbTable | null {
+  const raw = text.trim();
+  if (!raw) return null;
+
+  let query: string | undefined;
+  let body = raw;
+
+  const firstNl = raw.indexOf("\n");
+  if (firstNl > 0) {
+    const firstLine = raw.slice(0, firstNl).trim();
+    const sqlHeader = /^(?:--\s*|SQL:\s*)(.+)$/i.exec(firstLine);
+    if (sqlHeader && sqlHeader[1]?.trim()) {
+      query = sqlHeader[1].trim();
+      body = raw.slice(firstNl + 1).trim();
+    }
+  }
+  if (!body) return null;
+
+  // 1. JSON formats: array of objects, or { query?, columns?, rows? }
+  if (body.startsWith("[") || body.startsWith("{")) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (Array.isArray(parsed)) {
+        if (parsed.length > 0 && parsed.every(isPlainObject)) return objectsToTable(parsed, query);
+        return null;
+      }
+      if (isPlainObject(parsed)) {
+        const q = typeof parsed.query === "string" && parsed.query.trim() ? parsed.query.trim() : query;
+        const rawRows = parsed.rows;
+        if (!Array.isArray(rawRows)) return null;
+        if (Array.isArray(parsed.columns) && parsed.columns.length > 0) {
+          const columns = parsed.columns.map(String);
+          const rows = rawRows.map((r) =>
+            Array.isArray(r) ? columns.map((_, i) => formatDbCell(r[i]))
+              : isPlainObject(r) ? columns.map((c) => formatDbCell(r[c]))
+              : [formatDbCell(r)],
+          );
+          return { ...(q ? { query: q } : {}), columns, rows };
+        }
+        if (rawRows.length > 0 && rawRows.every(isPlainObject)) return objectsToTable(rawRows, q);
+        return null;
+      }
+    } catch {
+      // Not valid JSON; fall through to delimited table formats.
+    }
+  }
+
+  const lines = body.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return null;
+
+  // 2. TSV (psql -A -F \t, mysql --batch)
+  if (lines[0]!.includes("\t")) {
+    const columns = lines[0]!.split("\t").map((c) => c.trim());
+    if (columns.length >= 2 && columns.some(Boolean)) {
+      const rest = lines.slice(1).filter((l) => !/^[-+\t\s]+$/.test(l));
+      if (rest.length > 0 && rest.every((l) => l.includes("\t"))) {
+        const rows = rest.map((l) => {
+          const cells = l.split("\t");
+          return columns.map((_, i) => (cells[i] ?? "").trim());
+        });
+        return { ...(query ? { query } : {}), columns, rows };
+      }
+    }
+  }
+
+  // 3. Pipe-separated tables (Markdown / psql aligned)
+  if (lines[0]!.includes("|")) {
+    const columns = splitPipeRow(lines[0]!);
+    if (columns.length >= 2 && columns.every(Boolean)) {
+      const hasSep = /^[\s|+:-]+$/.test(lines[1]!) && lines[1]!.includes("-");
+      const dataLines = (hasSep ? lines.slice(2) : lines.slice(1)).filter((l) => !/^\(\d+\s+rows?\)$/i.test(l.trim()));
+      if (dataLines.every((l) => l.includes("|"))) {
+        const rows = dataLines.map((l) => {
+          const cells = splitPipeRow(l);
+          return columns.map((_, i) => cells[i] ?? "");
+        });
+        if (hasSep || rows.length > 0) return { ...(query ? { query } : {}), columns, rows };
+      }
+    }
+  }
+
+  return null;
+}

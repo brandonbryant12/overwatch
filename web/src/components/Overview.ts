@@ -13,6 +13,14 @@ export interface OverviewProps {
   readonly snapshot: Snapshot;
   readonly connection: m.Connection;
   readonly serverNow: number | null;
+  readonly caughtUp: m.CaughtUp | null;
+  readonly whatsNewWindow: m.WhatsNewWindow;
+}
+
+export interface OverviewHandlers<M> {
+  readonly onPick: (subject: string) => M;
+  readonly onMarkCaughtUp: () => M;
+  readonly onToggleWindow: () => M;
 }
 
 const freshnessPct = (readings: Snapshot["environments"][number]["readings"], freshForMs: number, now: number | null): number => {
@@ -25,20 +33,45 @@ const freshnessPct = (readings: Snapshot["environments"][number]["readings"], fr
   return Math.max(0, Math.min(100, Math.round((1 - oldestAge / freshForMs) * 100)));
 };
 
-export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow }: OverviewProps, onPick: (subject: string) => M) => {
+const WhatsNewRow = <M>(h: H<M>, item: m.WhatsNewItem, onPick: (subject: string) => M) =>
+  el(
+    h,
+    "li",
+    {},
+    el(
+      h,
+      "button",
+      {
+        class: ["wn-item", `wn-${item.tone}`],
+        attrs: { type: "button", "data-whats-new-item": item.id },
+        on: [h.Key(item.id), h.OnClick(onPick(item.subject))],
+      },
+      el(
+        h,
+        "span",
+        { class: "wn-body" },
+        el(h, "b", {}, item.title),
+        el(h, "span", { class: "wn-detail" }, item.detail),
+      ),
+      item.badge && el(h, "span", { class: ["wn-badge", `wn-badge-${item.tone}`] }, item.badge),
+      el(h, "span", { class: "ready-go", attrs: { "aria-hidden": "true" } }, "→"),
+    ),
+  );
+
+export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow, caughtUp, whatsNewWindow }: OverviewProps, handlers: OverviewHandlers<M>) => {
+  const { onPick, onMarkCaughtUp, onToggleWindow } = handlers;
   const g = snapshot.inbox.groups;
   const n = g.needsYou.length;
   const now = serverNow ?? snapshot.atMs;
   const regressions = (snapshot.outlook?.comparisons ?? []).filter((c) => c.state === "regression");
   const watchedCommits = (snapshot.outlook?.commits ?? []).slice(0, 4);
   const recentDeploys = [...snapshot.deploys].reverse().slice(0, 4);
+  const wn = m.whatsNew(snapshot, caughtUp, now, whatsNewWindow);
+  const hasCheckpoint = caughtUp !== null && caughtUp.seq <= snapshot.seq;
 
-  // Highlighted items ready for immediate owner keypress (production errors + returned items + staging regressions).
-  const urgentIds = [...g.needsYou.slice(0, 3), ...g.new.filter((id) => {
-    const inc = snapshot.incidents.find((x) => x.id === id);
-    return inc?.returned != null || /new in staging/i.test(inc?.title ?? "");
-  }).slice(0, 2)];
-  const urgent = [...new Set(urgentIds)]
+  // Keep Ready for your keypress strictly for active needsYou items so marking caught up never hides urgent errors.
+  const urgent = g.needsYou
+    .slice(0, 3)
     .map((id) => snapshot.incidents.find((x) => x.id === id))
     .filter((x): x is Snapshot["incidents"][number] => x !== undefined);
 
@@ -85,6 +118,7 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow }: Overvi
             const latestDeploy = [...snapshot.deploys].reverse().find((d) => d.app === e.app && d.environment === e.environment);
             const pct = connection === "live" && health !== "signed_out" && health !== "stale" ? freshnessPct(e.readings, e.freshForMs, now) : 0;
             const { left, signal } = ahead(snapshot, e, now);
+            const tags = m.policyTags(e);
             return el(
               h,
               "button",
@@ -122,10 +156,101 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow }: Overvi
                   { class: "pulse-ahead" },
                   left ? left.short : "staging check: new since release",
                 ),
+              tags.length > 0 &&
+                el(
+                  h,
+                  "div",
+                  { class: "pulse-policy" },
+                  ...tags.map((t) => el(h, "span", { class: ["policy-pill", `policy-${t.tone}`], attrs: { title: t.title } }, t.label)),
+                ),
             );
           }),
         ),
       ),
+    // Calm What's New card
+    el(
+      h,
+      "section",
+      { class: ["board-section", "whats-new", wn.count === 0 && "whats-new-empty"], attrs: { "data-whats-new": "" } },
+      wn.count === 0
+        ? el(
+          h,
+          "div",
+          { class: "whats-new-quiet" },
+          el(
+            h,
+            "span",
+            {},
+            hasCheckpoint && wn.window === "since"
+              ? `Caught up since ${m.ago(caughtUp.atMs, now)}`
+              : "Nothing new in the last 24h",
+          ),
+          hasCheckpoint &&
+            el(
+              h,
+              "button",
+              { class: "wn-toggle", attrs: { type: "button", "data-whats-new-toggle": "" }, on: [h.OnClick(onToggleWindow())] },
+              wn.window === "since" ? "Show last 24h" : "Since caught up",
+            ),
+        )
+        : el(
+          h,
+          "div",
+          { class: "whats-new-card" },
+          el(
+            h,
+            "header",
+            { class: "whats-new-head" },
+            el(
+              h,
+              "h3",
+              {},
+              wn.window === "24h" ? "What's new · last 24h" : `What's new · since ${m.ago(wn.sinceAtMs, now)}`,
+              el(h, "span", { class: "wn-count" }, ` (${wn.count})`),
+            ),
+            el(
+              h,
+              "div",
+              { class: "whats-new-actions" },
+              hasCheckpoint && wn.window === "24h" &&
+                el(
+                  h,
+                  "button",
+                  { class: "wn-toggle", attrs: { type: "button", "data-whats-new-toggle": "" }, on: [h.OnClick(onToggleWindow())] },
+                  "Since caught up",
+                ),
+              el(
+                h,
+                "button",
+                { class: "wn-mark", attrs: { type: "button", "data-mark-caught-up": "" }, on: [h.OnClick(onMarkCaughtUp())] },
+                "Mark caught up",
+              ),
+            ),
+          ),
+          el(
+            h,
+            "div",
+            { class: "wn-groups" },
+            ...wn.groups.map((grp) =>
+              el(
+                h,
+                "div",
+                { class: "wn-group", on: [h.Key(grp.kind)] },
+                el(h, "div", { class: "wn-group-label" }, grp.label),
+                el(h, "ul", { class: "wn-list" }, ...grp.items.map((item) => WhatsNewRow(h, item, onPick))),
+              )
+            ),
+          ),
+          wn.overflow.length > 0 &&
+            el(
+              h,
+              "details",
+              { class: "disclosure" },
+              el(h, "summary", {}, `Show ${wn.overflow.length} more`),
+              el(h, "ul", { class: ["wn-list", "wn-overflow-list"] }, ...wn.overflow.map((item) => WhatsNewRow(h, item, onPick))),
+            ),
+        ),
+    ),
     // Ready for your keypress
     urgent.length > 0 &&
       el(

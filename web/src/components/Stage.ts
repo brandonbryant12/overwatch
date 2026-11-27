@@ -26,6 +26,8 @@ import { Overview } from "./Overview.ts";
 import { VisualLens } from "./VisualLens.ts";
 
 const LensModeSchema = Schema.Literals(["auto", "ai", "derived"]);
+const CaughtUpSchema = Schema.Struct({ seq: Schema.Number, atMs: Schema.Number });
+const WhatsNewWindowSchema = Schema.Literals(["since", "24h"]);
 
 export const Props = Schema.Struct({
   snapshot: Schema.NullOr(Snapshot),
@@ -38,6 +40,8 @@ export const Props = Schema.Struct({
   lensMode: LensModeSchema,
   lensLoading: Schema.Boolean,
   cachedAiLens: Schema.NullOr(LensSpec),
+  caughtUp: Schema.NullOr(CaughtUpSchema),
+  whatsNewWindow: WhatsNewWindowSchema,
 });
 export type Props = typeof Props.Type;
 
@@ -57,6 +61,8 @@ export const Message = TaggedEnum({
   ClickedHandle: { handle: Schema.String },
   ClickedLensMode: { mode: LensModeSchema },
   ClickedGenerateLens: {},
+  ClickedMarkCaughtUp: {},
+  ClickedToggleWhatsNewWindow: {},
   SucceededCopyHandle: { handle: Schema.String },
   FailedCopyHandle: { reason: Schema.String },
 });
@@ -69,6 +75,8 @@ export const Events = TaggedEnum({
   RequestedPublish: { fixId: Schema.String },
   ChangedLensMode: { mode: LensModeSchema },
   RequestedGenerateLens: {},
+  RequestedMarkCaughtUp: {},
+  RequestedToggleWhatsNewWindow: {},
   Copied: { text: Schema.String },
   FailedCopy: { reason: Schema.String },
 });
@@ -99,6 +107,8 @@ export const update = (model: Model, message: Message): Step<Model, Message, Eve
     ClickedHandle: ({ handle }) => run(model, CopyHandle({ handle })),
     ClickedLensMode: ({ mode }) => emit(model, Events.ChangedLensMode({ mode })),
     ClickedGenerateLens: () => emit(model, Events.RequestedGenerateLens()),
+    ClickedMarkCaughtUp: () => emit(model, Events.RequestedMarkCaughtUp()),
+    ClickedToggleWhatsNewWindow: () => emit(model, Events.RequestedToggleWhatsNewWindow()),
     SucceededCopyHandle: ({ handle }) => emit(model, Events.Copied({ text: handle })),
     FailedCopyHandle: ({ reason }) => emit(model, Events.FailedCopy({ reason })),
   });
@@ -141,27 +151,75 @@ export function eventText(e: HistoryEvent): string {
 
 const Kbd = (h: H, key: string) => el(h, "kbd", {}, key);
 
-const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
-  pieces.map((p) =>
+const DB_TABLE_MAX_ROWS = 8;
+
+const DbTableView = (h: H, columns: ReadonlyArray<string>, rows: ReadonlyArray<ReadonlyArray<string>>) =>
+  el(
+    h,
+    "div",
+    { class: "db-table-wrap" },
     el(
       h,
-      "figure",
-      { class: "evidence" },
+      "table",
+      { class: "db-table" },
+      el(h, "thead", {}, el(h, "tr", {}, ...columns.map((col) => el(h, "th", { attrs: { scope: "col" } }, col)))),
       el(
         h,
-        "figcaption",
+        "tbody",
         {},
-        el(
-          h,
-          "button",
-          { class: "handle", attrs: { type: "button", "data-handle": p.handle, title: `${p.handle} · click to copy` }, on: [h.OnClick(Message.ClickedHandle({ handle: p.handle }))] },
-          m.shortHandle(p.handle),
-        ),
-        el(h, "span", {}, p.source),
+        ...rows.map((row) => el(h, "tr", {}, ...columns.map((_, idx) => el(h, "td", {}, row[idx] ?? "")))),
       ),
-      el(h, "pre", {}, p.text),
-    )
+    ),
   );
+
+const PolicyPills = (h: H, tags: ReadonlyArray<m.PolicyTag>) =>
+  tags.map((t) => el(h, "span", { class: ["pill", "policy-pill", `policy-${t.tone}`], attrs: { title: t.title } }, t.label));
+
+const Pieces = (h: H, pieces: ReadonlyArray<Piece>) =>
+  pieces.map((p) => {
+    const isDb = m.isDbPiece(p);
+    const table = isDb ? m.parseDbEvidence(p.text) : null;
+    const caption = el(
+      h,
+      "figcaption",
+      {},
+      el(
+        h,
+        "button",
+        { class: "handle", attrs: { type: "button", "data-handle": p.handle, title: `${p.handle} · click to copy` }, on: [h.OnClick(Message.ClickedHandle({ handle: p.handle }))] },
+        m.shortHandle(p.handle),
+      ),
+      isDb && el(h, "span", { class: ["pill", "policy-pill", "policy-cyan", "db-badge"], attrs: { title: "Read-only SQL query output" } }, "DB ro"),
+      el(h, "span", {}, p.source),
+    );
+    if (isDb && table !== null) {
+      const shown = table.rows.slice(0, DB_TABLE_MAX_ROWS);
+      const hidden = table.rows.slice(DB_TABLE_MAX_ROWS);
+      return el(
+        h,
+        "figure",
+        { class: ["evidence", "evidence-db"] },
+        caption,
+        table.query ? el(h, "code", { class: "db-query", attrs: { title: table.query } }, table.query) : null,
+        DbTableView(h, table.columns, shown),
+        hidden.length > 0 &&
+          el(
+            h,
+            "details",
+            { class: ["disclosure", "db-overflow"] },
+            el(h, "summary", {}, `Show ${hidden.length} more row${hidden.length === 1 ? "" : "s"} (${table.rows.length} total)`),
+            DbTableView(h, table.columns, hidden),
+          ),
+      );
+    }
+    return el(
+      h,
+      "figure",
+      { class: ["evidence", isDb && "evidence-db"] },
+      caption,
+      el(h, "pre", {}, p.text),
+    );
+  });
 
 const SourceList = (h: H, sources: Snapshot["sources"], state: (x: Snapshot["sources"][number]) => string, withFix: boolean) =>
   el(
@@ -472,6 +530,8 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
   const history = (d?.history ?? []).slice(-12).reverse();
   const started = [...snapshot.deploys].reverse().find((x) => x.app === i.app && x.environment === i.environment && x.seq < i.firstSeq);
   const sources = snapshot.sources.filter((x) => x.app === i.app && x.environment === i.environment);
+  const env = snapshot.environments.find((x) => x.app === i.app && x.environment === i.environment);
+  const highPolicy = env ? m.policyTags(env).filter((t) => t.highSignal) : [];
   const done = d?.investigations.filter((x) => x.result).at(-1);
   const left = ahead(snapshot, i, props.serverNow ?? snapshot.atMs).left;
   const fixing = (d?.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "verified", "published", "draft"].includes(f.state));
@@ -504,6 +564,7 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
           el(h, "span", { class: ["count", !i.exact && "bound"] }, `${m.countText(i.count, i.exact)}${i.exact ? "" : " (at least)"}`),
           el(h, "span", {}, `last ${m.ago(i.lastMs, now)}`),
           !i.active && el(h, "span", { class: ["pill", "quiet"] }, "quiet"),
+          ...PolicyPills(h, highPolicy),
         ),
       ),
     ),
@@ -686,7 +747,14 @@ const EnvironmentView = (h: H, subject: string, props: Props, snapshot: Snapshot
         "div",
         {},
         el(h, "h2", {}, `${e.app} / ${e.environment}`),
-        el(h, "div", { class: "meta" }, el(h, "span", {}, m.HEALTH_LABEL[health] ?? ""), e.excluded.length > 0 && el(h, "span", {}, `not measured here: ${e.excluded.join(", ")}`)),
+        el(
+          h,
+          "div",
+          { class: "meta" },
+          el(h, "span", {}, m.HEALTH_LABEL[health] ?? ""),
+          e.excluded.length > 0 && el(h, "span", {}, `not measured here: ${e.excluded.join(", ")}`),
+          ...PolicyPills(h, m.policyTags(e)),
+        ),
       ),
     ),
     el(
@@ -792,7 +860,17 @@ export const view = defineView<Model, Message, Props>((_model, props, h) => {
       h,
       "section",
       stage,
-      snapshot === null ? null : Overview(h, { snapshot, connection: props.connection, serverNow: props.serverNow }, (subject) => Message.ClickedSubject({ subject })),
+      snapshot === null
+        ? null
+        : Overview(
+          h,
+          { snapshot, connection: props.connection, serverNow: props.serverNow, caughtUp: props.caughtUp, whatsNewWindow: props.whatsNewWindow },
+          {
+            onPick: (subject) => Message.ClickedSubject({ subject }),
+            onMarkCaughtUp: () => Message.ClickedMarkCaughtUp(),
+            onToggleWindow: () => Message.ClickedToggleWhatsNewWindow(),
+          },
+        ),
     );
   }
   const back = el(h, "button", { class: "stage-back", attrs: { type: "button", "data-back": "" }, on: [h.OnClick(Message.ClickedBack())] }, "← Inbox");

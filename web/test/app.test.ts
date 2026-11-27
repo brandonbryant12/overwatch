@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Story } from "foldkit";
 import { freshness } from "../freshness.mjs";
-import { Act, AppMessage, type AppModel, init, ReadItem, Undo, update, WaitBeforeDismissal, WaitBeforeSeen } from "../src/App.ts";
+import { Act, AppMessage, type AppModel, init, ReadItem, Remember, ScrollToTop, Undo, update, WaitBeforeDismissal, WaitBeforeSeen } from "../src/App.ts";
 import * as Dock from "../src/components/Dock.ts";
 import * as Inbox from "../src/components/Inbox.ts";
 import type { Incident, Snapshot } from "../src/domain/Overwatch.ts";
@@ -107,6 +107,34 @@ test("the page's own clock ages the connection: live, stale after 15 s, down aft
     expect((s) => {
       assert.equal(connection(s), "down");
       assert.equal(s.snapshot?.seq, 9);
+    }),
+  );
+});
+
+test("ClickedOverview returns to the board without reload; ClickedMarkCaughtUp persists checkpoint", () => {
+  const a = incident("a", "checkout timeout");
+  story(
+    update,
+    start,
+    message(AppMessage.ReceivedSnapshot({ snapshot: snapshot(5, ["a"], [a]), at: at(10) })),
+    message(AppMessage.PressedKey({ command: "next" })),
+    reads("a", 5),
+    Command.resolve(WaitBeforeSeen, AppMessage.ElapsedSeenWait({ id: "a", n: 1 })),
+    expect((s) => assert.equal(s.focus, "a")),
+    // Overview button clears focus and scrolls to top.
+    message(AppMessage.ClickedOverview()),
+    Command.expectExact(ScrollToTop()),
+    Command.resolve(ScrollToTop, AppMessage.CompletedScrollToTop()),
+    expect((s) => assert.equal(s.focus, null)),
+    // Mark caught up saves seq + atMs in KeyValueStore and resets the window to "since".
+    message(AppMessage.ToggledWhatsNewWindow()),
+    expect((s) => assert.equal(s.whatsNewWindow, "24h")),
+    message(AppMessage.ClickedMarkCaughtUp()),
+    Command.expectExact(Remember({ key: "ow-caught-up", value: JSON.stringify({ seq: 5, atMs: 1_000_000 }) })),
+    Command.resolve(Remember, AppMessage.CompletedRemember()),
+    expect((s) => {
+      assert.deepEqual(s.caughtUp, { seq: 5, atMs: 1_000_000 });
+      assert.equal(s.whatsNewWindow, "since");
     }),
   );
 });

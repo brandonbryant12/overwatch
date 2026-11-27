@@ -120,7 +120,7 @@ export const view = defineView<Model, Message, Props>((model, { opened, focus, s
       h,
       "p",
       { class: "sheet-subject" },
-      `${focus} · ${summary?.handleCount ?? 0} verified handle${summary?.handleCount === 1 ? "" : "s"}${model.bundle?.checkout ? ` · ${model.bundle.checkout}` : ""}`,
+      `${focus} · ${summary?.handleCount ?? 0} verified handle${summary?.handleCount === 1 ? "" : "s"}${model.bundle?.checkout ? ` · ${model.bundle.checkout}` : ""}${model.loading ? " · enriching…" : ""}`,
     ),
     el(
       h,
