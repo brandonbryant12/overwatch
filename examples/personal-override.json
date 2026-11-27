@@ -13,14 +13,30 @@
   },
   "apps": {
     "checkout": {
-      "checkout": "~/Development/checkout"
-    },
-    "sandbox-worker": {
-      "checkout": "~/Development/sandbox-worker"
+      "checkout": "~/Development/checkout",
+      "environments": {
+        "prod-us-east": {
+          "policy": {
+            "readings": 5
+          },
+          "databases": {
+            "primary": {
+              "dsn": "keychain:overwatch/checkout-ro-dsn"
+            }
+          }
+        },
+        "dev": {
+          "databases": {
+            "local_cache": {
+              "file": "~/Development/checkout/tmp/dev.sqlite"
+            }
+          }
+        }
+      }
     }
   },
   "watchers": [
-    { "app": "checkout", "environment": "production", "every": "2m" },
+    { "app": "checkout", "environment": "prod-us-east", "every": "2m" },
     { "app": "checkout", "environment": "staging", "every": "2m" }
   ]
 }

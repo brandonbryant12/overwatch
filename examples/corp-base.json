@@ -18,6 +18,10 @@
   "apps": {
     "checkout": {
       "checkout": "~/src/checkout",
+      "policy": {
+        "readings": 3,
+        "genUi": true
+      },
       "problemPatterns": {
         "error": ["error", "fatal", "panic", "exception", "critical", "deadlock"],
         "warn": ["warn", "warning", "degraded", "retry"]
@@ -36,10 +40,18 @@
       },
       "promotion": {
         "staging": "staging",
-        "production": "production"
+        "production": "prod-us-east"
       },
       "environments": {
-        "production": {
+        "prod-us-east": {
+          "policy": {
+            "critical": true,
+            "investigate": true,
+            "readings": 3,
+            "notify": true,
+            "fixMode": "propose",
+            "genUi": true
+          },
           "sources": {
             "pods": {
               "type": "kubernetes",
@@ -53,13 +65,13 @@
               "baseUrl": "https://api.datadoghq.com",
               "apiKey": "keychain:overwatch/dd-api",
               "appKey": "keychain:overwatch/dd-app",
-              "query": "service:checkout env:production",
-              "metric": "avg:checkout.db.disk_used{env:production}",
+              "query": "service:checkout env:prod-us-east",
+              "metric": "avg:checkout.db.disk_used{env:prod-us-east}",
               "readings": ["logs", "monitors", "metrics", "spans"],
               "spans": {
                 "slowMs": 1500,
                 "warnMs": 750,
-                "query": "service:checkout env:production @duration:>750000000"
+                "query": "service:checkout env:prod-us-east @duration:>750000000"
               },
               "capacity": {
                 "resource": "disk",
@@ -67,9 +79,34 @@
                 "limit": 500000000000
               }
             }
+          },
+          "databases": {
+            "primary": {
+              "driver": "postgres",
+              "dsn": "env:CHECKOUT_RO_DSN",
+              "allowSelect": false,
+              "queries": {
+                "active_locks": {
+                  "sql": "SELECT pid, relation, mode, granted FROM pg_locks WHERE NOT granted LIMIT :limit",
+                  "params": ["limit"]
+                },
+                "pool_waiters": {
+                  "sql": "SELECT pid, usename, state, wait_event, query_start FROM pg_stat_activity WHERE state = 'active' AND wait_event IS NOT NULL LIMIT :limit",
+                  "params": ["limit"]
+                }
+              }
+            }
           }
         },
         "staging": {
+          "policy": {
+            "critical": false,
+            "investigate": true,
+            "readings": 2,
+            "notify": false,
+            "fixMode": "draft_pr",
+            "genUi": true
+          },
           "sources": {
             "pods": {
               "type": "kubernetes",
@@ -91,32 +128,49 @@
                 "query": "service:checkout env:staging"
               }
             }
+          },
+          "databases": {
+            "staging_ro": {
+              "driver": "postgres",
+              "dsn": "keychain:overwatch/checkout-staging-ro-dsn",
+              "allowSelect": true,
+              "queries": {
+                "recent_migrations": {
+                  "sql": "SELECT version, applied_at FROM schema_migrations ORDER BY applied_at DESC LIMIT :limit",
+                  "params": ["limit"]
+                }
+              }
+            }
           }
-        }
-      }
-    },
-    "sandbox-worker": {
-      "checkout": "~/src/sandbox-worker",
-      "commitWatch": {
-        "branch": "main",
-        "limit": 15
-      },
-      "fixes": {
-        "remote": "origin",
-        "base": "main",
-        "mode": "draft_pr",
-        "paths": ["config/worker.json"],
-        "verify": [["node", "scripts/verify-config.mjs"]]
-      },
-      "environments": {
-        "staging": {
+        },
+        "dev": {
+          "policy": {
+            "critical": false,
+            "investigate": false,
+            "notify": false,
+            "fixMode": "off",
+            "genUi": false
+          },
           "sources": {
             "pods": {
               "type": "kubernetes",
-              "context": "corp-staging-us-east",
-              "namespace": "workers",
-              "selector": "app=sandbox-worker",
+              "context": "corp-dev-us-east",
+              "namespace": "checkout-dev",
+              "selector": "app=checkout",
               "readings": ["logs", "events", "workloads"]
+            }
+          },
+          "databases": {
+            "local_cache": {
+              "driver": "sqlite",
+              "file": "~/src/checkout/tmp/dev.sqlite",
+              "allowSelect": true,
+              "queries": {
+                "recent_jobs": {
+                  "sql": "SELECT id, status, updated_at FROM background_jobs ORDER BY updated_at DESC LIMIT :limit",
+                  "params": ["limit"]
+                }
+              }
             }
           }
         }
@@ -124,8 +178,8 @@
     }
   },
   "watchers": [
-    { "app": "checkout", "environment": "production", "every": "2m" },
+    { "app": "checkout", "environment": "prod-us-east", "every": "2m" },
     { "app": "checkout", "environment": "staging", "every": "2m" },
-    { "app": "sandbox-worker", "environment": "staging", "every": "5m" }
+    { "app": "checkout", "environment": "dev", "every": "10m" }
   ]
 }
