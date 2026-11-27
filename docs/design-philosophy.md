@@ -46,7 +46,26 @@ what is measured to be active now: a problem whose measurements have recovered d
 ## Code decides; the model interprets
 
 The model never supplies counts, order, identity, quotes, sources or confidence. The trial measures the owner's
-model on seeded cases before any automation is turned on.
+model on seeded cases before any automation is turned on. When local GPU inference makes tokens free (such as GLM 5.3
+under OpenCode), Overwatch spends them on independent angles (up to five readings plus a challenger), deeper evidence
+reads, and structured visual lenses — never on relaxing verification gates.
+
+## Static truth, declarative lenses
+
+Health clocks, frozen inbox rows, triage buttons, adjudicated counts, evidence handles, and fix publication gates are
+static deterministic chrome: they never shift unpredictably or depend on a model. Inside the inspection stage,
+declarative GenUI visual lenses (`LensSpec`, see [genui.md](genui.md)) replace prose walls with scannable causal
+chains, slow-span waterfalls, metric shifts, and commit-risk cards. The model emits schema-validated JSON citing stored
+handles — never raw HTML or scripts — and both server and client verify every handle before rendering.
+
+## Autonomy inside hard walls
+
+Human-in-the-loop (`fixes.mode: "propose"`, default) stops at a sandbox-verified candidate and waits for `Shift-P`.
+Human-on-the-loop (`fixes.mode: "draft_pr"`, explicit per-app opt-in) runs the exact same permit-gated,
+branch-protection-checked, outbound-scrubbed pipeline to open a `--draft` pull request automatically once every
+eligibility rule and policy-bound `trial --fixes` gate passes. Merging is never automated. And when a problem calls
+for open-ended engineering work, Overwatch hands off cleanly (`o`, `c`, `Shift+O`, and owner MCP tools) into the
+owner's own interactive OpenCode session with exact SHAs, handles, and commands.
 
 ## Small, and built on one library
 

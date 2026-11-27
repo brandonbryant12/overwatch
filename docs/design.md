@@ -136,10 +136,23 @@ Usage rules:
 | `/` or `⌘K` (`Ctrl+K`) | Open Search palette (incidents wherever they went, findings, prompts) |
 | `1` / `2` / `3` | Filter inbox: All / Prod / Pre-prod |
 | `t` | Toggle Night Watch / Daylight Chart theme |
+| `g` | Generate or refresh an AI declarative Visual Lens for the focused item (`POST /v2/items/:id/lens`) |
+| `o` | Open the focused item in an interactive OpenCode session (`POST /v2/open`) |
+| `c` | Copy structured OpenCode handoff context (`GET /v2/items/:id/handoff`) |
+| `Shift+O` | Open the OpenCode Handoff Preset Sheet (Investigate deeper, Fix & verify locally, QA staging, MCP commands) |
 | `?` | Toggle keyboard shortcuts reference |
 | `Esc` | Close active overlay or sheet, or blur the prompt bar |
 
-## 8. Adding a New Page (Phase 1B & Phase 2+)
+## 8. Static Chrome vs. Declarative GenUI Lenses & OpenCode Handoff
+
+To stay calm without burying engineers in prose, the Focus Stage separates **deterministic static chrome** from **declarative Visual Lenses** (full schema and grounding rules in [genui.md](genui.md)):
+
+- **Progressive disclosure & single-row triage**: Primary triage actions (`Done`, `Later`, `Worse`, `Never`) sit in a connected `.segmented` bar so all primary stage actions stay on one row at desktop width. Verbose secondary detail (ruled-out hypotheses, not-checked notes, raw coverage) collapses cleanly beneath scannable visual cards while keeping verdict headers, diffs, verification results, Q&A, and history immediately visible.
+- **Calm Overview Situation Board**: With no item focused, the stage renders an at-a-glance Situation Board (environment freshness bars, verified fixes awaiting `Shift-P`, staging regressions, and watched commits from `snapshot.outlook.commits`) instead of empty void.
+- **Declarative Visual Lenses (`web/src/components/VisualLens.ts`)**: Six pure Foldkit visual blocks (`causal_flow`, `span_waterfall`, `metric_compare`, `commit_risk`, `timeline`, `key_facts`) render either instant deterministic derivations (`Derived lens`) or on-demand AI synthesis (`g` key -> `POST /v2/items/:id/lens`, `AI Lens · N handles verified`). Every cited handle is verified against stored evidence; unverified handles fall back to `--hatch-unknown` dashed styling.
+- **One-key OpenCode Handoff**: `o` opens a seeded interactive OpenCode session (`POST /v2/open`); `c` copies a structured Markdown mission brief (`GET /v2/items/:id/handoff`: checkout path, deployed/previous SHAs, evidence handles, MCP tools, verify commands); `Shift+O` opens the Handoff Preset Sheet (`Investigate deeper`, `Fix & verify locally`, `QA staging rollout`, `MCP commands`).
+
+## 9. Adding a New Page (Phase 1B & Phase 2+)
 
 When building the planned pages (Fleet, Environment detail, Connections, Command Palette with arbitrary focus targets), follow these rules:
 

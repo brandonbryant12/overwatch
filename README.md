@@ -4,8 +4,9 @@ Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts w
 read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
 not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, built on [Effect](https://effect.website) 4 for the service and [Foldkit](https://foldkit.dev) (on Effect) for the page.
 
-This is the **simple core, milestones 1 to 3**: the kernel, the tools for proving it on a real laptop and a real
-model, the page, and the agents.
+This is the **simple core, milestones 1 to 4+**: the kernel, reality tools, calm Foldkit page with declarative GenUI
+visual lenses, multi-angle OpenCode agents (tuned for free local GPU models like GLM 5.3), slow-span & commit watching,
+narrow verified fixes, and clean corporate forkability.
 Specification: [docs/plans/simple-core.md](docs/plans/simple-core.md) with its
 [amendments](docs/plans/simple-core-amendments.md) and [interfaces](docs/plans/simple-core-interfaces.md).
 The agents are OpenCode sessions on your own model; nothing depends on a model being right. Code adjudicates
@@ -31,25 +32,34 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 - **Storage**: one SQLite file owned by one process through SQLite's own exclusive lock; every change is one
   transaction that appends to an append-only event log; text is stored only after redaction.
 - **Collection**: Kubernetes through read-only `kubectl` (logs, events, workloads, usage) and Datadog (logs, monitors,
-  a metric), counted by keys made from each source's own data, so replay, crash and late data never count twice; a
-  total over a window that was not fully read is marked as a lower bound.
+  a metric, plus opt-in slow `spans` for latency regressions), counted by keys made from each source's own data, so
+  replay, crash and late data never count twice; a total over a window that was not fully read is marked as a lower bound.
 - **Health**: each environment is quiet, needs a look, partial, stale or signed out, from the least-known reading
   and the problems active now.
 - **Failures**: classified (sign-in, permission, rate limit, unreachable, configuration), backed off, suspended and
   probed; one cause per failure; "offline" only when several independent endpoints all fail.
-- **The page**: the environments strip, the inbox in four groups whose rows never move under you, Done, Later and
-  Never with undo and a reason for everything that comes back, a finder, and one bar that asks about what is in
-  focus. Moving, deciding, undoing, finding and asking are on the keyboard (a source is reached by a click or the
-  finder). It keeps its own clock, says stale or down by itself, and ages each environment's measurements too.
-- **Agents**: investigations by independent readings and a challenger, adjudicated by code; answers to your
-  questions where you asked them; "Was this right?" corrections that reach the next investigation; briefs to copy;
-  local notifications; and owner tools plus a skill so any OpenCode session of yours can read and act on the inbox.
+- **The page & declarative GenUI**: the environments strip, an at-a-glance Overview board, the inbox in four groups
+  whose rows never move under you, Done, Later and Never with undo and a reason for everything that comes back, a
+  finder, one bar that asks about what is in focus, and schema-validated declarative **Visual Lenses** (`causal_flow`,
+  `span_waterfall`, `metric_compare`, `commit_risk`, `timeline`, `key_facts`) grounded strictly in stored evidence
+  handles (`g` to synthesize via OpenCode, with instant deterministic derivation always available). Moving, deciding,
+  undoing, finding, asking, and OpenCode handoff (`o`, `c`, `Shift+O`) are on the keyboard. It keeps its own clock,
+  says stale or down by itself, and ages each environment's measurements too.
+- **Agents**: investigations by 1–5 independent readings (up to 6 concurrent sessions and 24 tool calls for free local
+  GPU models like GLM 5.3) and a challenger, adjudicated by code; answers to your questions where you asked them;
+  "Was this right?" corrections that reach the next investigation; briefs to copy; local notifications; and owner MCP
+  tools (`ow_inbox`, `ow_get`, `ow_search`, `ow_act`, `ow_brief`, `ow_outlook`) plus a skill so any OpenCode session
+  of yours can read and act on the inbox.
 - **Fixes**: for an app that opts in, a confirmed problem that began after one deployment gets a verified candidate
   that reverts one commit of that deployment or restores one setting. A model only selects; code derives the change
-  from Git, checks it and verifies it in isolation (macOS). You see the diff and the verify result; a draft pull
-  request is opened only when you press `Shift-P`. Nothing is ever merged by Overwatch.
-- **Looking ahead**: time left on a capacity metric, shown only when six consistent readings support it; and a
-  staging release compared with unchanged production, where a new staging-only problem becomes an inbox item.
+  from Git, checks it and verifies it in isolation (macOS). In default `"propose"` mode (human-in-the-loop) a draft
+  pull request is opened only when you press `Shift-P`; opt-in `"draft_pr"` mode (human-on-the-loop) runs the same
+  permit-gated `--draft` publication once verified and calibrated. Nothing is ever merged by Overwatch.
+- **Looking ahead**: time left on a capacity metric, shown only when six consistent readings support it; a staging
+  release compared with unchanged production; and an opt-in read-only **commit watcher** (`commitWatch`) flagging
+  newly landed config, database, auth, timeout, and large commits before they become incidents.
+- **Corporate forkability**: config layering via `"extends"` (shared corporate base + personal laptop overrides),
+  config-driven `redactPatterns`, and starter templates in [examples/](examples/).
 - **Commands**: `check`, `serve`, `status`, `backup`, `restore`, `doctor`, `trial`, `demo`, `install`, `uninstall`, `restart`.
 - **Investigation tools** over MCP, with evidence by handle, and `trial`, which measures your model on five seeded
   cases before any automation is allowed for that model.
@@ -57,6 +67,9 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 ## Documentation
 
 - [docs/setup.md](docs/setup.md): install, configure, connect OpenCode, run, back up.
+- [docs/forking.md](docs/forking.md): corporate fork architecture, config layering, local GPU (GLM 5.3) tuning, autonomy policy, and custom adapters.
+- [docs/genui.md](docs/genui.md): static chrome vs. declarative GenUI Visual Lenses and dual handle grounding.
+- [examples/](examples/): ready-to-adapt starter configs (`corp-base.json`, `personal-override.json`, `opencode-glm53.json`).
 - [docs/using.md](docs/using.md): what the service does, health, failures, the commands and their output.
 - [docs/customizing.md](docs/customizing.md): the configuration grammar and the operating limits.
 - [docs/design-philosophy.md](docs/design-philosophy.md): why it is shaped this way.

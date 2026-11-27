@@ -1,0 +1,131 @@
+{
+  "version": 2,
+  "port": 7331,
+  "readings": 5,
+  "redactPatterns": [
+    "\\bcorp_(?:live|test)_[A-Za-z0-9]{24,}\\b",
+    "\\bX-Corp-Session:\\s*[^\\s\"']+",
+    "\\bsvc_tok_[A-Za-z0-9._-]{24,}\\b"
+  ],
+  "opencode": {
+    "url": "http://127.0.0.1:4096",
+    "model": "local/glm-5.3",
+    "password": "keychain:overwatch/opencode",
+    "concurrency": 4,
+    "toolCalls": 16,
+    "genUi": true
+  },
+  "apps": {
+    "checkout": {
+      "checkout": "~/src/checkout",
+      "problemPatterns": {
+        "error": ["error", "fatal", "panic", "exception", "critical", "deadlock"],
+        "warn": ["warn", "warning", "degraded", "retry"]
+      },
+      "commitWatch": {
+        "branch": "main",
+        "paths": ["config/", "db/migrations/", "src/payments/"],
+        "limit": 20
+      },
+      "fixes": {
+        "remote": "origin",
+        "base": "main",
+        "mode": "propose",
+        "paths": ["config/payments.json", "config/database.json"],
+        "verify": [["npm", "test", "--", "config"]]
+      },
+      "promotion": {
+        "staging": "staging",
+        "production": "production"
+      },
+      "environments": {
+        "production": {
+          "sources": {
+            "pods": {
+              "type": "kubernetes",
+              "context": "corp-prod-us-east",
+              "namespace": "checkout",
+              "selector": "app=checkout",
+              "readings": ["logs", "events", "workloads", "usage"]
+            },
+            "dd": {
+              "type": "datadog",
+              "baseUrl": "https://api.datadoghq.com",
+              "apiKey": "keychain:overwatch/dd-api",
+              "appKey": "keychain:overwatch/dd-app",
+              "query": "service:checkout env:production",
+              "metric": "avg:checkout.db.disk_used{env:production}",
+              "readings": ["logs", "monitors", "metrics", "spans"],
+              "spans": {
+                "slowMs": 1500,
+                "warnMs": 750,
+                "query": "service:checkout env:production @duration:>750000000"
+              },
+              "capacity": {
+                "resource": "disk",
+                "unit": "bytes",
+                "limit": 500000000000
+              }
+            }
+          }
+        },
+        "staging": {
+          "sources": {
+            "pods": {
+              "type": "kubernetes",
+              "context": "corp-staging-us-east",
+              "namespace": "checkout",
+              "selector": "app=checkout",
+              "readings": ["logs", "events", "workloads", "usage"]
+            },
+            "dd": {
+              "type": "datadog",
+              "baseUrl": "https://api.datadoghq.com",
+              "apiKey": "keychain:overwatch/dd-api",
+              "appKey": "keychain:overwatch/dd-app",
+              "query": "service:checkout env:staging",
+              "readings": ["logs", "monitors", "spans"],
+              "spans": {
+                "slowMs": 1200,
+                "warnMs": 600,
+                "query": "service:checkout env:staging"
+              }
+            }
+          }
+        }
+      }
+    },
+    "sandbox-worker": {
+      "checkout": "~/src/sandbox-worker",
+      "commitWatch": {
+        "branch": "main",
+        "limit": 15
+      },
+      "fixes": {
+        "remote": "origin",
+        "base": "main",
+        "mode": "draft_pr",
+        "paths": ["config/worker.json"],
+        "verify": [["node", "scripts/verify-config.mjs"]]
+      },
+      "environments": {
+        "staging": {
+          "sources": {
+            "pods": {
+              "type": "kubernetes",
+              "context": "corp-staging-us-east",
+              "namespace": "workers",
+              "selector": "app=sandbox-worker",
+              "readings": ["logs", "events", "workloads"]
+            }
+          }
+        }
+      }
+    }
+  },
+  "watchers": [
+    { "app": "checkout", "environment": "production", "every": "2m" },
+    { "app": "checkout", "environment": "staging", "every": "2m" },
+    { "app": "sandbox-worker", "environment": "staging", "every": "5m" }
+  ]
+}

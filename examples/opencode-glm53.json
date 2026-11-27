@@ -1,0 +1,73 @@
+{
+  "model": "local/glm-5.3",
+  "providers": {
+    "local": {
+      "name": "Local GPU (GLM 5.3)",
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "models": {
+        "glm-5.3": {
+          "name": "GLM 5.3 (Local GPU)"
+        }
+      }
+    }
+  },
+  "agents": {
+    "ow-investigator": {
+      "mode": "primary",
+      "model": "local/glm-5.3",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_finding", "resource": "*", "effect": "allow" }
+      ]
+    },
+    "ow-challenger": {
+      "mode": "primary",
+      "model": "local/glm-5.3",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_history", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_challenge", "resource": "*", "effect": "allow" }
+      ]
+    },
+    "ow-responder": {
+      "mode": "primary",
+      "model": "local/glm-5.3",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_read", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_code_search", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_history", "resource": "*", "effect": "allow" }
+      ]
+    },
+    "ow-fixer": {
+      "mode": "primary",
+      "model": "local/glm-5.3",
+      "permissions": [
+        { "action": "*", "resource": "*", "effect": "deny" },
+        { "action": "ow_ow_telemetry", "resource": "*", "effect": "allow" },
+        { "action": "ow_ow_proposal", "resource": "*", "effect": "allow" }
+      ]
+    }
+  },
+  "mcp": {
+    "servers": {
+      "ow": {
+        "type": "remote",
+        "url": "http://127.0.0.1:7331/mcp",
+        "headers": {
+          "Authorization": "Bearer REPLACE_WITH_OW_MCP_TOKEN"
+        },
+        "oauth": false,
+        "codemode": false
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "extends": "./corp-base.json",
+  "dataDir": "~/.local/share/overwatch",
+  "mcpToken": "keychain:overwatch/mcp-token",
+  "opencode": {
+    "url": "http://127.0.0.1:4096",
+    "model": "local/glm-5.3",
+    "password": "keychain:overwatch/opencode",
+    "concurrency": 4,
+    "toolCalls": 16,
+    "genUi": true
+  },
+  "apps": {
+    "checkout": {
+      "checkout": "~/Development/checkout"
+    },
+    "sandbox-worker": {
+      "checkout": "~/Development/sandbox-worker"
+    }
+  },
+  "watchers": [
+    { "app": "checkout", "environment": "production", "every": "2m" },
+    { "app": "checkout", "environment": "staging", "every": "2m" }
+  ]
+}
