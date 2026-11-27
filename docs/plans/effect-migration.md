@@ -28,8 +28,9 @@ never edited.
 ## Conventions for the service
 
 - **Services.** Each stateful part is a `Context.Service` with a static `layer`: `AppConfig` (the parsed `Config`),
-  `Store` (the database), `Exec` (programs), `OpenCodeClient`, `Datadog`, `Collector`, `Agents`, `Fixes`, `Tools`,
-  `Trial`. Domain functions read services with `yield*` instead of taking `store` and `config` parameters.
+  `Store` (the database), `OpenCodeClient`, `Collector`, `Agents`, `Fixes`, `Tools`, `Trial`. Domain functions read
+  services with `yield*` (or `Service.use`, as `sql.all`/`sql.get`/`sql.seq` do for reads) instead of taking `store`
+  and `config` parameters. Programs run through `exec.ts` functions that need Effect's `ChildProcessSpawner`.
 - **Effects, not promises.** A function that does I/O returns an `Effect`, written with `Effect.fn("name")` (or
   `Effect.fnUntraced` on hot paths). There are no `async` functions, `await` or `new Promise` in `src/`. Pure,
   synchronous domain logic (parsers, `adjudicate`, `forecast`, `problem`, `hysteresis`, redaction) stays as plain
@@ -45,22 +46,24 @@ never edited.
   is one `BEGIN IMMEDIATE` transaction through `SqlClient.withTransaction`. `Writer` methods (`run`, `event`,
   `permit`, `next`) are Effects. Permits go live and listeners are told through `SqlClient.afterCommit`. A
   transaction body does only database work: it never calls OpenCode, a program or the network.
-- **The clock.** `clock` (in `src/clock.ts`) stays the single source of wall and monotonic time, because the test
-  descriptor sets it. `ServiceClock` provides Effect's `Clock` from it. Deadlines on the monotonic clock use `bounded`.
-- **Outbound effects.** `Exec.effect(permit, …)` stays the only way to run `gh`, `git push` or the notifier. `exec.ts`
+- **The clock.** `clock` (in `src/clock.ts`) stays the single source of wall and monotonic time for domain decisions,
+  because the test descriptor sets it. Deadlines on the monotonic clock use `bounded`, a race against that clock.
+- **Outbound effects.** `effect(permit, …)` in `src/exec.ts` stays the only way to run `gh`, `git push` or the notifier. `exec.ts`
   stays the only module that starts a program (`test/boundaries.test.ts` checks this).
 - **Text.** `clean` in `src/redact.ts` stays the only way to make `Clean` text. The writer cleans every value again.
 
-## Ownership during the migration
+## Status
 
-| Area | Files |
-| --- | --- |
-| Foundation | `src/errors.ts`, `src/store.ts`, `src/exec.ts`, `src/clock.ts`, `src/parse.ts`, `src/redact.ts`, `src/config.ts`, `src/inbox.ts`, `src/snapshot.ts`, `src/brief.ts` |
-| Collection | `src/collect.ts`, `src/kube.ts`, `src/datadog.ts`, `src/failures.ts`, `src/outlook.ts` |
-| Agents | `src/opencode.ts`, `src/agents.ts`, `src/tools.ts`, `src/mcp.ts`, `src/trial.ts` |
-| Fixes and operations | `src/fixes.ts`, `src/doctor.ts`, `src/launchd.ts` |
-| Service and command line | `src/server.ts`, `src/main.ts`, `src/demo.ts`, `bin/overwatch` |
-| Page | `web/`, `scripts/build-web.ts` |
+Done. The service runs on Effect 4.1.6 and the page on Effect UI (`@effect/ui` and `@effect/ui-kit`, snapshot
+`fab0fba`). Node 22.16+ or 24 is required: Effect's SQLite client rolls a failed transaction back only where
+`node:sqlite` reports `isTransaction`.
+
+Kept deliberately: `clock.ts` (the test descriptor drives it), the redaction and parsing rules in `redact.ts` and
+`parse.ts` (domain rules, not plumbing), and the domain arithmetic (adjudication, forecasts, hysteresis).
+
+Changed on the wire: MCP sessions follow the specification strictly (`McpServer` requires `mcp-session-id` after
+`initialize`; an unknown session is 404, so OpenCode reconnects `ow` after a restart), tool listings carry read-only and
+destructive hints, and a tool's malformed arguments are refused in Schema's words.
 
 ## Verification
 
