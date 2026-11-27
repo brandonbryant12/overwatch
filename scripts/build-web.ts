@@ -1,7 +1,7 @@
 /**
  * Builds the page into web/dist: one ES module bundle for the browser (web/src/entry.ts), the HTML shell, the
- * stylesheets and the logo. Bundled with rolldown under the `production` condition, so Effect UI's development-only
- * code (`#dev`, `#hot`) is left out.
+ * stylesheets and the logo. Bundled with rolldown for the browser with `NODE_ENV` set to production; Foldkit's
+ * development-only paths (`import.meta.hot`: live reload, model freezing) are never taken in the bundle.
  *
  * With `--optional` (how `pnpm install` runs it), a bundler that cannot load, such as a native binding a registry
  * proxy blocked, is reported and the install carries on; the service then answers 404 for the page until it is built.

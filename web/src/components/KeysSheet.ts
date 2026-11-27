@@ -1,8 +1,7 @@
 /** ?: every key the page answers to. */
-import { UiSchema } from "@effect/ui";
-import { Html } from "@effect/ui/html";
-import { Dialog } from "@effect/ui-kit";
 import { Schema } from "effect";
+import { defineView, el, emit, type Step, TaggedEnum } from "../ui.ts";
+import { Opening, sheet } from "./Sheet.ts";
 
 const KEYS: ReadonlyArray<readonly [string, string]> = [
   ["j / ↓", "Next row"], ["k / ↑", "Previous row"], ["d", "Done: back if it happens again"], ["l", "Later: until something changes, a time, or worse"],
@@ -13,32 +12,41 @@ const KEYS: ReadonlyArray<readonly [string, string]> = [
   ["Esc", "Close, or leave the bar"],
 ];
 
-const KeysSheetMessage = UiSchema.TaggedEnum({ RequestedCloseDialog: {} });
-export const KeysSheetEvents = UiSchema.TaggedEnum({ RequestedClose: {} });
+export const Props = Schema.Struct(Opening);
+export type Props = typeof Props.Type;
 
-export const KeysSheet = Html.component({
-  name: "KeysSheet",
-  model: Schema.Struct({}),
-  message: KeysSheetMessage,
-  events: KeysSheetEvents,
-}).make({
-  init: () => ({}),
-  update: { RequestedCloseDialog: ($) => $.emit(KeysSheetEvents.RequestedClose()) },
-  view: (h) =>
-    Dialog(h, {
-      props: { open: true },
-      onEmit: { RequestedOpen: () => undefined, RequestedClose: () => KeysSheetMessage.RequestedCloseDialog(), Settled: () => undefined },
-      view: (dialog) =>
-        dialog.portal(h.dialog)?.children(
-          dialog.backdrop(h.div.class("backdrop").attr("data-close", "")),
-          dialog.popup(h.div.class("sheet", "keys-sheet").attrs({ role: "dialog", "aria-modal": "true", "aria-label": "Keyboard" })).children(
-            h.h2("Keyboard"),
-            h.dl(
-              ...KEYS.map(([keys, text]) =>
-                h.div(h.dt(...keys.split(" / ").flatMap((k, n) => [n > 0 ? " " : null, h.kbd(k)])), h.dd(text))
-              ),
-            ),
-          ),
-        ) ?? h.text(""),
-    }),
-});
+export const Model = Schema.Struct({});
+export type Model = typeof Model.Type;
+export const init: Model = {};
+
+export const Message = TaggedEnum({ RequestedCloseDialog: {}, CompletedMount: { name: Schema.String } });
+export type Message = typeof Message.Type;
+export const Events = TaggedEnum({ RequestedClose: {} });
+export type Events = typeof Events.Type;
+
+export const update = (model: Model, message: Message): Step<Model, Message, Events> =>
+  Message.match(message, {
+    RequestedCloseDialog: () => emit(model, Events.RequestedClose()),
+    CompletedMount: () => ({ model }),
+  });
+
+export const view = defineView<Model, Message, Props>((_model, { opened }, h) =>
+  sheet(
+    h,
+    {
+      opened,
+      close: Message.RequestedCloseDialog(),
+      mounted: (message) => message,
+      popup: { class: ["sheet", "keys-sheet"], attrs: { "aria-label": "Keyboard" } },
+    },
+    el(h, "h2", {}, "Keyboard"),
+    el(
+      h,
+      "dl",
+      {},
+      ...KEYS.map(([keys, text]) =>
+        el(h, "div", {}, el(h, "dt", {}, ...keys.split(" / ").flatMap((k, n) => [n > 0 ? " " : null, el(h, "kbd", {}, k)])), el(h, "dd", {}, text))
+      ),
+    ),
+  )
+);

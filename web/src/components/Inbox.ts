@@ -2,54 +2,78 @@
  * The inbox rail: the rows as frozen when the owner last looked, by group, with what waits behind "N new". Rows never
  * move while shown; the owner's own actions remove and restore them, and `r` releases what waits.
  */
-import { Component, Mount, UiSchema } from "@effect/ui";
-import { Html } from "@effect/ui/html";
-import { Collapsible } from "@effect/ui-kit";
 import { Effect, Schema, Stream } from "effect";
 import { Snapshot } from "../domain/Overwatch.ts";
 import * as m from "../model.ts";
+import { Command, CompletedMount, defineView, Dom, el, emit, type H, Mount, type Step, TaggedEnum } from "../ui.ts";
 import { ClearIcon, SeverityGlyph, Spark } from "./Glyphs.ts";
 
 const Group = Schema.Literals(m.GROUPS);
 const Rows = Schema.Array(Schema.String);
 
-export const InboxProps = Schema.Struct({
+export const Props = Schema.Struct({
   snapshot: Schema.NullOr(Snapshot),
   shown: Schema.NullOr(Schema.Struct({ needsYou: Rows, new: Rows, working: Rows, quiet: Rows })),
   collapsed: Schema.Struct({ needsYou: Schema.Boolean, new: Schema.Boolean, working: Schema.Boolean, quiet: Schema.Boolean }),
   focus: Schema.NullOr(Schema.String),
 });
+export type Props = typeof Props.Type;
 
-const InboxMessage = UiSchema.TaggedEnum({
+export const Model = Schema.Struct({});
+export type Model = typeof Model.Type;
+export const init: Model = {};
+
+export const Message = TaggedEnum({
   ClickedRow: { id: Schema.String },
   ClickedPending: {},
   ToggledGroup: { group: Group, open: Schema.Boolean },
+  CompletedMount: { name: Schema.String },
 });
+export type Message = typeof Message.Type;
 
-export const InboxEvents = UiSchema.TaggedEnum({
+export const Events = TaggedEnum({
   Picked: { id: Schema.String },
   RequestedRefresh: {},
   Toggled: { group: Group, open: Schema.Boolean },
 });
+export type Events = typeof Events.Type;
+
+export const update = (model: Model, message: Message): Step<Model, Message, Events> =>
+  Message.match(message, {
+    ClickedRow: ({ id }) => emit(model, Events.Picked({ id })),
+    ClickedPending: () => emit(model, Events.RequestedRefresh()),
+    ToggledGroup: ({ group, open }) => emit(model, Events.Toggled({ group, open })),
+    CompletedMount: () => ({ model }),
+  });
 
 /**
  * A group's button says its new state the moment it is pressed, before the next render: a script that opens every
  * group by pressing each closed one in a loop sees each press take effect.
  */
-const ShowPress = Mount.makeStream("ShowPress", { args: {} }, (node: HTMLElement) =>
-  Stream.callback<never>((_queue) =>
-    Effect.acquireRelease(
-      Effect.sync(() => {
-        const press = () => node.setAttribute("aria-expanded", node.getAttribute("aria-expanded") === "true" ? "false" : "true");
-        node.addEventListener("click", press);
-        return press;
-      }),
-      (press) => Effect.sync(() => node.removeEventListener("click", press)),
-    )));
+const ShowPress = Mount.defineStream("ShowPress", {
+  messages: [CompletedMount],
+  execute: ({ element }) =>
+    Stream.callback<never>(() =>
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const press = () => element.setAttribute("aria-expanded", element.getAttribute("aria-expanded") === "true" ? "false" : "true");
+          element.addEventListener("click", press);
+          return press;
+        }),
+        (press) => Effect.sync(() => element.removeEventListener("click", press)),
+      )),
+});
 
 /** The row put in focus scrolls into view, as little as needed. */
-const RevealRow = Mount.make("RevealRow", { args: {} }, (node: HTMLElement) =>
-  Effect.sync(() => node.scrollIntoView({ block: "nearest" })).pipe(Effect.as(Component.noop)));
+export const RevealRow = Command.define("RevealRow", {
+  args: { id: Schema.String },
+  messages: [Message.CompletedMount],
+  execute: ({ id }) =>
+    Dom.scrollIntoView(`[data-item-id="${CSS.escape(id)}"]`, { block: "nearest" }).pipe(
+      Effect.ignore,
+      Effect.as(Message.CompletedMount({ name: "RevealRow" })),
+    ),
+});
 
 const EMPTY: Record<m.Group, string> = {
   needsYou: "No production error waits for you",
@@ -58,104 +82,114 @@ const EMPTY: Record<m.Group, string> = {
   quiet: "Nothing has gone quiet",
 };
 
-export const Inbox = Html.component({
-  name: "Inbox",
-  props: InboxProps,
-  model: Schema.Struct({}),
-  message: InboxMessage,
-  events: InboxEvents,
-}).make({
-  init: () => ({}),
-  update: {
-    ClickedRow: ($, { id }) => $.emit(InboxEvents.Picked({ id })),
-    ClickedPending: ($) => $.emit(InboxEvents.RequestedRefresh()),
-    ToggledGroup: ($, { group, open }) => $.emit(InboxEvents.Toggled({ group, open })),
-  },
-  view: (h) => {
-    const { snapshot, shown, collapsed, focus } = h.props;
-    const pending = snapshot !== null && shown !== null ? m.pendingLabel(m.staged(shown, snapshot.inbox)) : null;
+export const view = defineView<Model, Message, Props>((_model, { snapshot, shown, collapsed, focus }, h) => {
+  const pending = snapshot !== null && shown !== null ? m.pendingLabel(m.staged(shown, snapshot.inbox)) : null;
 
-    const row = (id: string) => {
-      const i = snapshot?.incidents.find((x) => x.id === id);
-      if (snapshot === null || i === undefined) return null;
-      const unseen = i.lastSeq > (i.seenSeq ?? 0) && i.group !== "quiet";
-      const group = (i.group ?? "") as m.Group;
-      const left = !(snapshot.inbox.groups[group] ?? []).includes(id);
-      const why = i.returned != null && i.way == null ? h.div.class("why", "back").children(i.returned.reason)
-        : i.group === "working" ? h.div.class("why", "working").children(h.span.class("orbit").attr("aria-hidden", "true"), "Queued for an agent")
-        : i.group === "quiet" ? h.div.class("why", "quiet").children("Quiet: nothing new for three checked intervals")
-        : null;
-      const element = h.div
-        .key(id)
-        .class("row", `sev-${i.severity}`, focus === id && "focused", unseen && "unseen", left && "left")
-        .attrs({ "data-item-id": id, role: "option", "aria-selected": String(focus === id) })
-        .on("click", InboxMessage.ClickedRow({ id }));
-      return (focus === id ? element.onMount(RevealRow()) : element).children(
-        h.span.class("sev").attr("title", i.severity).children(SeverityGlyph(h, i.severity)),
-        h.div.class("row-body").children(
-          h.div.class("title").children(i.title),
-          h.div.class("meta").children(
-            h.span.class("place").children(`${i.app} / ${i.environment}`),
-            h.span.class("count", !i.exact && "bound").attr("title", i.exact ? "exact" : "at least: part of the time was not fully read").children(m.countText(i.count, i.exact)),
-            h.span(m.ago(i.lastMs, snapshot.atMs)),
-          ),
-          why,
+  const row = (id: string) => {
+    const i = snapshot?.incidents.find((x) => x.id === id);
+    if (snapshot === null || i === undefined) return null;
+    const unseen = i.lastSeq > (i.seenSeq ?? 0) && i.group !== "quiet";
+    const group = (i.group ?? "") as m.Group;
+    const left = !(snapshot.inbox.groups[group] ?? []).includes(id);
+    const why = i.returned != null && i.way == null ? el(h, "div", { class: ["why", "back"] }, i.returned.reason)
+      : i.group === "working" ? el(h, "div", { class: ["why", "working"] }, el(h, "span", { class: "orbit", attrs: { "aria-hidden": "true" } }), "Queued for an agent")
+      : i.group === "quiet" ? el(h, "div", { class: ["why", "quiet"] }, "Quiet: nothing new for three checked intervals")
+      : null;
+    return el(
+      h,
+      "div",
+      {
+        class: ["row", `sev-${i.severity}`, focus === id && "focused", unseen && "unseen", left && "left"],
+        attrs: { "data-item-id": id, role: "option", "aria-selected": String(focus === id) },
+        on: [h.Key(id), h.OnClick(Message.ClickedRow({ id }))],
+      },
+      el(h, "span", { class: "sev", attrs: { title: i.severity } }, SeverityGlyph(h, i.severity)),
+      el(
+        h,
+        "div",
+        { class: "row-body" },
+        el(h, "div", { class: "title" }, i.title),
+        el(
+          h,
+          "div",
+          { class: "meta" },
+          el(h, "span", { class: "place" }, `${i.app} / ${i.environment}`),
+          el(h, "span", { class: ["count", !i.exact && "bound"], attrs: { title: i.exact ? "exact" : "at least: part of the time was not fully read" } }, m.countText(i.count, i.exact)),
+          el(h, "span", {}, m.ago(i.lastMs, snapshot.atMs)),
         ),
-        Spark(h, i.spark),
-      );
-    };
-
-    const groups = () => {
-      if (snapshot === null || shown === null) {
-        return [h.div.class("loading").children(h.span.class("bar"), h.span.class("bar"), h.span.class("bar"))];
-      }
-      if (m.GROUPS.every((g) => shown[g].length === 0)) {
-        return [
-          h.div.class("empty-inbox").children(
-            ClearIcon(h),
-            h.b("Nothing needs you"),
-            h.span("New problems appear here as they are counted. The strip above says what was checked."),
-          ),
-        ];
-      }
-      return m.GROUPS.map((g) =>
-        Collapsible(h, {
-          key: g,
-          props: { open: !collapsed[g], keepMounted: true },
-          onEmit: {
-            Toggled: ({ open }) => InboxMessage.ToggledGroup({ group: g, open }),
-            Settled: () => undefined,
-          },
-          view: (collapsible) =>
-            h.section.class("group", g).attr("data-group", g).children(
-              collapsible.trigger(h.button.class("group-head").attr("data-toggle", g)).onMount(ShowPress()).children(
-                h.span.class("caret").attr("aria-hidden", "true"),
-                h.span.class("group-name").children(m.GROUP_LABEL[g]),
-                h.span.class("group-count").children(String(shown[g].length)),
-              ),
-              collapsible.panel(h.div.class("group-rows"))?.children(
-                ...(shown[g].length ? shown[g].map(row) : [h.div.class("group-empty").children(EMPTY[g])]),
-              ),
-            ),
-        })
-      );
-    };
-
-    return h.section.class("rail").attr("aria-label", "Inbox").children(
-      h.div.class("rail-head").children(
-        h.h1("Inbox"),
-        h.button
-          .class("pending", pending !== null && !pending.attention && "moves")
-          .attrs({
-            type: "button",
-            "data-pending": "",
-            "data-pending-count": String(pending?.count ?? 0),
-            hidden: pending === null || pending.count === 0 ? "" : undefined,
-          })
-          .on("click", InboxMessage.ClickedPending())
-          .children(...(pending === null ? [] : [`${pending.text} `, h.kbd("r")])),
+        why,
       ),
-      h.div.class("groups").attr("data-groups", "").children(...groups()),
+      Spark(h, i.spark),
     );
-  },
+  };
+
+  const groupOf = (g: m.Group, rows: ReadonlyArray<string>, h_: H<Message>) => {
+    const open = !collapsed[g];
+    const panel = `inbox-${g}-rows`;
+    return el(
+      h_,
+      "section",
+      { class: ["group", g], attrs: { "data-group": g }, on: [h_.Key(g)] },
+      el(
+        h_,
+        "button",
+        {
+          class: "group-head",
+          attrs: { "data-toggle": g, "data-panel-open": open ? "" : undefined, type: "button", "aria-expanded": String(open), "aria-controls": open ? panel : undefined },
+          on: [h_.OnClick(Message.ToggledGroup({ group: g, open: !open })), h_.OnMount(ShowPress())],
+        },
+        el(h_, "span", { class: "caret", attrs: { "aria-hidden": "true" } }),
+        el(h_, "span", { class: "group-name" }, m.GROUP_LABEL[g]),
+        el(h_, "span", { class: "group-count" }, String(rows.length)),
+      ),
+      el(
+        h_,
+        "div",
+        { class: "group-rows", attrs: { "data-open": open ? "" : undefined, "data-closed": open ? undefined : "", id: panel }, on: [h_.Hidden(!open)] },
+        ...(rows.length ? rows.map(row) : [el(h_, "div", { class: "group-empty" }, EMPTY[g])]),
+      ),
+    );
+  };
+
+  const groups = () => {
+    if (snapshot === null || shown === null) {
+      return [el(h, "div", { class: "loading" }, el(h, "span", { class: "bar" }), el(h, "span", { class: "bar" }), el(h, "span", { class: "bar" }))];
+    }
+    if (m.GROUPS.every((g) => shown[g].length === 0)) {
+      return [
+        el(
+          h,
+          "div",
+          { class: "empty-inbox" },
+          ClearIcon(h),
+          el(h, "b", {}, "Nothing needs you"),
+          el(h, "span", {}, "New problems appear here as they are counted. The strip above says what was checked."),
+        ),
+      ];
+    }
+    return m.GROUPS.map((g) => groupOf(g, shown[g], h));
+  };
+
+  return el(
+    h,
+    "section",
+    { class: "rail", attrs: { "aria-label": "Inbox" } },
+    el(
+      h,
+      "div",
+      { class: "rail-head" },
+      el(h, "h1", {}, "Inbox"),
+      el(
+        h,
+        "button",
+        {
+          class: ["pending", pending !== null && !pending.attention && "moves"],
+          attrs: { type: "button", "data-pending": "", "data-pending-count": String(pending?.count ?? 0) },
+          on: [h.Hidden(pending === null || pending.count === 0), h.OnClick(Message.ClickedPending())],
+        },
+        ...(pending === null ? [] : [`${pending.text} `, el(h, "kbd", {}, "r")]),
+      ),
+    ),
+    el(h, "div", { class: "groups", attrs: { "data-groups": "" } }, ...groups()),
+  );
 });

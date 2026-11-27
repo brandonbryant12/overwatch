@@ -6,8 +6,8 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 
 ## Working on the code
 
-- **Effect 4.1** throughout the service, and **Effect UI** (`@effect/ui`) for the page. The rule: do not hand-roll what
-  Effect provides. Use its modules as they come: `Effect.gen` and `Effect.fn` (no async/await), `Context.Service` and
+- **Effect 4.1** throughout the service, and **Foldkit** (`foldkit`, built on Effect) for the page. The rule: do not
+  hand-roll what Effect or Foldkit provides. Use its modules as they come: `Effect.gen` and `Effect.fn` (no async/await), `Context.Service` and
   `Layer` for every stateful part, `Schema.TaggedError` for expected failures, `Schema` for every value from outside
   (configuration, request bodies, provider replies), `Predicate` for checks, `effect/sql` (`SqlClient` on
   `@effect/sql-sqlite-node`) for the database, `effect/process` for programs, `effect/http` (`HttpRouter` on
@@ -15,12 +15,14 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
   `Stream`, `PubSub`, `Schedule` and `Redacted`. Pure domain logic (adjudication, forecasts, parsers of known text,
   redaction) stays plain functions. `docs/plans/effect-migration.md` maps each old piece to its Effect module.
 - Effect's own guides ship in the package: `node_modules/effect/AGENTS.md` and `node_modules/effect/ai-docs/`, and
-  `node_modules/@effect/ui/` for the page. Check APIs there: Effect 4 renamed much of Effect 3.
+  `node_modules/foldkit/` (its README and `dist/**/*.d.ts`) for the page. Check APIs there: Effect 4 renamed much of
+  Effect 3.
 - **Node 24, or 22.16 and newer.** Node runs the TypeScript by stripping its types: no enums, namespaces or parameter
   properties (`erasableSyntaxOnly`). Effect's SQLite client rolls a transaction back only where `node:sqlite` reports
   `isTransaction`, which Node 22.16+ and 24+ do; 23.x does not. Never Bun.
 - **Dependencies are Effect's.** Runtime dependencies are `effect`, `@effect/platform-node`, `@effect/sql-sqlite-node`
-  and, for the page, `@effect/ui` and `@effect/ui-kit` (pkg.pr.new snapshots, pinned by commit until they reach npm).
+  and, for the page, `@effect/platform-browser` and `foldkit` (pinned exactly; `pnpm-workspace.yaml` holds new releases
+  back 72 hours).
   Development dependencies are `typescript`, `fast-check`, `@types/node` and `rolldown` (the page's bundler). Add
   nothing else without the owner.
 - `pnpm run check` (typecheck and `test/`) before every commit; `pnpm run accept` for the acceptance suite. Never
@@ -140,16 +142,24 @@ interfaces document is the public contract, and `accept/m1/` is the acceptance s
 
 ## The page
 
-- The page is an Effect UI application on Effect 4 (`web/src/`), bundled by rolldown into `web/dist/`
+- The page is a Foldkit application on Effect 4 (`web/src/`), bundled by rolldown into `web/dist/`
   (`pnpm run build:web`; `prepare` runs it), which is all the service serves. One stylesheet on `tokens.css`.
-  Each part (strip, banners, inbox, stage, finder, bar, sheets) is an `Html.component` with a Schema Model, a
-  `UiSchema.TaggedEnum` of messages and a pure `update`; HTTP goes through `HttpClient` in `web/src/services/`,
-  reads through `Query`, effects through Commands, the change stream, clock and keys through Subscriptions.
+  Each part (strip, banners, inbox, stage, finder, bar, sheets) keeps one file with a Schema Model, a tagged Message
+  union, an `Events` union for its parent, a pure `update` returning the Model and Commands, and a `view`; the root
+  folds them in with `Update.foldChild` and draws them with `h.submodel`. Commands (`Command.define`) are named Effect
+  programs over the services in `web/src/services/` (`Overwatch` over `HttpClient`, `ServiceEvents`, `PageWindow`);
+  reads are Commands too (no query cache). The change stream, clock, keys and document attributes are
+  Subscriptions. Sheets are native modal `<dialog>`s (`components/Sheet.ts`).
+- Foldkit stays thin, so a move back to Effect UI is mechanical: components import it only through `web/src/ui.ts`,
+  the runtime only in `App.ts` and `entry.ts`, and `App.ts` opens with the table of each Foldkit piece and its Effect
+  UI counterpart. `domain/`, `services/` and `model.ts` import no view layer.
+- Foldkit paints on an animation frame; `entry.ts` runs this page's frame callbacks as microtasks, so a key press shows
+  its result in the same task, as the suites require.
 - The service decides; the page shows. Groups, health, why something came back and where a prompt goes are computed
   in `src/inbox.ts` and `src/snapshot.ts`. The page generates no identifiers (request keys come from `/v2/focus`).
 - Page decisions that are not the service's (which rows are shown, what waits behind "N new", focus movement, the
   keyboard map, Later's words, staleness) live in pure modules (`web/src/model.ts`, `web/freshness.mjs`) tested by
-  `test/page.test.ts`; `web/test/` tells the root's transitions as stories. `web/freshness.mjs` stays plain
+  `test/page.test.ts`; `web/test/` tells the root's transitions as Foldkit stories. `web/freshness.mjs` stays plain
   JavaScript: the acceptance suite imports it.
 - The page is pinned by `accept/m2`, `accept/m3` and `accept/m4` in Chrome: selectors, data attributes, keys, timing
   and clipboard text. A key that moves the caret (p, Enter, Esc in the bar) acts in the key press itself, and a group

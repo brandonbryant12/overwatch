@@ -2,118 +2,169 @@
  * / or ⌘K: find problems, findings, evidence and prompts, even what was put away. ↑ and ↓ choose, past the last
  * result loads the next page so every match can be reached, and ↵ puts the choice in focus.
  */
-import { Component, UiSchema } from "@effect/ui";
-import { Html } from "@effect/ui/html";
-import { Dialog } from "@effect/ui-kit";
-import { Layer, Schema } from "effect";
-import { AsyncResult } from "effect/reactivity";
-import { Incident } from "../domain/Overwatch.ts";
+import { Effect, Schema } from "effect";
+import { Incident, SearchHit } from "../domain/Overwatch.ts";
 import * as m from "../model.ts";
-import { SearchItems } from "../queries/SearchItems.ts";
 import { Overwatch } from "../services/Overwatch.ts";
+import { Command, defineView, el, emit, Option, run, type Step, TaggedEnum } from "../ui.ts";
 import { SearchIcon } from "./Glyphs.ts";
+import { Opening, sheet } from "./Sheet.ts";
 
-export const FinderProps = Schema.Struct({
+export const Props = Schema.Struct({
+  ...Opening,
   /** What was typed in the bar when the finder opened, searched at once. */
   initialQuery: Schema.String,
   incidents: Schema.Array(Incident),
 });
+export type Props = typeof Props.Type;
 
-const FinderMessage = UiSchema.TaggedEnum({
+const Results = Schema.Struct({ items: Schema.Array(SearchHit), nextCursor: Schema.NullOr(Schema.String) });
+
+export const Model = Schema.Struct({
+  q: Schema.String,
+  selected: Schema.Number,
+  /** The search being answered: each new query counts up, so a late answer to an earlier one is dropped. */
+  search: Schema.Number,
+  /** The matches loaded so far, null until the first page answers. */
+  results: Schema.NullOr(Results),
+  /** The next page, while it is on its way: one request at a time. */
+  loadingMore: Schema.Boolean,
+  error: Schema.NullOr(Schema.String),
+});
+export type Model = typeof Model.Type;
+
+export const Message = TaggedEnum({
   UpdatedQuery: { value: Schema.String },
   PressedArrow: { delta: Schema.Number },
   PressedEnter: {},
   ClickedResult: { id: Schema.String },
   ClickedMore: {},
   RequestedCloseDialog: {},
+  LoadedResults: { search: Schema.Number, items: Schema.Array(SearchHit), nextCursor: Schema.NullOr(Schema.String), more: Schema.Boolean },
+  FailedResults: { search: Schema.Number, message: Schema.String },
+  CompletedMount: { name: Schema.String },
+});
+export type Message = typeof Message.Type;
+
+export const Events = TaggedEnum({ Picked: { id: Schema.String }, RequestedClose: {} });
+export type Events = typeof Events.Type;
+
+/** One page of matches: the first a moment after the owner stops typing, later ones from the cursor. */
+export const Search = Command.define("Search", {
+  args: { q: Schema.String, search: Schema.Number, cursor: Schema.NullOr(Schema.String) },
+  messages: [Message.LoadedResults, Message.FailedResults],
+  execute: ({ q, search, cursor }) =>
+    Effect.gen(function* () {
+      const api = yield* Overwatch;
+      if (cursor === null) yield* Effect.sleep("90 millis");
+      return yield* api.search(q, Option.fromNullishOr(cursor));
+    }).pipe(
+      Effect.match({
+        onSuccess: (page) => Message.LoadedResults({ search, items: page.items, nextCursor: page.nextCursor, more: cursor !== null }),
+        onFailure: (error) => Message.FailedResults({ search, message: error.message }),
+      }),
+    ),
 });
 
-export const FinderEvents = UiSchema.TaggedEnum({ Picked: { id: Schema.String }, RequestedClose: {} });
+const query = (model: Model, q: string): Step<Model, Message, never> => {
+  const next = { ...model, q, selected: 0, search: model.search + 1, results: null, loadingMore: false, error: null };
+  return q.trim() ? run(next, Search({ q, search: next.search, cursor: null })) : { model: next };
+};
+
+/** A fresh finder searches what the bar held. */
+export const init = (props: Props) => query({ q: "", selected: 0, search: 0, results: null, loadingMore: false, error: null }, props.initialQuery);
+
+const loadMore = (model: Model): Step<Model, Message, never> =>
+  model.results?.nextCursor == null || model.loadingMore
+    ? { model }
+    : run({ ...model, loadingMore: true }, Search({ q: model.q, search: model.search, cursor: model.results.nextCursor }));
+
+export const update = (model: Model, message: Message): Step<Model, Message, Events> =>
+  Message.match(message, {
+    UpdatedQuery: ({ value }) => query(model, value),
+    PressedArrow: ({ delta }): Step<Model, Message, Events> => {
+      const items = model.results?.items ?? [];
+      if (!items.length) return { model };
+      // Moving past the last result loads the next page: every match can be reached.
+      if (delta > 0 && model.selected === items.length - 1 && model.results?.nextCursor != null) return loadMore(model);
+      return { model: { ...model, selected: Math.min(items.length - 1, Math.max(0, model.selected + delta)) } };
+    },
+    PressedEnter: () => {
+      const hit = model.results?.items[model.selected];
+      return hit ? emit(model, Events.Picked({ id: hit.id })) : { model };
+    },
+    ClickedResult: ({ id }) => emit(model, Events.Picked({ id })),
+    ClickedMore: () => loadMore(model),
+    RequestedCloseDialog: () => emit(model, Events.RequestedClose()),
+    LoadedResults: ({ search, items, nextCursor, more }) => {
+      if (search !== model.search) return { model };
+      const before = more ? model.results?.items ?? [] : [];
+      const known = new Set(before.map((x) => x.id));
+      return { model: { ...model, results: { items: [...before, ...items.filter((x) => !known.has(x.id))], nextCursor }, loadingMore: false, error: null } };
+    },
+    FailedResults: ({ search, message }) => ({ model: search === model.search ? { ...model, loadingMore: false, error: message } : model }),
+    CompletedMount: () => ({ model }),
+  });
 
 const WAY_LABEL: Record<string, string> = { done: "Done", later: "Later", never: "Never" };
 
-/** The matches loaded so far, and whether more can be loaded. */
-const loaded = (result: AsyncResult.AsyncResult<{ readonly items: ReadonlyArray<{ readonly id: string }>; readonly more: { readonly _tag: string } }, unknown>) =>
-  AsyncResult.isSuccess(result) ? { items: result.value.items, more: result.value.more._tag === "Available" } : { items: [], more: false };
-
-export const FinderNoDeps = Html.component({
-  name: "Finder",
-  props: FinderProps,
-  model: Schema.Struct({ q: Schema.String, selected: Schema.Number }),
-  message: FinderMessage,
-  events: FinderEvents,
-  queries: {
-    results: { query: SearchItems, debounce: "90 millis", args: ({ model }) => (model.q.trim() ? { q: model.q } : undefined) },
-  },
-}).make({
-  init: ($) => ({ q: $.props.initialQuery, selected: 0 }),
-  update: {
-    UpdatedQuery: ($, { value }) => $.evolve({ q: value, selected: 0 }),
-    PressedArrow: ($, { delta }) => {
-      const { items, more } = loaded($.queries.results);
-      if (!items.length) return $.model;
-      // Moving past the last result loads the next page: every match can be reached.
-      if (delta > 0 && $.model.selected === items.length - 1 && more) return $.loadMore("results");
-      return $.evolve({ selected: Math.min(items.length - 1, Math.max(0, $.model.selected + delta)) });
-    },
-    PressedEnter: ($) => {
-      const hit = loaded($.queries.results).items[$.model.selected];
-      return hit ? $.emit(FinderEvents.Picked({ id: hit.id })) : $.model;
-    },
-    ClickedResult: ($, { id }) => $.emit(FinderEvents.Picked({ id })),
-    ClickedMore: ($) => (loaded($.queries.results).more ? $.loadMore("results") : $.model),
-    RequestedCloseDialog: ($) => $.emit(FinderEvents.RequestedClose()),
-  },
-  view: (h, model) => {
-    const where = (id: string) => {
-      const i = h.props.incidents.find((x) => x.id === id);
-      return !i ? "" : i.way ? `put away: ${WAY_LABEL[i.way.kind] ?? ""}` : m.GROUP_LABEL[(i.group ?? "") as m.Group] ?? "";
-    };
-    const results = h.queries.results;
-    const list = !model.q.trim() ? []
-      : AsyncResult.isFailure(results) ? [h.li.class("no-results").children(results.cause.reasons.flatMap((r) => (r._tag === "Fail" ? [r.error.message] : []))[0] ?? "Search failed")]
-      : AsyncResult.isSuccess(results)
-      ? [
-        ...(results.value.items.length
-          ? results.value.items.map((r, n) =>
-            h.li.key(r.id).class("result", n === model.selected && "selected").attrs({ "data-result-id": r.id, role: "option" })
-              .on("click", FinderMessage.ClickedResult({ id: r.id }))
-              .children(h.b(r.title), h.span.class("where").children(where(r.id)), r.excerpt.trim() === r.title.trim() ? null : h.span.class("excerpt").children(r.excerpt))
+export const view = defineView<Model, Message, Props>((model, props, h) => {
+  const where = (id: string) => {
+    const i = props.incidents.find((x) => x.id === id);
+    return !i ? "" : i.way ? `put away: ${WAY_LABEL[i.way.kind] ?? ""}` : m.GROUP_LABEL[(i.group ?? "") as m.Group] ?? "";
+  };
+  const results = model.results;
+  const list = !model.q.trim() ? []
+    : model.error !== null ? [el(h, "li", { class: "no-results" }, model.error || "Search failed")]
+    : results !== null
+    ? [
+      ...(results.items.length
+        ? results.items.map((r, n) =>
+          el(
+            h,
+            "li",
+            { class: ["result", n === model.selected && "selected"], attrs: { "data-result-id": r.id, role: "option" }, on: [h.Key(r.id), h.OnClick(Message.ClickedResult({ id: r.id }))] },
+            el(h, "b", {}, r.title),
+            el(h, "span", { class: "where" }, where(r.id)),
+            r.excerpt.trim() === r.title.trim() ? null : el(h, "span", { class: "excerpt" }, r.excerpt),
           )
-          : [h.li.class("no-results").children(`Nothing matches “${model.q}”`)]),
-        results.value.more._tag === "End" ? null
-          : h.li.class("more").attrs({ "data-more": "", role: "option" }).on("click", FinderMessage.ClickedMore()).children("More results ", h.kbd("↓")),
-      ]
-      : [];
-    return Dialog(h, {
-      props: { open: true },
-      onEmit: { RequestedOpen: () => undefined, RequestedClose: () => FinderMessage.RequestedCloseDialog(), Settled: () => undefined },
-      view: (dialog) =>
-        dialog.portal(h.dialog)?.children(
-          dialog.backdrop(h.div.class("backdrop").attr("data-close", "")),
-          dialog.popup(h.div.class("palette").attrs({ role: "dialog", "aria-modal": "true", "aria-label": "Find" })).children(
-            h.div.class("palette-input").children(
-              SearchIcon(h),
-              dialog.initialFocus(h.input)
-                .attrs({ "data-search": "", placeholder: "Find problems, findings, evidence and prompts, even put away", "aria-label": "Find" })
-                .value(model.q)
-                .on("input", ({ value }) => FinderMessage.UpdatedQuery({ value }))
-                .on("keydown", ({ key }) =>
-                  key === "ArrowDown" ? FinderMessage.PressedArrow({ delta: 1 })
-                    : key === "ArrowUp" ? FinderMessage.PressedArrow({ delta: -1 })
-                    : key === "Enter" ? FinderMessage.PressedEnter()
-                    : undefined, { preventDefault: true }),
-            ),
-            h.ul.class("results").attrs({ "data-results": "", role: "listbox" }).children(...list),
-            h.footer(
-              h.span(h.kbd("↑"), h.kbd("↓"), " choose"),
-              h.span(h.kbd("↵"), " focus"),
-              h.span(h.kbd("Esc"), " close"),
-            ),
+        )
+        : [el(h, "li", { class: "no-results" }, `Nothing matches “${model.q}”`)]),
+      results.nextCursor === null ? null
+        : el(h, "li", { class: "more", attrs: { "data-more": "", role: "option" }, on: [h.OnClick(Message.ClickedMore())] }, "More results ", el(h, "kbd", {}, "↓")),
+    ]
+    : [];
+  return sheet(
+    h,
+    { opened: props.opened, close: Message.RequestedCloseDialog(), mounted: (message) => message, popup: { class: ["palette"], attrs: { "aria-label": "Find" } } },
+    el(
+      h,
+      "div",
+      { class: "palette-input" },
+      SearchIcon(h),
+      el(h, "input", {
+        attrs: { "data-search": "", placeholder: "Find problems, findings, evidence and prompts, even put away", "aria-label": "Find" },
+        on: [
+          h.Autofocus(true),
+          h.Value(model.q),
+          h.OnInput((value) => Message.UpdatedQuery({ value })),
+          h.OnKeyDownPreventDefault((key) =>
+            key === "ArrowDown" ? Option.some(Message.PressedArrow({ delta: 1 }))
+              : key === "ArrowUp" ? Option.some(Message.PressedArrow({ delta: -1 }))
+              : key === "Enter" ? Option.some(Message.PressedEnter())
+              : Option.none()
           ),
-        ) ?? h.text(""),
-    });
-  },
+        ],
+      }),
+    ),
+    el(h, "ul", { class: "results", attrs: { "data-results": "", role: "listbox" } }, ...list),
+    el(
+      h,
+      "footer",
+      {},
+      el(h, "span", {}, el(h, "kbd", {}, "↑"), el(h, "kbd", {}, "↓"), " choose"),
+      el(h, "span", {}, el(h, "kbd", {}, "↵"), " focus"),
+      el(h, "span", {}, el(h, "kbd", {}, "Esc"), " close"),
+    ),
+  );
 });
-
-export const Finder = FinderNoDeps.pipe(Component.provide(SearchItems.layer.pipe(Layer.provide(Overwatch.layer))));

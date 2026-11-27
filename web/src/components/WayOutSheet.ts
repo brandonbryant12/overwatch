@@ -2,104 +2,120 @@
  * Later and Never ask one thing before they are sent: until when, or why. The decision is bound to the state the owner
  * was shown when the sheet opened; the page that opened it sends it.
  */
-import { Command, UiSchema } from "@effect/ui";
-import { Html, HtmlCommand } from "@effect/ui/html";
-import { Dialog } from "@effect/ui-kit";
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { WayOutBody } from "../domain/Overwatch.ts";
 import * as m from "../model.ts";
+import { Command, defineView, Dom, el, emit, run, type Step, TaggedEnum } from "../ui.ts";
+import { Opening, sheet } from "./Sheet.ts";
 
-export const WayOutSheetProps = Schema.Struct({
+export const Props = Schema.Struct({
+  ...Opening,
   kind: Schema.Literals(["later", "never"]),
   title: Schema.String,
   /** The page's wall clock, for Later's times. */
   nowMs: Schema.Number,
 });
+export type Props = typeof Props.Type;
 
-const WayOutSheetMessage = UiSchema.TaggedEnum({
+export const Model = Schema.Struct({ text: Schema.String, error: Schema.String });
+export type Model = typeof Model.Type;
+export const init: Model = { text: "", error: "" };
+
+export const Message = TaggedEnum({
   UpdatedInput: { value: Schema.String },
   ClickedReason: { reason: Schema.String },
   SubmittedSheet: {},
   RequestedCloseDialog: {},
+  CompletedFocusInput: {},
+  CompletedMount: { name: Schema.String },
 });
+export type Message = typeof Message.Type;
 
-export const WayOutSheetEvents = UiSchema.TaggedEnum({
+export const Events = TaggedEnum({
   Submitted: { body: WayOutBody },
   RequestedClose: {},
 });
+export type Events = typeof Events.Type;
 
-const SheetInput = Html.ref("SheetInput", "input");
+/** Puts the caret back in the sheet's field after a reason chip filled it. */
+const FocusInput = Command.define("FocusInput", {
+  messages: [Message.CompletedFocusInput],
+  execute: Dom.focus("[data-sheet-input]").pipe(Effect.ignore, Effect.as(Message.CompletedFocusInput())),
+});
 
-export const WayOutSheet = Html.component({
-  name: "WayOutSheet",
-  props: WayOutSheetProps,
-  model: Schema.Struct({ text: Schema.String, error: Schema.String }),
-  message: WayOutSheetMessage,
-  events: WayOutSheetEvents,
-}).make({
-  init: () => ({ text: "", error: "" }),
-  update: {
-    UpdatedInput: ($, { value }) => $.evolve({ text: value }),
-    ClickedReason: ($, { reason }) => $.evolve({ text: reason }).run(HtmlCommand.focus(SheetInput, () => undefined).pipe(Command.asNoop)),
-    SubmittedSheet: ($) => {
-      if ($.props.kind === "never") {
-        const reason = $.model.text.trim();
-        return $.emit(WayOutSheetEvents.Submitted({ body: reason ? { action: "never", reason } : { action: "never" } }));
+export const update = (model: Model, message: Message, props: Props): Step<Model, Message, Events> =>
+  Message.match(message, {
+    UpdatedInput: ({ value }) => ({ model: { ...model, text: value } }),
+    ClickedReason: ({ reason }) => run({ ...model, text: reason }, FocusInput()),
+    SubmittedSheet: () => {
+      if (props.kind === "never") {
+        const reason = model.text.trim();
+        return emit(model, Events.Submitted({ body: reason ? { action: "never", reason } : { action: "never" } }));
       }
-      const body = m.later($.model.text, $.props.nowMs);
-      return "error" in body ? $.evolve({ error: body.error }) : $.emit(WayOutSheetEvents.Submitted({ body }));
+      const body = m.later(model.text, props.nowMs);
+      return "error" in body ? { model: { ...model, error: body.error } } : emit(model, Events.Submitted({ body }));
     },
-    RequestedCloseDialog: ($) => $.emit(WayOutSheetEvents.RequestedClose()),
-  },
-  view: (h, model) => {
-    const later = h.props.kind === "later";
-    const input = (name: string, placeholder: string) =>
-      h.input.ref(SheetInput).attrs({ name, "data-sheet-input": "", placeholder, autofocus: "" }).value(model.text)
-        .on("input", ({ value }) => WayOutSheetMessage.UpdatedInput({ value }));
-    return Dialog(h, {
-      props: { open: true },
-      onEmit: { RequestedOpen: () => undefined, RequestedClose: () => WayOutSheetMessage.RequestedCloseDialog(), Settled: () => undefined },
-      view: (dialog) =>
-        dialog.portal(h.dialog)?.children(
-          dialog.backdrop(h.div.class("backdrop").attr("data-close", "")),
-          dialog.popup(h.div.class("sheet").attrs({ role: "dialog", "aria-modal": "true" })).children(
-            h.form.attr("data-sheet", h.props.kind).on("submit", WayOutSheetMessage.SubmittedSheet()).children(
-              dialog.title(h.h2.id("sheet-title")).children(later ? "Later" : "Never"),
-              h.p.class("sheet-subject").children(h.props.title),
-              ...(later
-                ? [
-                  h.label("Until ", dialog.initialFocus(input("until", "something changes"))),
-                  h.p.class("hint").children(
-                    "Leave empty for ",
-                    h.b("until something changes"),
-                    " (a deploy here, a finding, or worse). Or type ",
-                    h.code("2h"),
-                    ", ",
-                    h.code("tomorrow"),
-                    ", ",
-                    h.code("monday"),
-                    ", ",
-                    h.code("worse"),
-                    ".",
-                  ),
-                ]
-                : [
-                  h.p.class("hint").children("It stays counted and searchable, and comes back only if it becomes more severe or ten times as frequent."),
-                  h.div.class("chips").children(
-                    ...["noise", "expected", "duplicate"].map((reason) =>
-                      h.button.class("chip-option").attrs({ type: "button", "data-reason": reason }).on("click", WayOutSheetMessage.ClickedReason({ reason })).children(reason)
-                    ),
-                  ),
-                  h.label("Reason ", dialog.initialFocus(input("reason", "optional"))),
-                ]),
-              h.p.class("error").attr("data-sheet-error", "").children(model.error),
-              h.div.class("sheet-actions").children(
-                dialog.close(h.button.attrs({ type: "button", "data-close": "" })).children("Cancel ", h.kbd("Esc")),
-                h.button.class("primary").attr("type", "submit").children(later ? "Later " : "Never ", h.kbd("↵")),
-              ),
+    RequestedCloseDialog: () => emit(model, Events.RequestedClose()),
+    CompletedFocusInput: () => ({ model }),
+    CompletedMount: () => ({ model }),
+  });
+
+export const view = defineView<Model, Message, Props>((model, props, h) => {
+  const later = props.kind === "later";
+  const input = (name: string, placeholder: string) =>
+    el(h, "input", {
+      attrs: { name, "data-sheet-input": "", placeholder },
+      on: [h.Autofocus(true), h.Value(model.text), h.OnInput((value) => Message.UpdatedInput({ value }))],
+    });
+  return sheet(
+    h,
+    { opened: props.opened, close: Message.RequestedCloseDialog(), mounted: (message) => message, labelledBy: "sheet-title", popup: { class: ["sheet"] } },
+    el(
+      h,
+      "form",
+      { attrs: { "data-sheet": props.kind }, on: [h.OnSubmit(Message.SubmittedSheet())] },
+      el(h, "h2", { attrs: { id: "sheet-title" } }, later ? "Later" : "Never"),
+      el(h, "p", { class: "sheet-subject" }, props.title),
+      ...(later
+        ? [
+          el(h, "label", {}, "Until ", input("until", "something changes")),
+          el(
+            h,
+            "p",
+            { class: "hint" },
+            "Leave empty for ",
+            el(h, "b", {}, "until something changes"),
+            " (a deploy here, a finding, or worse). Or type ",
+            el(h, "code", {}, "2h"),
+            ", ",
+            el(h, "code", {}, "tomorrow"),
+            ", ",
+            el(h, "code", {}, "monday"),
+            ", ",
+            el(h, "code", {}, "worse"),
+            ".",
+          ),
+        ]
+        : [
+          el(h, "p", { class: "hint" }, "It stays counted and searchable, and comes back only if it becomes more severe or ten times as frequent."),
+          el(
+            h,
+            "div",
+            { class: "chips" },
+            ...["noise", "expected", "duplicate"].map((reason) =>
+              el(h, "button", { class: "chip-option", attrs: { type: "button", "data-reason": reason }, on: [h.OnClick(Message.ClickedReason({ reason }))] }, reason)
             ),
           ),
-        ) ?? h.text(""),
-    });
-  },
+          el(h, "label", {}, "Reason ", input("reason", "optional")),
+        ]),
+      el(h, "p", { class: "error", attrs: { "data-sheet-error": "" } }, model.error),
+      el(
+        h,
+        "div",
+        { class: "sheet-actions" },
+        el(h, "button", { attrs: { type: "button", "data-close": "" }, on: [h.OnClick(Message.RequestedCloseDialog())] }, "Cancel ", el(h, "kbd", {}, "Esc")),
+        el(h, "button", { class: "primary", attrs: { type: "submit" } }, later ? "Later " : "Never ", el(h, "kbd", {}, "↵")),
+      ),
+    ),
+  );
 });

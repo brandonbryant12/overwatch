@@ -1,12 +1,11 @@
 /** "Was this right?": one dated line in the app's playbook, read by later investigations of that app. */
-import { Command, Component, UiSchema } from "@effect/ui";
-import { Html } from "@effect/ui/html";
-import { Dialog } from "@effect/ui-kit";
-import { Effect, Layer, Schema } from "effect";
-import { ItemsTag } from "../queries/tags.ts";
+import { Effect, Schema } from "effect";
 import { Overwatch } from "../services/Overwatch.ts";
+import { Command, defineView, el, emit, Option, run, type Step, TaggedEnum } from "../ui.ts";
+import { Opening, sheet } from "./Sheet.ts";
 
-export const CorrectSheetProps = Schema.Struct({
+export const Props = Schema.Struct({
+  ...Opening,
   id: Schema.String,
   title: Schema.String,
   /** The verdict being corrected, in words. */
@@ -14,87 +13,90 @@ export const CorrectSheetProps = Schema.Struct({
   app: Schema.String,
   jobId: Schema.String,
 });
+export type Props = typeof Props.Type;
 
-const CorrectSheetMessage = UiSchema.TaggedEnum({
+export const Model = Schema.Struct({ text: Schema.String, error: Schema.String });
+export type Model = typeof Model.Type;
+export const init: Model = { text: "", error: "" };
+
+export const Message = TaggedEnum({
   UpdatedText: { value: Schema.String },
   SubmittedSheet: {},
   SucceededSaveCorrection: {},
   FailedSaveCorrection: { message: Schema.String },
   RequestedCloseDialog: {},
+  CompletedMount: { name: Schema.String },
 });
+export type Message = typeof Message.Type;
 
-export const CorrectSheetEvents = UiSchema.TaggedEnum({ Saved: {}, RequestedClose: {} });
+/** `Saved` also tells the page the item changed, so it reads it again. */
+export const Events = TaggedEnum({ Saved: {}, RequestedClose: {} });
+export type Events = typeof Events.Type;
 
-/** Saves the correction under a fresh request key; the item reads again. */
-class SaveCorrection extends Command.Service<SaveCorrection>()("correct/SaveCorrection", {
+/** Saves the correction under a fresh request key. */
+export const SaveCorrection = Command.define("SaveCorrection", {
   args: { id: Schema.String, jobId: Schema.String, text: Schema.String },
-  success: CorrectSheetMessage,
-  invalidates: () => [ItemsTag],
-}) {
-  static readonly layer = this.toLayer(
+  messages: [Message.SucceededSaveCorrection, Message.FailedSaveCorrection],
+  execute: ({ id, jobId, text }) =>
     Effect.gen(function* () {
       const api = yield* Overwatch;
-      return ({ id, jobId, text }) =>
-        api.focus(id).pipe(
-          Effect.flatMap((focus) => api.correct(id, jobId, text, focus.requestKey)),
-          Effect.match({
-            onSuccess: () => CorrectSheetMessage.SucceededSaveCorrection(),
-            onFailure: (error) => CorrectSheetMessage.FailedSaveCorrection({ message: error.message }),
-          }),
-        );
-    }),
-  );
-}
-
-export const CorrectSheetNoDeps = Html.component({
-  name: "CorrectSheet",
-  props: CorrectSheetProps,
-  model: Schema.Struct({ text: Schema.String, error: Schema.String }),
-  message: CorrectSheetMessage,
-  events: CorrectSheetEvents,
-}).make({
-  init: () => ({ text: "", error: "" }),
-  update: {
-    UpdatedText: ($, { value }) => $.evolve({ text: value }),
-    SubmittedSheet: ($) => {
-      const text = $.model.text.trim();
-      return text
-        ? $.run(SaveCorrection.make({ id: $.props.id, jobId: $.props.jobId, text }))
-        : $.evolve({ error: "Write what was wrong or what to check" });
-    },
-    SucceededSaveCorrection: ($) => $.emit(CorrectSheetEvents.Saved()),
-    FailedSaveCorrection: ($, { message }) => $.evolve({ error: message }),
-    RequestedCloseDialog: ($) => $.emit(CorrectSheetEvents.RequestedClose()),
-  },
-  view: (h, model) =>
-    Dialog(h, {
-      props: { open: true },
-      onEmit: { RequestedOpen: () => undefined, RequestedClose: () => CorrectSheetMessage.RequestedCloseDialog(), Settled: () => undefined },
-      view: (dialog) =>
-        dialog.portal(h.dialog)?.children(
-          dialog.backdrop(h.div.class("backdrop").attr("data-close", "")),
-          dialog.popup(h.div.class("sheet").attrs({ role: "dialog", "aria-modal": "true" })).children(
-            h.form.attrs({ "data-sheet": "correct", "data-job": h.props.jobId }).on("submit", CorrectSheetMessage.SubmittedSheet()).children(
-              dialog.title(h.h2.id("correct-title")).children("Was this right?"),
-              h.p.class("sheet-subject").children(`${h.props.title}: ${h.props.verdict}`),
-              h.label(
-                `What should the next investigation of ${h.props.app} know? `,
-                dialog.initialFocus(h.textarea)
-                  .attrs({ "data-sheet-input": "", rows: "4", maxlength: "1000", placeholder: "e.g. The regional maintenance window runs 02:00–03:00 UTC; check it first." })
-                  .value(model.text)
-                  .on("input", ({ value }) => CorrectSheetMessage.UpdatedText({ value }))
-                  .on("keydown", ({ key, meta, ctrl }) => (key === "Enter" && (meta || ctrl) ? CorrectSheetMessage.SubmittedSheet() : undefined), { preventDefault: true }),
-              ),
-              h.p.class("hint").children(`It becomes one dated line in ${h.props.app}'s playbook and is given to later readers as guidance. It does not change this verdict.`),
-              h.p.class("error").attr("data-sheet-error", "").children(model.error),
-              h.div.class("sheet-actions").children(
-                dialog.close(h.button.attrs({ type: "button", "data-close": "" })).children("Cancel ", h.kbd("Esc")),
-                h.button.class("primary").attr("type", "submit").children("Save ", h.kbd("⌘↵")),
-              ),
-            ),
-          ),
-        ) ?? h.text(""),
-    }),
+      const focus = yield* api.focus(id);
+      yield* api.correct(id, jobId, text, focus.requestKey);
+    }).pipe(
+      Effect.match({
+        onSuccess: () => Message.SucceededSaveCorrection(),
+        onFailure: (error) => Message.FailedSaveCorrection({ message: error.message }),
+      }),
+    ),
 });
 
-export const CorrectSheet = CorrectSheetNoDeps.pipe(Component.provide(SaveCorrection.layer.pipe(Layer.provide(Overwatch.layer))));
+export const update = (model: Model, message: Message, props: Props): Step<Model, Message, Events> =>
+  Message.match(message, {
+    UpdatedText: ({ value }) => ({ model: { ...model, text: value } }),
+    SubmittedSheet: () => {
+      const text = model.text.trim();
+      return text ? run(model, SaveCorrection({ id: props.id, jobId: props.jobId, text })) : { model: { ...model, error: "Write what was wrong or what to check" } };
+    },
+    SucceededSaveCorrection: () => emit(model, Events.Saved()),
+    FailedSaveCorrection: ({ message }) => ({ model: { ...model, error: message } }),
+    RequestedCloseDialog: () => emit(model, Events.RequestedClose()),
+    CompletedMount: () => ({ model }),
+  });
+
+export const view = defineView<Model, Message, Props>((model, props, h) =>
+  sheet(
+    h,
+    { opened: props.opened, close: Message.RequestedCloseDialog(), mounted: (message) => message, labelledBy: "correct-title", popup: { class: ["sheet"] } },
+    el(
+      h,
+      "form",
+      { attrs: { "data-sheet": "correct", "data-job": props.jobId }, on: [h.OnSubmit(Message.SubmittedSheet())] },
+      el(h, "h2", { attrs: { id: "correct-title" } }, "Was this right?"),
+      el(h, "p", { class: "sheet-subject" }, `${props.title}: ${props.verdict}`),
+      el(
+        h,
+        "label",
+        {},
+        `What should the next investigation of ${props.app} know? `,
+        el(h, "textarea", {
+          attrs: { "data-sheet-input": "", rows: "4", maxlength: "1000", placeholder: "e.g. The regional maintenance window runs 02:00–03:00 UTC; check it first." },
+          on: [
+            h.Autofocus(true),
+            h.Value(model.text),
+            h.OnInput((value) => Message.UpdatedText({ value })),
+            h.OnKeyDownPreventDefault((key, { metaKey, ctrlKey }) => (key === "Enter" && (metaKey || ctrlKey) ? Option.some(Message.SubmittedSheet()) : Option.none())),
+          ],
+        }),
+      ),
+      el(h, "p", { class: "hint" }, `It becomes one dated line in ${props.app}'s playbook and is given to later readers as guidance. It does not change this verdict.`),
+      el(h, "p", { class: "error", attrs: { "data-sheet-error": "" } }, model.error),
+      el(
+        h,
+        "div",
+        { class: "sheet-actions" },
+        el(h, "button", { attrs: { type: "button", "data-close": "" }, on: [h.OnClick(Message.RequestedCloseDialog())] }, "Cancel ", el(h, "kbd", {}, "Esc")),
+        el(h, "button", { class: "primary", attrs: { type: "submit" } }, "Save ", el(h, "kbd", {}, "⌘↵")),
+      ),
+    ),
+  )
+);

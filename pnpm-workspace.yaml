@@ -1,6 +1,3 @@
-minimumReleaseAgeExclude:
-  - '@effect/platform-browser@4.1.6'
-  - '@effect/platform-node-shared@4.1.6'
-  - '@effect/platform-node@4.1.6'
-  - '@effect/sql-sqlite-node@4.1.6'
-  - effect@4.1.6
+# Every npm package, direct or transitive, must have been published at least 72 hours (4320 minutes) before it is
+# installed. No exclusions: a release younger than that waits.
+minimumReleaseAge: 4320

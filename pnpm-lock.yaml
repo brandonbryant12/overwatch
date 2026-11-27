@@ -9,23 +9,20 @@ importers:
   .:
     dependencies:
       '@effect/platform-browser':
-        specifier: 4.1.6
-        version: 4.1.6(effect@4.1.6)
+        specifier: 4.1.5
+        version: 4.1.5(effect@4.1.5)
       '@effect/platform-node':
-        specifier: 4.1.6
-        version: 4.1.6(effect@4.1.6)(redis@6.4.0)
+        specifier: 4.1.5
+        version: 4.1.5(effect@4.1.5)(redis@6.4.0)
       '@effect/sql-sqlite-node':
-        specifier: 4.1.6
-        version: 4.1.6(effect@4.1.6)
-      '@effect/ui':
-        specifier: https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba
-        version: https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba(effect@4.1.6)
-      '@effect/ui-kit':
-        specifier: https://pkg.pr.new/Effect-TS/ui/@effect/ui-kit@fab0fba
-        version: https://pkg.pr.new/Effect-TS/ui/@effect/ui-kit@fab0fba(@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba(effect@4.1.6))(effect@4.1.6)
+        specifier: 4.1.5
+        version: 4.1.5(effect@4.1.5)
       effect:
-        specifier: 4.1.6
-        version: 4.1.6
+        specifier: 4.1.5
+        version: 4.1.5
+      foldkit:
+        specifier: 0.171.0
+        version: 0.171.0(@effect/platform-browser@4.1.5(effect@4.1.5))(effect@4.1.5)
     devDependencies:
       '@types/node':
         specifier: ^22.10.0
@@ -42,41 +39,28 @@ importers:
 
 packages:
 
-  '@effect/platform-browser@4.1.6':
-    resolution: {integrity: sha512-zlQOKhapRUJjLX87RrVWEPizinYWxXwj8O34p4PqIzOVjNY7go64yVxC02hVZE0JAi55Pd9/aE8SLg+ldqzTMw==}
+  '@effect/platform-browser@4.1.5':
+    resolution: {integrity: sha512-48wRnowGMrUtcF8A0xlqPh6HY/01NTYoA9HNwqGRLNGUXbQHbN97zhr6+qvsxJ4seHipjLXazegSwMkUHarPdQ==}
     peerDependencies:
-      effect: ^4.1.6
+      effect: ^4.1.5
 
-  '@effect/platform-node-shared@4.1.6':
-    resolution: {integrity: sha512-RWKHX5TEZet2KC/NlBu5prBkZT30m6h8YTSWfJM0wIw0BNMkfEzCuH6N5HOw8mUudclWp5z1XTzsZ7xg0h+6Qw==}
+  '@effect/platform-node-shared@4.1.5':
+    resolution: {integrity: sha512-JzlrYe4uKaBFTWihBRXo2pDjkUVB39kQpKdGfXdbp7Co5sKT8hbcjOmdB5pg/WOYESdGTddd3fxD4lwlZELbZQ==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
-      effect: ^4.1.6
+      effect: ^4.1.5
 
-  '@effect/platform-node@4.1.6':
-    resolution: {integrity: sha512-DNHzWIRARCCoK6Ez5MOqJ6H81e5FbQecH8GY41ftJGqATENUOVOLkT1iNgxBt6zPi36iF1EpraBen+MjKUqHpw==}
+  '@effect/platform-node@4.1.5':
+    resolution: {integrity: sha512-tFnRvxF9EKc3oU17sDHj1JeLP+TL/IkaOEl3IUk2EjgMS0x7AWs0ioUXjdNKLb3Z1LdjVfMf/DxsNh9PW5FFAg==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
-      effect: ^4.1.6
+      effect: ^4.1.5
       redis: '>=5.1.0 <7.0.0'
 
-  '@effect/sql-sqlite-node@4.1.6':
-    resolution: {integrity: sha512-HS64cfwY5x5A+xMuePZiEkadCBGw6BYZkEfblU1JOnOBndxRrPdcmaEDGk1MHd5i0d7GqhxrPsbdTTZON08Y2Q==}
+  '@effect/sql-sqlite-node@4.1.5':
+    resolution: {integrity: sha512-eo+1W3lX/2cT3ATzjqhya/WvnhEByjG7DWfmWSPcENG04jjywV5p0eZ+COr+4nsXTMSoA9H2TdaqYWTnXNM9Qw==}
     peerDependencies:
-      effect: ^4.1.6
-
-  '@effect/ui-kit@https://pkg.pr.new/Effect-TS/ui/@effect/ui-kit@fab0fba':
-    resolution: {integrity: sha512-UVA3D/1FMfQjd1rWabMJpeZMXe1sMchpazy0lD95JPEvnmwvgjigQwFnDI6T9RZvd1pze1iujdrri7KjnW0dHw==, tarball: https://pkg.pr.new/Effect-TS/ui/@effect/ui-kit@fab0fba}
-    version: 0.0.0
-    peerDependencies:
-      '@effect/ui': ^0.0.0
-      effect: ^4.1.4
-
-  '@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba':
-    resolution: {integrity: sha512-nsxVjvaKwCbwUgD2Fz+XeQnjHK9IFuSOct5NDv/y6wF/4f0KKlDyUjN2a8Ijl+oiPPCNFrtlmgLLeDTIoIwsjA==, tarball: https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba}
-    version: 0.0.0
-    peerDependencies:
-      effect: ^4.1.4
+      effect: ^4.1.5
 
   '@emnapi/core@2.0.0-beta.2':
     resolution: {integrity: sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A==}
@@ -246,12 +230,26 @@ packages:
   '@types/ws@8.18.2':
     resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
-  effect@4.1.6:
-    resolution: {integrity: sha512-P3CxMsdcSCle/7/FnPILd9GJkNqGtduKam2LX9Xsb8LoOjmeQ9Kmsuh16JwtIthaxLyiTCOzUUt+PZsXIohl+A==}
+  effect@4.1.5:
+    resolution: {integrity: sha512-xyR20KhQI0vg2gD8ILUSQRTTESEYJ0JKdP+QD8J37xbwPTqXRxFM/l0+vUVD9fuSvoYruoTqyt33C4FZv1s4TQ==}
+
+  entities@9.0.0:
+    resolution: {integrity: sha512-oJFNDJg3kTPwAD1cNn2+WmUq4wFoo09npc3Ydf1D7ED4smRiWrsKnaLxykrTWgyGEcusc87P5dxlAleol9kpkg==}
+    engines: {node: '>=20.19.0'}
 
   fast-check@3.23.2:
     resolution: {integrity: sha512-h5+1OzzfCC3Ef7VbtKdcv7zsstUQwUDlYpUTvjeUsJAssPgLn7QzbboPtL5ro04Mq0rPOsMzl7q5hIbRs2wD1A==}
     engines: {node: '>=8.0.0'}
+
+  foldkit@0.171.0:
+    resolution: {integrity: sha512-85T5T69XJd8S6hcjU9d8uXje8UmPf+WIvQvQVYyQvJYPo3L8iLl+W62Req7PxOiQtCw0AuSNPJfiyy+A1OBucA==}
+    engines: {node: '>=20.19.0'}
+    peerDependencies:
+      '@effect/platform-browser': ~4.1.0
+      effect: ~4.1.0
+
+  parse5@8.1.1:
+    resolution: {integrity: sha512-EcR/6WDcU7b2N3vQSxKALCk9lXGtUMQxXio008OEMBE0kavu/7JLfBEeFPzi43nMqVDSbEn3QCK+BMCc9zO//w==}
 
   pure-rand@6.1.0:
     resolution: {integrity: sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==}
@@ -294,41 +292,32 @@ packages:
 
 snapshots:
 
-  '@effect/platform-browser@4.1.6(effect@4.1.6)':
+  '@effect/platform-browser@4.1.5(effect@4.1.5)':
     dependencies:
-      effect: 4.1.6
+      effect: 4.1.5
 
-  '@effect/platform-node-shared@4.1.6(effect@4.1.6)':
+  '@effect/platform-node-shared@4.1.5(effect@4.1.5)':
     dependencies:
       '@types/ws': 8.18.2
-      effect: 4.1.6
+      effect: 4.1.5
       ws: 8.23.0
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/platform-node@4.1.6(effect@4.1.6)(redis@6.4.0)':
+  '@effect/platform-node@4.1.5(effect@4.1.5)(redis@6.4.0)':
     dependencies:
-      '@effect/platform-node-shared': 4.1.6(effect@4.1.6)
-      effect: 4.1.6
+      '@effect/platform-node-shared': 4.1.5(effect@4.1.5)
+      effect: 4.1.5
       redis: 6.4.0
       undici: 8.13.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@effect/sql-sqlite-node@4.1.6(effect@4.1.6)':
+  '@effect/sql-sqlite-node@4.1.5(effect@4.1.5)':
     dependencies:
-      effect: 4.1.6
-
-  '@effect/ui-kit@https://pkg.pr.new/Effect-TS/ui/@effect/ui-kit@fab0fba(@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba(effect@4.1.6))(effect@4.1.6)':
-    dependencies:
-      '@effect/ui': https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba(effect@4.1.6)
-      effect: 4.1.6
-
-  '@effect/ui@https://pkg.pr.new/Effect-TS/ui/@effect/ui@fab0fba(effect@4.1.6)':
-    dependencies:
-      effect: 4.1.6
+      effect: 4.1.5
 
   '@emnapi/core@2.0.0-beta.2':
     dependencies:
@@ -440,11 +429,23 @@ snapshots:
     dependencies:
       '@types/node': 22.20.5
 
-  effect@4.1.6: {}
+  effect@4.1.5: {}
+
+  entities@9.0.0: {}
 
   fast-check@3.23.2:
     dependencies:
       pure-rand: 6.1.0
+
+  foldkit@0.171.0(@effect/platform-browser@4.1.5(effect@4.1.5))(effect@4.1.5):
+    dependencies:
+      '@effect/platform-browser': 4.1.5(effect@4.1.5)
+      effect: 4.1.5
+      parse5: 8.1.1
+
+  parse5@8.1.1:
+    dependencies:
+      entities: 9.0.0
 
   pure-rand@6.1.0: {}
 

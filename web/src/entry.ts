@@ -1,13 +1,12 @@
 /**
  * Boots the page: reads what this browser remembers (the theme the head script applied, which groups are open), then
- * mounts the page over the service's own origin for as long as the document lives.
+ * runs the page over the service's own origin for as long as the document lives.
  */
-import { BrowserKeyValueStore } from "@effect/platform-browser";
-import { BrowserHost } from "@effect/ui/html";
 import { Clock, Effect, Layer, Option, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { KeyValueStore } from "effect/persistence";
-import { App, Theme } from "./App.ts";
+import { Runtime } from "foldkit";
+import { AppLayer, AppModel, AppProps, init, subscriptions, Theme, update, view } from "./App.ts";
 
 /** Which groups the owner opened or closed last time; Working and Quiet start closed. */
 const Remembered = Schema.fromJsonString(Schema.Struct({
@@ -17,7 +16,7 @@ const Remembered = Schema.fromJsonString(Schema.Struct({
   quiet: Schema.optionalKey(Schema.Boolean),
 }));
 
-const props = Effect.gen(function* () {
+const flags = Effect.gen(function* () {
   const store = yield* KeyValueStore.KeyValueStore;
   const groups = yield* store.get("ow-groups").pipe(
     Effect.map((text) => Option.flatMap(Option.fromNullishOr(text), Schema.decodeUnknownOption(Remembered))),
@@ -29,21 +28,39 @@ const props = Effect.gen(function* () {
     initialCollapsed: { needsYou: false, new: false, working: true, quiet: true, ...remembered },
     now: { wallMs: yield* Clock.currentTimeMillis, monoMs: Number(yield* Clock.currentTimeNanos) / 1e6 },
   };
-}).pipe(Effect.provide(BrowserKeyValueStore.layerLocalStorage));
-
-/**
- * Effect UI's browser host keeps each element's handler record on the element as `$r`. Kept enumerable, a tool that
- * reads an element by value (the DevTools protocol, as the acceptance suite does) walks from it into the whole
- * component tree and gives up. The record is kept where the host puts it, only out of enumeration.
- */
-Object.defineProperty(Node.prototype, "$r", {
-  configurable: true,
-  get: () => undefined,
-  set(this: Node, record: unknown) {
-    Object.defineProperty(this, "$r", { value: record, writable: true, configurable: true, enumerable: false });
-  },
 });
 
-const Main = BrowserHost.mount(App, props, document.getElementById("app")!).pipe(Layer.provide(FetchHttpClient.layer));
+/**
+ * Foldkit paints on the next animation frame; Effect UI, like the page's contract, paints in the same task as the
+ * Message (a microtask). The acceptance suites read the page straight after a key press, and a key that moves focus
+ * or opens a sheet must show it before the next key, so the frame callbacks this page asks for run as microtasks.
+ * Nothing else here asks for frames.
+ */
+const frames = new Set<number>();
+let frame = 0;
+window.requestAnimationFrame = (callback) => {
+  const id = ++frame;
+  frames.add(id);
+  queueMicrotask(() => frames.delete(id) && callback(performance.now()));
+  return id;
+};
+window.cancelAnimationFrame = (id) => void frames.delete(id);
 
-Layer.launch(Main).pipe(Effect.runFork);
+/**
+ * Requests go through the window's `fetch` as it is when each one is sent, not as it was when the first one went out
+ * (Effect's default keeps the first): a script that wraps `fetch` later sees every request after it.
+ */
+const HttpClient = FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, (input, init) => globalThis.fetch(input, init))));
+
+const application = Runtime.makeApplication({
+  Model: AppModel,
+  Flags: AppProps,
+  init,
+  update,
+  view,
+  subscriptions,
+  container: document.getElementById("app"),
+  resources: AppLayer.pipe(Layer.provide(HttpClient)),
+});
+
+Runtime.run(application, { flags });

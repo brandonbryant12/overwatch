@@ -2,7 +2,7 @@
 
 Overwatch watches your apps on Kubernetes and Datadog from your laptop, counts what goes wrong exactly where it
 read everything inside limits it writes down, marks every other total as a lower bound, says honestly when it does
-not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, built on [Effect](https://effect.website) 4 for the service and Effect UI for the page.
+not know, and lets an OpenCode model investigate with evidence it cannot invent. It is one Node process and one SQLite file, built on [Effect](https://effect.website) 4 for the service and [Foldkit](https://foldkit.dev) (on Effect) for the page.
 
 This is the **simple core, milestones 1 to 3**: the kernel, the tools for proving it on a real laptop and a real
 model, the page, and the agents.

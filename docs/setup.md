@@ -22,7 +22,7 @@ bin/overwatch check     # step 2 first: write the configuration
 | `gh` | Checked by `doctor` for later milestones. | `gh --version` |
 
 `pnpm install` fetches the runtime dependencies, which are Effect's own packages (`effect`, `@effect/platform-node`,
-`@effect/sql-sqlite-node`, and `@effect/ui` with `@effect/ui-kit` for the page), and builds the page into `web/dist`
+`@effect/sql-sqlite-node`, and `@effect/platform-browser` with `foldkit` for the page), and builds the page into `web/dist`
 with rolldown. The service itself is not built: Node runs its TypeScript directly. If a registry proxy blocks
 rolldown's native binding, the install still succeeds; build the page on another machine with `pnpm run build:web` and
 copy `web/dist` across.

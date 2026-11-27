@@ -4,7 +4,7 @@
 > `web/src/`). The visual guidance (tokens, states, type, spacing, motion, logo, keyboard map) is current and is what
 > the page uses; where this guide names a file or a framework, read the current place instead: tokens in
 > `web/tokens.css`, styles in `web/page.css`, page logic in `web/src/model.ts` and `web/freshness.mjs` (tested in
-> `test/page.test.ts`), the Effect UI components in `web/src/components/`, the logo in `web/logo.svg`. The keyboard
+> `test/page.test.ts`), the Foldkit components in `web/src/components/`, the logo in `web/logo.svg`. The keyboard
 > map that holds today is in `docs/using.md`.
 
 
