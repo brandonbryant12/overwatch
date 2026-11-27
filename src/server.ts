@@ -8,7 +8,7 @@
  * MCP, from `src/mcp.ts`). Requests must come to a loopback host name, and from the same origin if they name one.
  */
 import { NodeHttpServer, NodeSocket } from "@effect/platform-node";
-import { Cause, Effect, FileSystem, Layer, Option, Path, Predicate, Schedule, Schema, Stream } from "effect";
+import { Cause, Effect, FileSystem, Layer, Option, Path, Predicate, PubSub, Schedule, Schema, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 import { OpenCodeClient } from "./opencode.ts";
@@ -24,8 +24,8 @@ import { freshen } from "./demo.ts";
 import { doctor } from "./doctor.ts";
 import { ApiError, apiError, type Full } from "./errors.ts";
 import { Fixes } from "./fixes.ts";
-import { act, ask, basisOf, deadlines, detail, focus, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
-import { McpRoutes } from "./mcp.ts";
+import { act, ask, basisOf, deadlines, focus, inbox, keyed, rebuild, search, type Plan } from "./inbox.ts";
+import { itemOf, McpRoutes } from "./mcp.ts";
 import { compare, comparisons, forecasts } from "./outlook.ts";
 import { errorText } from "./redact.ts";
 import { snapshot } from "./snapshot.ts";
@@ -120,10 +120,6 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
         const current = snapshot(collector.view, true);
         /** The state after a decision: taken once the decision is written, so it includes it. */
         const decided = (action: { seq: number | null }) => Effect.map(current, (s) => ({ ...s, action }));
-        // An item in full: its fix attempts and, for a staging regression, its comparison, beside the inbox's own detail.
-        const itemOf = (id: string) => Effect.gen(function* () {
-            const d = yield* detail(id);
-            return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null }; });
 
         // ---- reads
         const get = (path: HttpRouter.PathInput, handler: (request: HttpServerRequest.HttpServerRequest, url: URL, params: Params) => Effect.Effect<unknown, ApiError | Full, Needs>) =>
@@ -144,15 +140,17 @@ export const serve = (options: { readonly demo: boolean; readonly ready: (url: s
           return brief(q.get("audience") ?? "owner", num("afterSeq"), num("throughSeq")); });
 
         // ---- server-sent events: a snapshot on connect, a change after each commit, a heartbeat on its own clock.
-        let lastBeat = clock.mono();
         const frame = (event: string, data: unknown, id?: number) => `${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-        const heartbeats = Stream.tick("200 millis").pipe(
-          Stream.filter(() => {
-            if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
-            if (clock.mono() - lastBeat < HEARTBEAT_MS) return false;
-            lastBeat = clock.mono();
-            return true; }),
-          Stream.mapEffect(() => Effect.map(store.seq, (seq) => frame("heartbeat", { seq, atMs: clock.now() }))));
+        // One heartbeat clock for every open stream, checked every 200 ms against the service's monotonic clock.
+        const beats = yield* PubSub.unbounded<{ seq: number; atMs: number }>();
+        let lastBeat = clock.mono();
+        yield* Effect.gen(function* () {
+          if (clock.mono() < lastBeat) lastBeat = clock.mono(); // the clock was replaced: count from there
+          if (clock.mono() - lastBeat < HEARTBEAT_MS) return;
+          lastBeat = clock.mono();
+          yield* PubSub.publish(beats, { seq: yield* store.seq, atMs: clock.now() });
+        }).pipe(Effect.repeat(Schedule.spaced("200 millis")), Effect.forkScoped);
+        const heartbeats = Stream.fromPubSub(beats).pipe(Stream.map((beat) => frame("heartbeat", beat)));
         // Commits that arrive while a change is being prepared are coalesced into the next one.
         const changes = store.changes.pipe(Stream.chunks, Stream.mapEffect(() => Effect.map(current, (s) => frame("change", s, s.seq))));
         yield* router.add("GET", "/v2/changes", () =>

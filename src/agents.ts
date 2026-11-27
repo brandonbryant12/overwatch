@@ -13,7 +13,7 @@ import { ChildProcessSpawner } from "effect/process";
 import { randomBytes } from "node:crypto";
 import { AppConfig, LIMITS } from "./config.ts";
 import { bounded, clock } from "./clock.ts";
-import { type ApiError, apiError, Expired, PeerError, Unavailable } from "./errors.ts";
+import { type ApiError, apiError, PeerError, Unavailable } from "./errors.ts";
 import { effect, run as exec } from "./exec.ts";
 import { afterFinding, announce, groupNow, label, passed, type Plan } from "./inbox.ts";
 import { after, emptyFolder, type OpenCode, OpenCodeClient } from "./opencode.ts";

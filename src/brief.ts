@@ -7,7 +7,7 @@
 import { Effect } from "effect";
 import { AppConfig } from "./config.ts";
 import { apiError } from "./errors.ts";
-import { Store, sql } from "./store.ts";
+import { sql } from "./store.ts";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 

@@ -37,7 +37,6 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 
 /** The owner's tools call exactly what the page calls: the inbox, an item in full, search, and a decision. */
 const owner = Effect.gen(function* () {
-  const config = yield* AppConfig;
   const collector = yield* Collector;
   const fixes = yield* Fixes;
   const opencode = yield* OpenCodeClient;
@@ -46,16 +45,19 @@ const owner = Effect.gen(function* () {
   return {
     exists: (sessionId) => Effect.flatMap(opencode.connect, (oc) => (oc ? oc.exists(sessionId) : Effect.succeed(false))),
     inbox: local(inbox),
-    get: (id) =>
-      local(Effect.gen(function* () {
-          const d = yield* detail(id);
-          return { ...d, fixable: Boolean(config.apps[d.incident.app]?.fixes), fixes: yield* fixes.forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null }; })),
+    get: (id) => local(Effect.provideService(itemOf(id), Fixes, fixes)),
     search: (text) => local(search(text)),
     act: (id, body) =>
       local(Effect.gen(function* () {
           const action = yield* act(id, body, yield* basisOf(body));
           return { ...(yield* snapshot(collector.view, true)), action }; })),
   } satisfies Owner; });
+
+/** An item in full, as the page and the owner tools see it: its fix attempts and, for a staging regression, its comparison. */
+export const itemOf = Effect.fnUntraced(function* (id: string) {
+  const d = yield* detail(id);
+  return { ...d, fixable: Boolean((yield* AppConfig).apps[d.incident.app]?.fixes), fixes: yield* (yield* Fixes).forItem(id), comparison: (yield* comparisons).find((c) => c.incident === id) ?? null };
+});
 
 const handlers = toolkit.toLayer(Effect.gen(function* () {
     const tools = yield* Tools;
