@@ -9,8 +9,11 @@ import {
   Brief,
   Decided,
   Focus,
+  HandoffBundle,
   Heartbeat,
   ItemDetail,
+  LensReply,
+  type LensSpec,
   Opened,
   Published,
   RequestFailed,
@@ -41,6 +44,8 @@ export class Overwatch extends Context.Service<Overwatch, {
   readonly fix: (id: string, jobId: string, key: string) => Effect.Effect<void, RequestFailed>;
   readonly publish: (fixId: string, basisSeq: number | null, key: string) => Effect.Effect<Published, RequestFailed>;
   readonly correct: (id: string, jobId: string, text: string, key: string) => Effect.Effect<void, RequestFailed>;
+  readonly generateLens: (id: string, key: string) => Effect.Effect<LensSpec, RequestFailed>;
+  readonly handoff: (id: string) => Effect.Effect<HandoffBundle, RequestFailed>;
 }>()("overwatch/Overwatch") {
   static readonly layer = Layer.effect(
     Overwatch,
@@ -87,6 +92,8 @@ export class Overwatch extends Context.Service<Overwatch, {
         fix: (id, jobId, key) => post(Schema.Unknown, `${item(id)}/fix`, { jobId }, key).pipe(Effect.asVoid),
         publish: (fixId, basisSeq, key) => post(Published, `fixes/${encodeURIComponent(fixId)}/publish`, { basisSeq }, key),
         correct: (id, jobId, text, key) => post(Schema.Unknown, `${item(id)}/corrections`, { jobId, text }, key).pipe(Effect.asVoid),
+        generateLens: (id, key) => post(LensReply, `${item(id)}/lens`, {}, key).pipe(Effect.map((r) => r.lens)),
+        handoff: (id) => get(HandoffBundle, `${item(id)}/handoff`),
       });
     }),
   );

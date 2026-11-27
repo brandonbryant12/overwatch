@@ -26,7 +26,7 @@
  * Components reach Foldkit only through `ui.ts`. `domain/`, `services/` and `model.ts` know no view layer.
  */
 import { BrowserKeyValueStore, Clipboard } from "@effect/platform-browser";
-import { Clock, Duration, Effect, Layer, Schema, Stream } from "effect";
+import { Clock, Duration, Effect, Layer, Predicate, Schema, Stream } from "effect";
 import { Subscription } from "foldkit";
 import type { Document } from "foldkit/html";
 import { KeyValueStore } from "effect/persistence";
@@ -36,13 +36,15 @@ import * as BriefSheet from "./components/BriefSheet.ts";
 import * as CorrectSheet from "./components/CorrectSheet.ts";
 import * as Dock from "./components/Dock.ts";
 import * as Finder from "./components/Finder.ts";
-import { KeyboardIcon, ThemeIcon } from "./components/Glyphs.ts";
+import { BriefIcon, KeyboardIcon, SearchIcon, ThemeIcon } from "./components/Glyphs.ts";
+import * as HandoffSheet from "./components/HandoffSheet.ts";
 import * as Inbox from "./components/Inbox.ts";
 import * as KeysSheet from "./components/KeysSheet.ts";
 import * as Stage from "./components/Stage.ts";
 import * as Strip from "./components/Strip.ts";
 import * as WayOutSheet from "./components/WayOutSheet.ts";
-import { Decided, ItemDetail, Published, Sample, Snapshot, WayOutBody } from "./domain/Overwatch.ts";
+import { Decided, ItemDetail, LensSpec, Published, Sample, Snapshot, WayOutBody } from "./domain/Overwatch.ts";
+import { buildOpenCodeHandoff } from "./handoff.ts";
 import * as m from "./model.ts";
 import { type ActionBody, Overwatch, ServiceEvents } from "./services/Overwatch.ts";
 import { PageWindow } from "./services/PageWindow.ts";
@@ -58,8 +60,9 @@ export const Collapsed = Schema.Struct({ needsYou: Schema.Boolean, new: Schema.B
 export type Collapsed = typeof Collapsed.Type;
 const Command_ = Schema.Literals([
   "escape", "search", "next", "previous", "done", "later", "worse", "never", "undo", "refresh", "prompt",
-  "theme", "help", "open", "brief", "investigate", "correct", "fix", "publish",
+  "theme", "help", "open", "brief", "investigate", "correct", "fix", "publish", "copyHandoff", "handoffSheet", "lens",
 ]);
+const LensModeSchema = Schema.Literals(["auto", "ai", "derived"]);
 
 /** What is open over the page, what it was opened with, and the sheet's own state. */
 export const Overlay = TaggedUnion({
@@ -67,6 +70,7 @@ export const Overlay = TaggedUnion({
   Never: { title: Schema.String, basis: Schema.NullOr(Schema.Number), sheet: WayOutSheet.Model },
   Correct: { id: Schema.String, title: Schema.String, verdict: Schema.String, app: Schema.String, jobId: Schema.String, sheet: CorrectSheet.Model },
   Brief: { sheet: BriefSheet.Model },
+  Handoff: { focus: Schema.String, sheet: HandoffSheet.Model },
   Find: { q: Schema.String, sheet: Finder.Model },
   Keys: {},
 });
@@ -97,6 +101,10 @@ export const AppModel = Schema.Struct({
   /** A status read asked for while the stream is away; one at a time. */
   statusPending: Schema.Boolean,
   theme: Schema.NullOr(Theme),
+  /** Visual lens display preference and any AI-generated lenses cached per item id. */
+  lensMode: LensModeSchema,
+  lensLoading: Schema.Boolean,
+  aiLenses: Schema.Record(Schema.String, LensSpec),
   /** The bar's own state. */
   dock: Dock.Model,
 });
@@ -117,6 +125,8 @@ export const AppMessage = TaggedEnum({
   FailedStatus: {},
   // Keys and the top bar
   PressedKey: { command: Command_ },
+  ClickedFind: {},
+  ClickedBrief: {},
   ClickedTheme: {},
   ClickedHelp: {},
   // What the parts of the page ask for
@@ -127,7 +137,10 @@ export const AppMessage = TaggedEnum({
   RequestedInbox: {},
   RequestedItemAction: { action: Stage.ItemAction },
   RequestedPublish: { fixId: Schema.String },
+  ChangedLensMode: { mode: LensModeSchema },
+  RequestedGenerateLens: {},
   CopiedText: { text: Schema.String },
+  CopiedHandoff: { handles: Schema.Number },
   FailedCopy: { reason: Schema.String },
   RequestedFind: { text: Schema.String },
   AskedAgent: { mode: Schema.String },
@@ -151,6 +164,8 @@ export const AppMessage = TaggedEnum({
   SucceededInvestigate: {},
   SucceededRequestFix: {},
   SucceededPublish: { published: Published },
+  SucceededGenerateLens: { id: Schema.String, lens: LensSpec },
+  FailedGenerateLens: { status: Schema.Number, message: Schema.String },
   CompletedOpenInOpenCode: {},
   CompletedRemember: {},
   CompletedScrollToTop: {},
@@ -163,6 +178,7 @@ export const AppMessage = TaggedEnum({
   GotWayOutMessage: { message: WayOutSheet.Message },
   GotCorrectMessage: { message: CorrectSheet.Message },
   GotBriefMessage: { message: BriefSheet.Message },
+  GotHandoffMessage: { message: HandoffSheet.Message },
   GotFinderMessage: { message: Finder.Message },
   GotKeysMessage: { message: KeysSheet.Message },
 });
@@ -284,6 +300,38 @@ const Publish = Command.define("Publish", {
     }).pipe(Effect.match({ onSuccess: (published) => AppMessage.SucceededPublish({ published }), onFailure: failed })),
 });
 
+/** G: ask the service's local model to synthesize a schema-validated Visual Lens grounded in stored evidence handles. */
+const GenerateLens = Command.define("GenerateLens", {
+  args: { id: Schema.String },
+  messages: [AppMessage.SucceededGenerateLens, AppMessage.FailedGenerateLens],
+  execute: ({ id }) =>
+    Effect.gen(function* () {
+      const api = yield* Overwatch;
+      return yield* api.generateLens(id, (yield* api.focus(id)).requestKey);
+    }).pipe(
+      Effect.match({
+        onSuccess: (lens) => AppMessage.SucceededGenerateLens({ id, lens }),
+        onFailure: (error) => AppMessage.FailedGenerateLens({ status: error.status, message: error.message }),
+      }),
+    ),
+});
+
+/** C: copy structured OpenCode handoff prompt to the clipboard. */
+const CopyHandoff = Command.define("CopyHandoff", {
+  args: { text: Schema.String, handles: Schema.Number },
+  messages: [AppMessage.CopiedHandoff, AppMessage.FailedCopy],
+  execute: ({ text, handles }) =>
+    Effect.gen(function* () {
+      const clipboard = yield* Clipboard.Clipboard;
+      yield* clipboard.writeString(text);
+    }).pipe(
+      Effect.match({
+        onSuccess: () => AppMessage.CopiedHandoff({ handles }),
+        onFailure: (error) => AppMessage.FailedCopy({ reason: Predicate.isError(error.cause) ? error.cause.message : error.message }),
+      }),
+    ),
+});
+
 /** Held focus counts as seen after a moment; `n` names the wait, and only the latest one counts. */
 export const WaitBeforeSeen = Command.define("WaitBeforeSeen", {
   args: { id: Schema.String, n: Schema.Number },
@@ -354,6 +402,9 @@ export const init = (props: AppProps): Return => ({
     seenWait: 0,
     statusPending: false,
     theme: props.initialTheme,
+    lensMode: "auto",
+    lensLoading: false,
+    aiLenses: {},
     dock: Dock.init,
   },
 });
@@ -415,6 +466,8 @@ const foldStage = Update.foldChild({
         Picked: ({ subject }) => AppMessage.PickedSubject({ subject }),
         RequestedAction: ({ action }) => AppMessage.RequestedItemAction({ action }),
         RequestedPublish: ({ fixId }) => AppMessage.RequestedPublish({ fixId }),
+        ChangedLensMode: ({ mode }) => AppMessage.ChangedLensMode({ mode }),
+        RequestedGenerateLens: () => AppMessage.RequestedGenerateLens(),
         Copied: ({ text }) => AppMessage.CopiedText({ text }),
         FailedCopy: ({ reason }) => AppMessage.FailedCopy({ reason }),
       }),
@@ -485,6 +538,30 @@ const foldBrief = Update.foldChild({
     ),
 });
 
+const toHandoff = (message: HandoffSheet.Message): AppMessage => AppMessage.GotHandoffMessage({ message });
+const handoffProps = (model: AppModel): HandoffSheet.Props | null =>
+  model.overlay?._tag === "Handoff"
+    ? { opened: String(model.opened), focus: model.overlay.focus, snapshot: model.snapshot, detail: detailOf(model) }
+    : null;
+const foldHandoff = Update.foldChild({
+  update: (sheet: HandoffSheet.Model, input: { readonly message: HandoffSheet.Message; readonly props: HandoffSheet.Props }) =>
+    HandoffSheet.update(sheet, input.message, input.props),
+  read: (model: AppModel) => (model.overlay?._tag === "Handoff" ? Option.some(model.overlay.sheet) : Option.none()),
+  write: (model: AppModel, sheet: HandoffSheet.Model) =>
+    model.overlay?._tag === "Handoff" ? { ...model, overlay: { ...model.overlay, sheet } } : model,
+  toParentMessage: toHandoff,
+  foldOutMessage: (event: HandoffSheet.Events) => (model: AppModel) =>
+    step(
+      model,
+      HandoffSheet.Events.match(event, {
+        Copied: ({ handles }) => AppMessage.CopiedHandoff({ handles }),
+        FailedCopy: ({ reason }) => AppMessage.FailedCopy({ reason }),
+        RequestedOpenTab: () => AppMessage.RequestedItemAction({ action: "open" }),
+        RequestedClose: () => AppMessage.ClosedOverlay(),
+      }),
+    ),
+});
+
 const toFinder = (message: Finder.Message): AppMessage => AppMessage.GotFinderMessage({ message });
 const foldFinder = Update.foldChild({
   update: Finder.update,
@@ -531,6 +608,22 @@ const step = (model: AppModel, message: AppMessage): Return => {
   const openBrief = () => {
     const brief = BriefSheet.init();
     return open(Overlay.Brief({ sheet: brief.model }), ...Command.mapMessages(brief.commands, toBrief));
+  };
+  const openHandoff = () => {
+    if (!model.focus) return say(model, "Put something in focus first");
+    const handoff = HandoffSheet.init(model.snapshot, model.focus, detail);
+    return open(Overlay.Handoff({ focus: model.focus, sheet: handoff.model }), ...Command.mapMessages(handoff.commands ?? [], toHandoff));
+  };
+  const copyHandoff = () => {
+    const handoff = buildOpenCodeHandoff(model.snapshot, model.focus, detail, "investigate");
+    if (!handoff) return say(model, "Put something in focus first");
+    return go(model, CopyHandoff({ text: handoff.text, handles: handoff.handleCount }));
+  };
+  const triggerLens = () => {
+    const id = model.focus;
+    if (!m.isIncident(id) || down(model)) return say(model, id ? "Service not answering" : "Put a problem in focus first");
+    if (model.lensLoading) return go(model);
+    return go({ ...model, lensLoading: true }, GenerateLens({ id }));
   };
   /** Done, Later or Never on the item in focus. */
   const wayOut = (body: WayOutBody, basis: number | null | undefined, next: AppModel = model) => {
@@ -622,9 +715,14 @@ const step = (model: AppModel, message: AppMessage): Return => {
         case "correct": return correct();
         case "fix": return fix();
         case "publish": return publish();
+        case "copyHandoff": return copyHandoff();
+        case "handoffSheet": return openHandoff();
+        case "lens": return triggerLens();
       }
       return go(model);
     }
+    case "ClickedFind": return openFind("");
+    case "ClickedBrief": return openBrief();
     case "ClickedTheme": return toggleTheme();
     case "ClickedHelp": return open(Overlay.Keys());
 
@@ -644,13 +742,19 @@ const step = (model: AppModel, message: AppMessage): Return => {
         case "never": return sheet("never");
         case "undo": return undo();
         case "open": return openInOpenCode();
+        case "copyHandoff": return copyHandoff();
+        case "handoffSheet": return openHandoff();
         case "investigate": return investigate();
         case "correct": return correct();
         case "fix": return fix();
       }
       return go(model);
     case "RequestedPublish": return publish(message.fixId);
+    case "ChangedLensMode": return go({ ...model, lensMode: message.mode });
+    case "RequestedGenerateLens": return triggerLens();
     case "CopiedText": return say(model, `Copied ${message.text}`, "ok");
+    case "CopiedHandoff":
+      return say(model, `Copied OpenCode handoff (${message.handles} handle${message.handles === 1 ? "" : "s"} · MCP ready)`, "ok");
     case "FailedCopy": return say(model, `Copy failed: ${message.reason}`, "error");
     case "RequestedFind": return openFind(message.text);
     case "AskedAgent":
@@ -709,6 +813,16 @@ const step = (model: AppModel, message: AppMessage): Return => {
       const fixed = message.published.fix;
       return also(fixed?.pr ? say(model, `Draft #${fixed.pr.number} opened.`, "ok") : say(model, `Stopped: ${fixed?.reason ?? "see the item"}`, "error"), ...readAgain(model));
     }
+    case "SucceededGenerateLens": {
+      const next = { ...model, lensLoading: false, lensMode: "ai" as const, aiLenses: { ...model.aiLenses, [message.id]: message.lens } };
+      return say(next, `AI visual lens ready (${message.lens.verifiedHandles.length} handles verified)`, "ok");
+    }
+    case "FailedGenerateLens": {
+      const note = message.status === 404 || message.status === 503 || message.status === 501
+        ? "AI lens unavailable on this service; showing derived evidence lens."
+        : message.message;
+      return say({ ...model, lensLoading: false }, note, message.status === 404 ? "" : "error");
+    }
     case "FailedRequest": return also(say(model, message.message, "error"), ...readAgain(model));
     case "CompletedOpenInOpenCode":
     case "CompletedRemember":
@@ -728,6 +842,10 @@ const step = (model: AppModel, message: AppMessage): Return => {
       return props === null ? go(model) : foldCorrect(model, { message: message.message, props });
     }
     case "GotBriefMessage": return foldBrief(model, message.message);
+    case "GotHandoffMessage": {
+      const props = handoffProps(model);
+      return props === null ? go(model) : foldHandoff(model, { message: message.message, props });
+    }
     case "GotFinderMessage": return foldFinder(model, message.message);
     case "GotKeysMessage": return foldKeys(model, message.message);
   }
@@ -838,6 +956,8 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
         });
       case "Brief":
         return h.submodel({ slotId: "brief", model: overlay.sheet, view: BriefSheet.view, viewInputs: { opened }, toParentMessage: toBrief });
+      case "Handoff":
+        return h.submodel({ slotId: "handoff", model: overlay.sheet, view: HandoffSheet.view, viewInputs: handoffProps(model)!, toParentMessage: toHandoff });
       case "Find":
         return h.submodel({
           slotId: "find",
@@ -884,11 +1004,26 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
               connection === "live" ? "Live" : connection === "stale" ? `Stale · ${quiet}s` : connection === "down" ? "Not answering" : "Connecting…",
             ),
           ),
-          el(h, "span", { class: "spacer" }),
+          el(
+            h,
+            "button",
+            { class: "find", attrs: { type: "button", "data-open-find": "", "aria-label": "Find anything" }, on: [h.OnClick(AppMessage.ClickedFind())] },
+            SearchIcon(h),
+            el(h, "span", {}, "Find problems, commits, spans, or put-away…"),
+            el(h, "kbd", {}, "/"),
+          ),
           el(
             h,
             "div",
             { class: "tools" },
+            el(
+              h,
+              "button",
+              { class: "tool-button", attrs: { type: "button", "data-open-brief": "", title: "Brief (b)", "aria-label": "Open brief" }, on: [h.OnClick(AppMessage.ClickedBrief())] },
+              BriefIcon(h),
+              el(h, "span", {}, "Brief"),
+              el(h, "kbd", {}, "b"),
+            ),
             el(
               h,
               "button",
@@ -926,7 +1061,17 @@ export const view = (model: AppModel, h: H<AppMessage>): Document => {
             slotId: "stage",
             model: Stage.init,
             view: Stage.view,
-            viewInputs: { snapshot: model.snapshot, focus: model.focus, detail, connection, serverNow, wallNow: model.now.wallMs },
+            viewInputs: {
+              snapshot: model.snapshot,
+              focus: model.focus,
+              detail,
+              connection,
+              serverNow,
+              wallNow: model.now.wallMs,
+              lensMode: model.lensMode,
+              lensLoading: model.lensLoading,
+              cachedAiLens: model.focus !== null ? (model.aiLenses[model.focus] ?? null) : null,
+            },
             toParentMessage: (message) => AppMessage.GotStageMessage({ message }),
           }),
           h.submodel({ slotId: "dock", model: model.dock, view: Dock.view, viewInputs: dockProps(model), toParentMessage: toDock }),

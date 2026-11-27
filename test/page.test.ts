@@ -4,7 +4,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fc from "fast-check";
 
+import { Schema } from "effect";
 import { freshness } from "../web/freshness.mjs";
+import { LensSpec } from "../web/src/domain/Lens.ts";
+import { buildOpenCodeHandoff } from "../web/src/handoff.ts";
+import { knownHandles, parseSlowSpans, selectActiveLens, synthesizeEnvLens, synthesizeIncidentLens, validateLensHandles } from "../web/src/lens.ts";
 import * as m from "../web/src/model.ts";
 
 test("freshness ages by whichever clock moved more, and never by a clock that went back", () => {
@@ -98,4 +102,130 @@ test("class: an investigation looks agreed only when every planned reading filed
       if (view.tone === "agreed") assert.ok(Math.max(real, notReal, unsure) === planned && missing === 0 && outcome !== "disproved");
     }),
   );
+});
+
+test("additive keyboard bindings support OpenCode handoff (c, Shift+O) and Visual Lens (g)", () => {
+  assert.equal(m.command("c"), "copyHandoff");
+  assert.equal(m.command("O", { shift: true }), "handoffSheet");
+  assert.equal(m.command("g"), "lens");
+  assert.equal(m.command("c", { typing: true }), null);
+  assert.equal(m.command("g", { overlay: true }), null);
+  // Existing bindings remain unchanged
+  assert.equal(m.command("o"), "open");
+  assert.equal(m.command("P", { shift: true }), "publish");
+});
+
+test("LensSpec schema decodes all 6 declarative GenUI block types and rejects malformed blocks", () => {
+  const valid = {
+    source: "ai",
+    title: "Checkout latency spike",
+    summary: "Payments timeout cut from 3000ms to 300ms after deploy a1b2c3d.",
+    model: "glm-5.3",
+    generatedAt: 1_700_000_000_000,
+    verifiedHandles: ["e_11111111"],
+    blocks: [
+      { kind: "causal_flow", title: "Causal path", steps: [{ label: "Deploy", detail: "a1b2c3d", tone: "warn", handle: "e_11111111" }] },
+      { kind: "span_waterfall", title: "Slow spans", p50Ms: 120, slowMs: 300, spans: [{ label: "POST /authorize", service: "checkout", durationMs: 840, offsetMs: 0, status: "slow", handle: "e_11111111" }] },
+      { kind: "metric_compare", title: "Delta", rows: [{ label: "Timeout", before: "3000 ms", after: "300 ms", beforeNum: 3000, afterNum: 300, unit: "ms", delta: "-90%", tone: "error", handle: "e_11111111" }] },
+      { kind: "commit_risk", title: "Commits", commits: [{ sha: "a1b2c3d4", subject: "Adjust payments timeout", files: 2, insertions: 4, deletions: 4, flags: ["timeout"], deployed: true, handle: "e_11111111" }] },
+      { kind: "timeline", title: "Timeline", events: [{ at: "4m ago", label: "Deploy landed", kind: "deploy", handle: "e_11111111" }] },
+      { kind: "key_facts", title: "Facts", facts: [{ label: "Count", value: "42×", origin: "telemetry", handle: "e_11111111" }] },
+    ],
+  };
+  const decoded = Schema.decodeUnknownSync(LensSpec)(valid);
+  assert.equal(decoded.blocks.length, 6);
+  assert.throws(() => Schema.decodeUnknownSync(LensSpec)({ ...valid, blocks: [{ kind: "raw_html", html: "<script>alert(1)</script>" }] }));
+});
+
+test("validateLensHandles flags invented handles as ungrounded while passing verified handles", () => {
+  const lens = Schema.decodeUnknownSync(LensSpec)({
+    source: "ai",
+    title: "Visual lens",
+    summary: "Summary",
+    generatedAt: 1_700_000_000_000,
+    verifiedHandles: ["e_real0001"],
+    blocks: [
+      { kind: "causal_flow", title: "Flow", steps: [{ label: "Step 1", detail: "Observed", tone: "error", handle: "e_real0001" }, { label: "Step 2", detail: "Hallucinated", tone: "warn", handle: "e_fake9999" }] },
+    ],
+  });
+  const check = validateLensHandles(lens, new Set(["e_real0001"]));
+  assert.deepEqual(check.verified, ["e_real0001"]);
+  assert.deepEqual(check.ungrounded, ["e_fake9999"]);
+  assert.equal(check.grounded, false);
+
+  const ok = validateLensHandles({ ...lens, blocks: [{ kind: "causal_flow", title: "Flow", steps: [{ label: "Step 1", detail: "Observed", tone: "error", handle: "e_real0001" }] }] }, new Set(["e_real0001"]));
+  assert.equal(ok.grounded, true);
+  assert.deepEqual(ok.ungrounded, []);
+});
+
+test("parseSlowSpans and synthesizeIncidentLens build grounded waterfall, causal flow, delta and commit blocks", () => {
+  const spans = parseSlowSpans([
+    { handle: "e_span0001", text: "SLOW 890ms checkout POST /v2/authorize trace=tr_1\nSLOW 1420ms orders SELECT pool trace=tr_2" },
+  ]);
+  assert.equal(spans.length, 2);
+  assert.equal(spans[0]!.durationMs, 890);
+  assert.equal(spans[0]!.status, "slow");
+  assert.equal(spans[1]!.status, "error");
+
+  const snap: any = {
+    seq: 10,
+    atMs: 1_700_000_060_000,
+    environments: [{ app: "shop", environment: "prod", subject: "env:shop/prod", health: "attention", readings: [], freshForMs: 180_000, excluded: [] }],
+    sources: [{ id: "shop/prod/pods", subject: "src:shop/prod/pods", app: "shop", environment: "prod", kind: "kubernetes", checkpointMs: 1_700_000_050_000, failure: null, suspended: false, fix: null }],
+    incidents: [{
+      id: "inc_1", title: "ERROR checkout: payments timeout after 300ms", count: 42, exact: true, severity: "error",
+      app: "shop", environment: "prod", active: true, group: "needsYou", decidedSeq: 5, way: null, returned: null, seenSeq: 0,
+      firstSeq: 4, lastSeq: 10, firstMs: 1_700_000_000_000, lastMs: 1_700_000_050_000, spark: [0, 0, 12, 30],
+    }],
+    inbox: { groups: { needsYou: ["inc_1"], new: [], working: [], quiet: [] } },
+    coverage: [],
+    metrics: [],
+    deploys: [{ app: "shop", environment: "prod", revision: "a1b2c3d4e5f6", previous: "9f8e7d6c5b4a", seq: 2 }],
+    outlook: {
+      forecasts: [],
+      comparisons: [],
+      commits: [{ app: "shop", sha: "a1b2c3d4e5f6", parent: "9f8e7d6c5b4a", committedAt: 1_700_000_000_000, subject: "Lower payments timeout", files: 1, insertions: 1, deletions: 1, flags: ["timeout"], paths: ["config/payments.json"], deployedEnvs: ["prod"] }],
+    },
+    causes: [],
+  };
+  const detail: any = {
+    incident: snap.incidents[0],
+    history: [{ atMs: 1_700_000_000_000, kind: "incident", data: {} }],
+    findings: [{
+      id: "f_1", verdict: "real",
+      claims: [{ statement: "Timeout reduced", pieces: [{ handle: "e_span0001", source: "pods", text: "SLOW 890ms checkout POST /v2/authorize trace=tr_1" }] }],
+      body: { cause: "Deploy a1b2c3d lowered timeout from 3000 ms to 300 ms", ruled_out: [], not_checked: [] },
+    }],
+    investigations: [{ jobId: "j_1", state: "completed", result: { verdict: "real", planned: 3, counts: { real: 3 }, observed: true, observations: 1, readings: [] } }],
+    turns: [],
+    corrections: [],
+    fixable: true,
+    fixes: [],
+    comparison: null,
+  };
+
+  assert.deepEqual([...knownHandles(detail)], ["e_span0001"]);
+  const derived = synthesizeIncidentLens(snap, snap.incidents[0], detail, snap.atMs);
+  assert.equal(derived.source, "derived");
+  assert.ok(derived.blocks.some((b) => b.kind === "span_waterfall"));
+  assert.ok(derived.blocks.some((b) => b.kind === "causal_flow"));
+  assert.ok(derived.blocks.some((b) => b.kind === "metric_compare"));
+
+  const envLens = synthesizeEnvLens(snap, snap.environments[0], snap.atMs);
+  assert.ok(envLens && envLens.blocks[0]?.kind === "commit_risk");
+
+  const selected = selectActiveLens(detail, "auto", null, derived);
+  assert.equal(selected.hasAi, false);
+  assert.equal(selected.validation.grounded, true);
+
+  // OpenCode handoff synthesis covers all presets & includes verified handles + git diff command
+  const handoff = buildOpenCodeHandoff(snap, "inc_1", detail, "fix_local");
+  assert.ok(handoff);
+  assert.equal(handoff.handleCount, 1);
+  assert.match(handoff.text, /e_span0001/);
+  assert.match(handoff.text, /git diff 9f8e7d6c5b4a\.\.a1b2c3d4e5f6/);
+  assert.match(handoff.text, /ow_get/);
+
+  const mcpOnly = buildOpenCodeHandoff(snap, "inc_1", detail, "mcp_only");
+  assert.ok(mcpOnly && mcpOnly.text.includes('ow_get({ id: "inc_1" })'));
 });

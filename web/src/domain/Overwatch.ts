@@ -4,6 +4,9 @@
  * or send as null is `Maybe`, so a page fixture that sends less still decodes.
  */
 import { Schema } from "effect";
+import { CommitSummary, HandoffBundle, LensReply, LensSpec } from "./Lens.ts";
+
+export { CommitSummary, HandoffBundle, LensReply, LensSpec };
 
 const Maybe = <S extends Schema.Top>(schema: S) => Schema.optional(Schema.NullOr(schema));
 
@@ -107,7 +110,11 @@ export const Comparison = Schema.Struct({
 });
 export type Comparison = typeof Comparison.Type;
 
-export const Outlook = Schema.Struct({ forecasts: Schema.Array(Forecast), comparisons: Schema.Array(Comparison) });
+export const Outlook = Schema.Struct({
+  forecasts: Schema.Array(Forecast),
+  comparisons: Schema.Array(Comparison),
+  commits: Maybe(Schema.Array(CommitSummary)),
+});
 export type Outlook = typeof Outlook.Type;
 
 export const Snapshot = Schema.Struct({
@@ -127,7 +134,7 @@ export const Snapshot = Schema.Struct({
     missed: Maybe(Schema.Number),
   })),
   metrics: Schema.Array(Schema.Struct({ source: Schema.String, name: Schema.String, value: Schema.Number, breach: Schema.Boolean })),
-  deploys: Schema.Array(Schema.Struct({ app: Schema.String, environment: Schema.String, revision: Schema.String, seq: Schema.Number })),
+  deploys: Schema.Array(Schema.Struct({ app: Schema.String, environment: Schema.String, revision: Schema.String, previous: Maybe(Schema.String), seq: Schema.Number })),
   outlook: Maybe(Outlook),
   causes: Schema.Array(Schema.Struct({ kind: Schema.String, sources: Schema.Array(Schema.String), fix: Maybe(Schema.String) })),
 });
@@ -234,6 +241,8 @@ export const ItemDetail = Schema.Struct({
   fixable: Schema.Boolean,
   fixes: Schema.Array(Fix),
   comparison: Maybe(Comparison),
+  lens: Maybe(LensSpec),
+  lenses: Maybe(Schema.Array(LensSpec)),
 });
 export type ItemDetail = typeof ItemDetail.Type;
 

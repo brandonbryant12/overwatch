@@ -88,11 +88,12 @@ export function after(rows: ReadonlyArray<string>, removed: string, focus: strin
 
 export type Command =
   | "escape" | "search" | "next" | "previous" | "done" | "later" | "worse" | "never" | "undo" | "refresh" | "prompt"
-  | "theme" | "help" | "open" | "brief" | "investigate" | "correct" | "fix" | "publish";
+  | "theme" | "help" | "open" | "brief" | "investigate" | "correct" | "fix" | "publish" | "copyHandoff" | "handoffSheet" | "lens";
 
 const KEYS: Record<string, Command> = {
   j: "next", ArrowDown: "next", k: "previous", ArrowUp: "previous", d: "done", l: "later", w: "worse", n: "never", u: "undo",
   r: "refresh", p: "prompt", Enter: "prompt", t: "theme", "?": "help", o: "open", b: "brief", i: "investigate", y: "correct", f: "fix", P: "publish",
+  c: "copyHandoff", O: "handoffSheet", g: "lens",
 };
 
 /** What a key means. Keys typed into a field are text, except Escape. */

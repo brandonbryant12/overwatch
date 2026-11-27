@@ -1,6 +1,7 @@
 /**
- * The stage: what is in focus, in full. A problem with its verdict, fix, claims, questions, counts and history; an
- * environment or a source with its readings and coverage; or, with nothing in focus, the overview and its keys.
+ * The stage: what is in focus, in full. A problem with its single-row triage bar, verdict vote meter, declarative
+ * GenUI Visual Lens, verified fix diff, progressive-disclosure claims, questions, annotated deploy-onset counts and
+ * history; an environment or source with readings, capacity bars and coverage; or the calm Situation Board overview.
  */
 import { Clipboard } from "@effect/platform-browser";
 import { Effect, Predicate, Schema } from "effect";
@@ -11,14 +12,20 @@ import {
   type Incident,
   InvestigationResult,
   ItemDetail,
+  LensSpec,
   type Piece,
   Snapshot,
 } from "../domain/Overwatch.ts";
+import { knownHandles, type LensMode, selectActiveLens, synthesizeEnvLens, synthesizeIncidentLens, validateLensHandles } from "../lens.ts";
 import * as m from "../model.ts";
 import { Command, defineView, el, emit, type H as Builder, run, type Step, TaggedEnum } from "../ui.ts";
 import { causeTitle } from "./Banners.ts";
-import { HealthGlyph, SeverityGlyph, Spark } from "./Glyphs.ts";
+import { AnnotatedSpark, CopyIcon, HealthGlyph, SeverityGlyph } from "./Glyphs.ts";
 import { ahead, OutlookPanels } from "./Outlook.ts";
+import { Overview } from "./Overview.ts";
+import { VisualLens } from "./VisualLens.ts";
+
+const LensModeSchema = Schema.Literals(["auto", "ai", "derived"]);
 
 export const Props = Schema.Struct({
   snapshot: Schema.NullOr(Snapshot),
@@ -28,11 +35,14 @@ export const Props = Schema.Struct({
   connection: Schema.Literals(["unknown", "live", "stale", "down"]),
   serverNow: Schema.NullOr(Schema.Number),
   wallNow: Schema.Number,
+  lensMode: LensModeSchema,
+  lensLoading: Schema.Boolean,
+  cachedAiLens: Schema.NullOr(LensSpec),
 });
 export type Props = typeof Props.Type;
 
 /** What the item's buttons ask for; the page decides what each means. */
-export const ItemAction = Schema.Literals(["done", "later", "worse", "never", "undo", "investigate", "open", "correct", "fix"]);
+export const ItemAction = Schema.Literals(["done", "later", "worse", "never", "undo", "investigate", "open", "copyHandoff", "handoffSheet", "correct", "fix"]);
 export type ItemAction = typeof ItemAction.Type;
 
 export const Model = Schema.Struct({});
@@ -45,6 +55,8 @@ export const Message = TaggedEnum({
   ClickedAction: { action: ItemAction },
   ClickedPublish: { fixId: Schema.String },
   ClickedHandle: { handle: Schema.String },
+  ClickedLensMode: { mode: LensModeSchema },
+  ClickedGenerateLens: {},
   SucceededCopyHandle: { handle: Schema.String },
   FailedCopyHandle: { reason: Schema.String },
 });
@@ -55,6 +67,8 @@ export const Events = TaggedEnum({
   Picked: { subject: Schema.String },
   RequestedAction: { action: ItemAction },
   RequestedPublish: { fixId: Schema.String },
+  ChangedLensMode: { mode: LensModeSchema },
+  RequestedGenerateLens: {},
   Copied: { text: Schema.String },
   FailedCopy: { reason: Schema.String },
 });
@@ -83,6 +97,8 @@ export const update = (model: Model, message: Message): Step<Model, Message, Eve
     ClickedAction: ({ action }) => emit(model, Events.RequestedAction({ action })),
     ClickedPublish: ({ fixId }) => emit(model, Events.RequestedPublish({ fixId })),
     ClickedHandle: ({ handle }) => run(model, CopyHandle({ handle })),
+    ClickedLensMode: ({ mode }) => emit(model, Events.ChangedLensMode({ mode })),
+    ClickedGenerateLens: () => emit(model, Events.RequestedGenerateLens()),
     SucceededCopyHandle: ({ handle }) => emit(model, Events.Copied({ text: handle })),
     FailedCopyHandle: ({ reason }) => emit(model, Events.FailedCopy({ reason })),
   });
@@ -164,31 +180,35 @@ const SourceList = (h: H, sources: Snapshot["sources"], state: (x: Snapshot["sou
     ),
   );
 
-const Coverage = (h: H, snapshot: Snapshot, coverage: Snapshot["coverage"]) =>
-  el(
+const Coverage = (h: H, snapshot: Snapshot, coverage: Snapshot["coverage"]) => {
+  const recent = coverage.slice(0, 4);
+  const older = coverage.slice(4);
+  const item = (c: Snapshot["coverage"][number]) =>
+    el(
+      h,
+      "li",
+      { class: ["cov", `cov-${c.state}`] },
+      el(h, "span", { class: "ev-kind" }, `${c.reading}: ${c.state}${c.missed ? ` (${c.missed} missed)` : ""}`),
+      el(h, "time", {}, m.ago(c.toMs, snapshot.atMs)),
+    );
+  return el(
     h,
     "section",
     { class: "panel" },
     el(h, "h3", {}, "Coverage"),
-    el(
-      h,
-      "ol",
-      { class: "history" },
-      ...(coverage.length
-        ? coverage.map((c) =>
-          el(
-            h,
-            "li",
-            { class: ["cov", `cov-${c.state}`] },
-            el(h, "span", { class: "ev-kind" }, `${c.reading}: ${c.state}${c.missed ? ` (${c.missed} missed)` : ""}`),
-            el(h, "time", {}, m.ago(c.toMs, snapshot.atMs)),
-          )
-        )
-        : [el(h, "li", {}, "Nothing read yet")]),
-    ),
+    el(h, "ol", { class: "history" }, ...(recent.length ? recent.map(item) : [el(h, "li", {}, "Nothing read yet")])),
+    older.length > 0 &&
+      el(
+        h,
+        "details",
+        { class: "disclosure" },
+        el(h, "summary", {}, `Show ${older.length} earlier coverage reading${older.length === 1 ? "" : "s"}`),
+        el(h, "ol", { class: "history" }, ...older.map(item)),
+      ),
   );
+};
 
-/** The latest investigation: the verdict, how the readings voted, what the challenger did; disagreement shows. */
+/** The latest investigation: verdict header, visual vote-pip meter, individual readings and challenger. */
 const VerdictPanel = (h: H, d: ItemDetail | null) => {
   const inv = d?.investigations.at(-1);
   if (!inv || (!inv.result && inv.state !== "queued" && inv.state !== "running")) return null;
@@ -214,6 +234,28 @@ const VerdictPanel = (h: H, d: ItemDetail | null) => {
       el(h, "span", { class: ["verdict-label", "votes"] }, v.votes),
       v.challenge !== null && el(h, "span", { class: "challenge-word" }, v.challenge),
       v.evidence !== null && el(h, "span", { class: ["pill", v.observed ? "observed" : "unobserved"] }, v.evidence),
+    ),
+    // Tactile vote-pip bar so unanimous vs split dissent reads in a glance.
+    el(
+      h,
+      "div",
+      { class: "vote-meter", attrs: { "aria-hidden": "true" } },
+      ...r.readings.map((x) =>
+        el(
+          h,
+          "span",
+          { class: ["vote-pip", x.verdict ?? "missing"], attrs: { title: `Slot ${x.slot}: ${x.verdict ? VERDICT[x.verdict] ?? x.verdict : "no filing"}` } },
+          el(h, "span", { class: "pip-dot" }),
+          `#${x.slot} ${x.verdict ? VERDICT[x.verdict] ?? x.verdict : "missing"}`,
+        )
+      ),
+      r.challenge != null &&
+        el(
+          h,
+          "span",
+          { class: ["vote-pip", "pip-challenge", r.challenge.outcome ?? "missing"] },
+          `Challenger · ${r.challenge.outcome ?? "no filing"}`,
+        ),
     ),
     v.tone === "undecided" ? el(h, "p", { class: "note" }, "The readings could not settle it. It stays with you; look at what each one saw.")
       : v.tone === "disagreed" ? el(h, "p", { class: "note" }, "Not unanimous: the dissent is below, as filed.")
@@ -241,21 +283,35 @@ const VerdictPanel = (h: H, d: ItemDetail | null) => {
         { class: "challenge" },
         el(h, "b", {}, `Challenger: ${r.challenge.outcome ?? "did not file"}`),
         el(h, "p", {}, r.challenge.reason ?? ""),
-        ...Pieces(h, r.challenge.pieces ?? []),
+        (r.challenge.pieces?.length ?? 0) > 0 &&
+          el(
+            h,
+            "details",
+            { class: "disclosure" },
+            el(
+              h,
+              "summary",
+              {},
+              `Challenger evidence (${r.challenge.pieces!.length} cited ${r.challenge.pieces!.length === 1 ? "excerpt" : "excerpts"})`,
+            ),
+            ...Pieces(h, r.challenge.pieces ?? []),
+          ),
       ),
   );
 };
 
-/** A diff, its additions and removals marked. */
+/** A unified diff with crisp addition/deletion surface washes and file/hunk headers. */
 const Diff = (h: H, text: string) =>
   el(
     h,
     "pre",
     { class: "diff" },
-    ...text.split("\n").slice(0, 60).flatMap((l, n) => [
-      n > 0 ? "\n" : null,
-      l.startsWith("+") && !l.startsWith("+++") ? el(h, "ins", {}, l) : l.startsWith("-") && !l.startsWith("---") ? el(h, "del", {}, l) : l,
-    ]),
+    ...text.split("\n").slice(0, 60).map((l) => {
+      if (l.startsWith("+") && !l.startsWith("+++")) return el(h, "ins", { class: "diff-line" }, l);
+      if (l.startsWith("-") && !l.startsWith("---")) return el(h, "del", { class: "diff-line" }, l);
+      if (l.startsWith("@@") || l.startsWith("diff --git")) return el(h, "span", { class: "diff-line diff-meta" }, l);
+      return el(h, "span", { class: "diff-line" }, l);
+    }),
   );
 
 /** A fix attempt: its state, the one rule that stopped it or why it is eligible, the change, its verification, the draft. */
@@ -311,11 +367,11 @@ const FixPanel = (h: H, d: ItemDetail | null, wallNow: number) => {
               h,
               "p",
               { class: "eligible" },
-              "Eligible: three of three readings said real, the challenger upheld it, it was observed in telemetry, and it began strictly after the rollout of ",
+              "Eligible: unanimous real + upheld + observed after rollout ",
               el(h, "code", {}, String(f.deployed).slice(0, 12)),
-              " (previously ",
+              " (was ",
               el(h, "code", {}, String(f.previous).slice(0, 12)),
-              "). A model selected this change; Overwatch derived it from Git and checked it.",
+              "). Derived from Git & verified.",
             ),
             Diff(h, f.diff),
           ]
@@ -340,10 +396,9 @@ const FixPanel = (h: H, d: ItemDetail | null, wallNow: number) => {
   );
 };
 
-/** The claims behind the verdict, each with the evidence it cites, readable in place; what was ruled out and not checked. */
+/** The claims behind the verdict, each with its evidence; secondary Ruled out / Not checked fold cleanly into disclosures. */
 const ClaimsPanel = (h: H, d: ItemDetail | null) => {
   const inv = d?.investigations.filter((x) => x.result).at(-1)?.result ?? null;
-  // Without an adjudicated investigation, every finding filed on it is shown as filed.
   const ids = inv
     ? new Set(inv.readings.filter((x) => x.verdict === inv.verdict || inv.verdict === "unsure").flatMap((x) => (x.findingId ? [x.findingId] : [])))
     : null;
@@ -351,7 +406,6 @@ const ClaimsPanel = (h: H, d: ItemDetail | null) => {
   if (!findings.length) return null;
   const list = (title: string, items: ReadonlyArray<string>) =>
     items.length ? el(h, "div", { class: "aside" }, el(h, "h4", {}, title), el(h, "ul", {}, ...items.map((t) => el(h, "li", {}, t)))) : null;
-  // Readings that say the same thing are one entry: how many said it, the claims once, each piece of evidence once.
   const groups = new Map<string, Array<Finding>>();
   for (const f of findings) {
     const key = `${f.verdict}|${f.body?.cause ?? ""}`;
@@ -367,29 +421,49 @@ const ClaimsPanel = (h: H, d: ItemDetail | null) => {
     ...[...groups.values()].map((g) => {
       const f = g[0]!;
       const claims = [...new Map(g.flatMap((x) => x.claims ?? []).map((c) => [c.statement, c])).values()];
+      const ruledOut = [...new Set(g.flatMap((x) => x.body?.ruled_out ?? []))];
+      const notChecked = [...new Set(g.flatMap((x) => x.body?.not_checked ?? []))];
+      const asideCount = ruledOut.length + notChecked.length;
+      const asideLabel = [
+        ruledOut.length > 0 ? `Ruled out (${ruledOut.length})` : null,
+        notChecked.length > 0 ? `Not checked (${notChecked.length})` : null,
+      ].filter(Boolean).join(" · ");
       return el(
         h,
         "article",
         { class: ["finding", f.verdict] },
         el(h, "header", {}, el(h, "b", {}, VERDICT[f.verdict] ?? f.verdict), el(h, "span", {}, f.body?.cause ?? ""), g.length > 1 && el(h, "em", { class: "said" }, `${g.length} readings said this`)),
         ...claims.flatMap((c) => [el(h, "p", { class: "claim" }, c.statement), ...Pieces(h, unseen(c.pieces ?? []))]),
-        el(
-          h,
-          "div",
-          { class: "asides" },
-          list("Ruled out", [...new Set(g.flatMap((x) => x.body?.ruled_out ?? []))]),
-          list("Not checked", [...new Set(g.flatMap((x) => x.body?.not_checked ?? []))]),
-        ),
+        asideCount > 0 &&
+          el(
+            h,
+            "details",
+            { class: "disclosure" },
+            el(h, "summary", {}, asideLabel),
+            el(h, "div", { class: "asides" }, list("Ruled out", ruledOut), list("Not checked", notChecked)),
+          ),
       );
     }),
   );
 };
 
+/** Estimate which 24h spark bucket marks the incident's onset after its deploy. */
+const onsetBucketIndex = (spark: ReadonlyArray<number | null>): number | null => {
+  const firstPositive = spark.findIndex((v) => typeof v === "number" && v > 0);
+  return firstPositive >= 0 ? firstPositive : null;
+};
+
 const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, snapshot: Snapshot) => {
   const now = snapshot.atMs;
   const off = props.connection === "down";
-  const button = (action: ItemAction, label: string, key: string) =>
-    el(h, "button", { attrs: { type: "button", "data-action": action }, on: [h.Disabled(off), h.OnClick(Message.ClickedAction({ action }))] }, `${label} `, Kbd(h, key));
+  const button = (action: ItemAction, label: string, key: string, title?: string) =>
+    el(
+      h,
+      "button",
+      { attrs: { type: "button", "data-action": action, title }, on: [h.Disabled(off), h.OnClick(Message.ClickedAction({ action }))] },
+      `${label} `,
+      Kbd(h, key),
+    );
   const way = i.way;
   const until = way?.when ? " until it gets worse"
     : way?.untilMs ? ` until ${new Date(way.untilMs).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
@@ -400,7 +474,13 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
   const sources = snapshot.sources.filter((x) => x.app === i.app && x.environment === i.environment);
   const done = d?.investigations.filter((x) => x.result).at(-1);
   const left = ahead(snapshot, i, props.serverNow ?? snapshot.atMs).left;
-  const fixing = (d?.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "verified", "published"].includes(f.state));
+  const fixing = (d?.fixes ?? []).some((f) => ["queued", "proposing", "verifying", "verified", "published", "draft"].includes(f.state));
+
+  // Declarative GenUI Visual Lens: deterministic instant synthesis + AI lens switching when available.
+  const derivedLens = synthesizeIncidentLens(snapshot, i, d, props.serverNow ?? snapshot.atMs);
+  const { lens, hasAi, validation } = selectActiveLens(d, props.lensMode, props.cachedAiLens, derivedLens);
+  const validHandles = knownHandles(d);
+
   return el(
     h,
     "article",
@@ -439,24 +519,74 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
         Kbd(h, "u"),
         " puts it back.",
       ),
+    // Single-row triage + work + OpenCode split handoff bar
     el(
       h,
       "div",
       { class: "actions" },
-      button("done", "Done", "d"),
-      button("later", "Later", "l"),
-      button("worse", "Until worse", "w"),
-      button("never", "Never", "n"),
+      el(
+        h,
+        "div",
+        { class: ["segmented", "triage-group"], attrs: { role: "group", "aria-label": "Triage" } },
+        button("done", "Done", "d", "Mark dealt with; returns if it happens again (d)"),
+        button("later", "Later", "l", "Snooze until something changes or a time (l)"),
+        button("worse", "Worse", "w", "Snooze until it gets worse (w)"),
+        button("never", "Never", "n", "Mute unless much worse or more severe (n)"),
+      ),
       way != null && button("undo", "Put back", "u"),
       el(h, "span", { class: "sep", attrs: { "aria-hidden": "true" } }),
       button("investigate", "Investigate", "i"),
-      button("open", "Open in OpenCode", "o"),
-      done !== undefined && button("correct", "Was this right?", "y"),
-      done !== undefined && d?.fixable === true && !fixing && button("fix", "Propose fix", "f"),
+      el(
+        h,
+        "div",
+        { class: ["segmented", "handoff-group"], attrs: { role: "group", "aria-label": "OpenCode handoff" } },
+        button("open", "OpenCode", "o", "Open in an interactive OpenCode browser tab (o)"),
+        el(
+          h,
+          "button",
+          {
+            class: "copy-handoff-btn",
+            attrs: { type: "button", "data-action": "copyHandoff", title: "Copy structured OpenCode prompt with handles & MCP instructions (c · ⇧O for presets)" },
+            on: [h.Disabled(off), h.OnClick(Message.ClickedAction({ action: "copyHandoff" }))],
+          },
+          CopyIcon(h),
+          " Copy ",
+          Kbd(h, "c"),
+        ),
+        el(
+          h,
+          "button",
+          {
+            class: "handoff-more-btn",
+            attrs: { type: "button", "data-action": "handoffSheet", title: "Choose OpenCode handoff preset (⇧O)", "aria-label": "OpenCode handoff presets" },
+            on: [h.Disabled(off), h.OnClick(Message.ClickedAction({ action: "handoffSheet" }))],
+          },
+          "⇧O",
+        ),
+      ),
+      done !== undefined && button("correct", "Right?", "y", "Was this right? Save a correction to the app's playbook (y)"),
+      done !== undefined && d?.fixable === true && !fixing && button("fix", "Fix", "f", "Propose a verified fix candidate (f)"),
     ),
     d?.comparison != null &&
       el(h, "section", { class: "panel" }, el(h, "h3", {}, "Staging against production"), el(h, "p", { class: ["note", "warn"] }, m.comparisonText(d.comparison) ?? "")),
     VerdictPanel(h, d),
+    VisualLens(
+      h,
+      {
+        lens,
+        validation,
+        validHandles,
+        hasAi,
+        mode: props.lensMode,
+        loading: props.lensLoading,
+        canGenerate: !off,
+      },
+      {
+        onCopyHandle: (handle) => Message.ClickedHandle({ handle }),
+        onSwitchMode: (mode: LensMode) => Message.ClickedLensMode({ mode }),
+        onGenerateAi: () => Message.ClickedGenerateLens(),
+      },
+    ),
     FixPanel(h, d, props.wallNow),
     ClaimsPanel(h, d),
     d !== null && d.corrections.length > 0 &&
@@ -507,7 +637,7 @@ const IncidentView = (h: H, i: Incident, d: ItemDetail | null, props: Props, sna
       el(h, "h3", {}, "Counts"),
       started !== undefined && el(h, "p", { class: "started" }, "Started after deploy ", el(h, "code", {}, started.revision.slice(0, 12)), ` to ${i.app}/${i.environment}.`),
       left !== null && el(h, "p", { class: ["note", "warn"] }, left.long),
-      Spark(h, i.spark, 560, 64),
+      AnnotatedSpark(h, i.spark, { deploySha: started?.revision ?? null, onsetIndex: started ? onsetBucketIndex(i.spark) : null }),
       el(h, "div", { class: "axis" }, el(h, "span", {}, "24h ago"), el(h, "span", {}, "now")),
       el(
         h,
@@ -541,6 +671,7 @@ const EnvironmentView = (h: H, subject: string, props: Props, snapshot: Snapshot
   const sources = snapshot.sources.filter((x) => x.app === e.app && x.environment === e.environment);
   const coverage = snapshot.coverage.filter((c) => sources.some((x) => x.id === c.source)).slice(-12).reverse();
   const metrics = snapshot.metrics.filter((x) => sources.some((y) => y.id === x.source));
+  const envLens = synthesizeEnvLens(snapshot, e, props.serverNow ?? snapshot.atMs);
   return el(
     h,
     "article",
@@ -571,6 +702,20 @@ const EnvironmentView = (h: H, subject: string, props: Props, snapshot: Snapshot
       ),
     ),
     ...OutlookPanels(h, snapshot, e, props.serverNow ?? snapshot.atMs),
+    envLens &&
+      VisualLens(
+        h,
+        {
+          lens: envLens,
+          validation: validateLensHandles(envLens, new Set()),
+          validHandles: new Set(),
+          hasAi: false,
+          mode: "derived",
+          loading: false,
+          canGenerate: false,
+        },
+        { onCopyHandle: (handle) => Message.ClickedHandle({ handle }) },
+      ),
     metrics.length > 0 &&
       el(
         h,
@@ -630,7 +775,7 @@ const SourceView = (h: H, subject: string, props: Props, snapshot: Snapshot) => 
             { class: r.state === "ok" ? "" : "breach" },
             el(h, "span", {}, r.reading),
             el(h, "b", {}, r.state ?? "never read"),
-            el(h, "em", {}, r.okMs === null ? "never measured" : `measured ${m.ago(r.okMs, props.serverNow ?? snapshot.atMs)}`),
+            el(h, r.state === "ok" ? "span" : "em", { class: r.state === "ok" ? "gauge-note" : "" }, r.okMs === null ? "never measured" : `measured ${m.ago(r.okMs, props.serverNow ?? snapshot.atMs)}`),
           )
         ),
       ),
@@ -639,35 +784,17 @@ const SourceView = (h: H, subject: string, props: Props, snapshot: Snapshot) => 
   );
 };
 
-const Overview = (h: H, snapshot: Snapshot) => {
-  const g = snapshot.inbox.groups;
-  const n = g.needsYou.length;
-  const key = (keys: ReadonlyArray<string>, text: string) => el(h, "div", {}, el(h, "dt", {}, ...keys.map((k) => Kbd(h, k))), el(h, "dd", {}, text));
-  return el(
-    h,
-    "div",
-    { class: "overview" },
-    el(h, "img", { attrs: { src: "logo.svg", alt: "", width: "56", height: "56" } }),
-    el(h, "h2", {}, n ? `${n} ${n === 1 ? "problem needs" : "problems need"} you` : "Nothing needs you"),
-    el(h, "p", {}, `${g.new.length} new · ${g.working.length} with an agent · ${g.quiet.length} quiet. Put anything in focus with `, Kbd(h, "j"), " or a click, then ask about it below."),
-    el(
-      h,
-      "dl",
-      { class: "keys" },
-      key(["j", "k"], "Move through the inbox"),
-      key(["d"], "Done: back if it happens again"),
-      key(["l"], "Later: until something changes"),
-      key(["n"], "Never: only if it gets much worse"),
-      key(["/"], "Find anything, even put away"),
-      key(["p"], "Ask about what is in focus"),
-    ),
-  );
-};
-
 export const view = defineView<Model, Message, Props>((_model, props, h) => {
   const { snapshot, focus } = props;
   const stage = { class: "stage", attrs: { "data-stage": "", "aria-live": "polite", "data-focus-id": focus ?? undefined } };
-  if (focus === null) return el(h, "section", stage, snapshot === null ? null : Overview(h, snapshot));
+  if (focus === null) {
+    return el(
+      h,
+      "section",
+      stage,
+      snapshot === null ? null : Overview(h, { snapshot, connection: props.connection, serverNow: props.serverNow }, (subject) => Message.ClickedSubject({ subject })),
+    );
+  }
   const back = el(h, "button", { class: "stage-back", attrs: { type: "button", "data-back": "" }, on: [h.OnClick(Message.ClickedBack())] }, "← Inbox");
   if (snapshot !== null && focus.startsWith("env:")) return el(h, "section", stage, back, EnvironmentView(h, focus, props, snapshot));
   if (snapshot !== null && focus.startsWith("src:")) return el(h, "section", stage, back, SourceView(h, focus, props, snapshot));

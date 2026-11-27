@@ -7,6 +7,8 @@ const KEYS: ReadonlyArray<readonly [string, string]> = [
   ["j / ↓", "Next row"], ["k / ↑", "Previous row"], ["d", "Done: back if it happens again"], ["l", "Later: until something changes, a time, or worse"],
   ["w", "Later, until it gets worse"], ["n", "Never: back only if much worse or more severe"], ["u", "Undo the last way out"], ["r", "Show what waits behind “N new”"],
   ["p / Enter", "Ask about what is in focus"], ["i", "Investigate: independent readings and a challenger"], ["o", "Open in OpenCode, with this in focus"],
+  ["c", "Copy structured OpenCode handoff prompt (handles + MCP)"], ["Shift+O", "OpenCode handoff sheet with presets"],
+  ["g", "Generate or refresh AI visual lens for focused item"],
   ["f", "Fix: ask for a verified candidate"], ["Shift+P", "Open the verified candidate's draft pull request"], ["y", "Was this right? A line for the app's playbook"],
   ["b", "Brief: what changed, to edit and copy"], ["Shift+Enter", "Ask in a new request"], ["/ or ⌘K", "Find anything, even put away"], ["t", "Light or dark"],
   ["Esc", "Close, or leave the bar"],

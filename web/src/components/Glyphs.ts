@@ -1,4 +1,4 @@
-/** The page's inline SVG: health glyphs, severity glyphs and the hourly spark. Every one is decoration (aria-hidden). */
+/** The page's inline SVG: health glyphs, severity glyphs, sparks, annotated timeline and crisp action icons. */
 import { el, type H, type Html } from "../ui.ts";
 
 const Icon = <M>(h: H<M>, viewBox: string, ...children: ReadonlyArray<Html>) =>
@@ -40,18 +40,96 @@ export const SeverityGlyph = <M>(h: H<M>, severity: string) => {
 
 /** Counts per hour as bars; an hour with none is a hairline. */
 export const Spark = <M>(h: H<M>, values: ReadonlyArray<number | null>, w = 72, height = 18) => {
+  const n = Math.max(1, values.length);
   const max = Math.max(1, ...values.map((v) => v ?? 0));
-  const bw = w / values.length;
+  const bw = w / n;
   return el(
     h,
     "svg",
     { class: "spark", attrs: { viewBox: `0 0 ${w} ${height}`, width: String(w), height: String(height), "aria-hidden": "true" } },
     ...values.map((v, i) => {
-      const x = (i * bw + 0.5).toFixed(1), width = (bw - 1).toFixed(1);
+      const x = (i * bw + 0.5).toFixed(1), width = Math.max(1, bw - 1).toFixed(1);
       if (!v) return el(h, "rect", { class: "zero", attrs: { x, y: String(height - 1), width, height: "1" } });
       const tall = Math.max(1.5, (v / max) * height);
       return el(h, "rect", { attrs: { x, y: (height - tall).toFixed(1), width, height: tall.toFixed(1), rx: "0.8" } });
     }),
+  );
+};
+
+/**
+ * Full-width annotated 24h occurrence chart: subtle horizontal gridlines, peak readout, unmeasured gap shading,
+ * per-hour native SVG tooltips, and an optional vertical dashed deploy-onset marker.
+ */
+export const AnnotatedSpark = <M>(
+  h: H<M>,
+  values: ReadonlyArray<number | null>,
+  options: { readonly deploySha?: string | null; readonly onsetIndex?: number | null } = {},
+) => {
+  const w = 560, height = 84, topPad = 16, botPad = 6, plotH = height - topPad - botPad;
+  const slots = values.length > 0 ? values : Array.from({ length: 24 }, () => 0);
+  const max = Math.max(1, ...slots.map((v) => v ?? 0));
+  const bw = w / slots.length;
+  const onset = options.onsetIndex != null && options.onsetIndex >= 0 && options.onsetIndex < slots.length ? options.onsetIndex : null;
+  const onsetX = onset !== null ? onset * bw + 0.5 : null;
+  const midY = (topPad + plotH * 0.5).toFixed(1);
+  const baseY = (topPad + plotH).toFixed(1);
+
+  return el(
+    h,
+    "svg",
+    { class: ["spark", "spark-stage"], attrs: { viewBox: `0 0 ${w} ${height}`, role: "img", "aria-label": `24-hour counts, peak ${max} per hour` } },
+    // Subtle hairline gridlines (top, mid, baseline)
+    el(h, "line", { class: "gridline", attrs: { x1: "0", y1: String(topPad), x2: String(w), y2: String(topPad) } }),
+    el(h, "line", { class: "gridline", attrs: { x1: "0", y1: midY, x2: String(w), y2: midY } }),
+    el(h, "line", { class: "baseline", attrs: { x1: "0", y1: baseY, x2: String(w), y2: baseY } }),
+    // Peak annotation at top-left
+    el(h, "text", { class: "peak-label", attrs: { x: "2", y: "11" } }, `peak ${max.toLocaleString("en-US")}/h`),
+    // Hourly bars or unmeasured gap slots
+    ...slots.map((v, i) => {
+      const x = (i * bw + 1.5).toFixed(1);
+      const width = Math.max(2, bw - 3).toFixed(1);
+      const hoursAgo = slots.length - 1 - i;
+      const when = hoursAgo === 0 ? "this hour" : `${hoursAgo}h ago`;
+      if (v === null) {
+        return el(
+          h,
+          "rect",
+          { class: "gap-bar", attrs: { x, y: String(topPad), width, height: String(plotH), rx: "1.5" } },
+          el(h, "title", {}, `${when}: not fully measured`),
+        );
+      }
+      if (v === 0) {
+        return el(
+          h,
+          "rect",
+          { class: "zero", attrs: { x, y: String(topPad + plotH - 1.5), width, height: "1.5" } },
+          el(h, "title", {}, `${when}: 0`),
+        );
+      }
+      const tall = Math.max(3, (v / max) * plotH);
+      return el(
+        h,
+        "rect",
+        { class: "bar", attrs: { x, y: (topPad + plotH - tall).toFixed(1), width, height: tall.toFixed(1), rx: "2" } },
+        el(h, "title", {}, `${when}: ${v.toLocaleString("en-US")}`),
+      );
+    }),
+    // Vertical dashed deploy-onset marker
+    onsetX !== null && options.deploySha
+      ? el(
+        h,
+        "g",
+        { class: "deploy-marker" },
+        el(h, "line", { attrs: { x1: onsetX.toFixed(1), y1: String(topPad - 2), x2: onsetX.toFixed(1), y2: baseY, "stroke-dasharray": "3 3" } }),
+        el(h, "circle", { attrs: { cx: onsetX.toFixed(1), cy: String(topPad - 2), r: "2.5" } }),
+        el(
+          h,
+          "text",
+          { attrs: { x: String(Math.min(w - 92, Math.max(76, onsetX + 5))), y: "11" } },
+          `deploy ${options.deploySha.slice(0, 7)}`,
+        ),
+      )
+      : null,
   );
 };
 
@@ -75,3 +153,19 @@ export const SearchIcon = <M>(h: H<M>) =>
 /** The empty inbox's check. */
 export const ClearIcon = <M>(h: H<M>) =>
   Icon(h, "0 0 48 48", el(h, "circle", { attrs: { cx: "24", cy: "24", r: "18" } }), Path(h, "M16 24.5l5.5 5.5L32.5 19"));
+
+/** Compact document icon for Brief in topbar. */
+export const BriefIcon = <M>(h: H<M>) =>
+  Icon(h, "0 0 20 20", el(h, "rect", { attrs: { x: "4", y: "2.5", width: "12", height: "15", rx: "2" } }), Path(h, "M7 7h6M7 10.5h6M7 14h4"));
+
+/** Geometric optical lens reticle icon for Visual Lens. */
+export const LensIcon = <M>(h: H<M>) =>
+  Icon(h, "0 0 16 16", Path(h, "M1.5 8C3.6 4.4 12.4 4.4 14.5 8c-2.1 3.6-10.9 3.6-13 0z"), Path(h, "M8 5.2L10.8 8 8 10.8 5.2 8z"));
+
+/** Crisp copy-to-clipboard glyph for OpenCode handoff. */
+export const CopyIcon = <M>(h: H<M>) =>
+  Icon(h, "0 0 16 16", el(h, "rect", { attrs: { x: "5.5", y: "5.5", width: "8", height: "8", rx: "1.5" } }), Path(h, "M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v5.4a1.3 1.3 0 0 0 1.3 1.3h1.7"));
+
+/** Commit node glyph. */
+export const CommitIcon = <M>(h: H<M>) =>
+  Icon(h, "0 0 16 16", el(h, "circle", { attrs: { cx: "8", cy: "8", r: "2.8" } }), Path(h, "M1.5 8h3.7M10.8 8h3.7"));

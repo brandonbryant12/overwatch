@@ -37,8 +37,13 @@
   --bg-deck: #10161f;
   --bg-elevated: #161f2b;
   --bg-well: #0c1118;
+  --bg-code: #090d13;
   --bg-hover: rgba(148, 175, 206, 0.07);
   --bg-selected: rgba(245, 166, 35, 0.09);
+  --surface-sheen: rgba(255, 255, 255, 0.035);
+  --diff-add-bg: rgba(45, 212, 160, 0.11);
+  --diff-del-bg: rgba(242, 100, 97, 0.12);
+  --chart-grid: rgba(148, 175, 206, 0.12);
 
   --border-hairline: rgba(148, 175, 206, 0.14);
   --border-strong: rgba(148, 175, 206, 0.26);
@@ -105,8 +110,13 @@
   --bg-deck: #ffffff;
   --bg-elevated: #f8fafc;
   --bg-well: #edf1f6;
+  --bg-code: #f5f7fb;
   --bg-hover: rgba(15, 23, 42, 0.045);
   --bg-selected: rgba(184, 107, 0, 0.085);
+  --surface-sheen: rgba(255, 255, 255, 0.7);
+  --diff-add-bg: rgba(10, 114, 82, 0.09);
+  --diff-del-bg: rgba(197, 40, 40, 0.09);
+  --chart-grid: rgba(15, 23, 42, 0.09);
 
   --border-hairline: rgba(15, 23, 42, 0.11);
   --border-strong: rgba(15, 23, 42, 0.22);
