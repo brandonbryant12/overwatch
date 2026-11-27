@@ -79,7 +79,7 @@ When no item is focused (or when you click the topbar **`Overview`** button, whi
 
 - **Checkpoint & 24-hour fallback**: Clicking **`Mark caught up`** saves `{seq, atMs}` locally (`ow-caught-up` in `localStorage`) and collapses the card to a single quiet line (`Caught up since <ago>`) with a `Show last 24h` toggle. On first visit — or if the database sequence resets (such as a fresh `demo` or restored backup) — the card automatically falls back to a calm **last 24h** window.
 - **Bounded groups**: At most 3 items per category and 8 visible initially (overflow behind a disclosure): verified/draft fixes ready, returned problems, new problems, recent commits & deploys, and quieted recoveries.
-- **Brief handoff**: Links directly to `GET /v2/brief?afterSeq=<seq>` when you want a fence-bounded owner or team summary since your checkpoint.
+- **Brief handoff**: Open **`Brief`** (`b` / topbar) or call `GET /v2/brief?afterSeq=<seq>` (`ow_brief` via MCP) when you want a fence-bounded owner or team summary since a given sequence checkpoint.
 
 ## Playbooks
 

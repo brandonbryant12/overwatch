@@ -40,8 +40,9 @@ bin/overwatch install --config ~/.config/overwatch/config.json  # run it at logi
 - **Failures**: classified (sign-in, permission, rate limit, unreachable, configuration), backed off, suspended and
   probed; one cause per failure; "offline" only when several independent endpoints all fail.
 - **The page & declarative GenUI**: the environments strip, an at-a-glance Overview Situation Board with a calm
-  **"What's New"** card (`Mark caught up` checkpoint, 24h fallback on first visit or seq reset, topbar `Overview`
-  unseen indicator, and `GET /v2/brief?afterSeq=` handoff), per-environment policy pills, bounded scrollable read-only
+  **"What's New"** card (`Mark caught up` checkpoint, 24h fallback on first visit or seq reset, and a topbar
+  `Overview` unseen indicator; pair with the topbar `Brief` sheet / `b` or `GET /v2/brief?afterSeq=<seq>` for a
+  fence-bounded digest), per-environment policy pills, bounded scrollable read-only
   DB evidence tables, the inbox in four groups whose rows never move under you, Done, Later and Never with undo and a
   reason for everything that comes back, a finder, one bar that asks about what is in focus, and schema-validated
   declarative **Visual Lenses** (`causal_flow`, `span_waterfall`, `metric_compare`, `commit_risk`, `timeline`,
