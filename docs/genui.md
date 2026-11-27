@@ -21,7 +21,7 @@ Overwatch splits the screen cleanly along a single line: **deterministic static 
 
 ## 2. The `LensSpec` Contract
 
-A Visual Lens is **pure JSON data**, never HTML, CSS, or JavaScript. Both the backend (`src/inbox.ts`) and frontend (`web/src/domain/Lens.ts`) decode it with strict `Effect.Schema` validation.
+A Visual Lens is **pure JSON data**, never HTML, CSS, or JavaScript. Both the backend (`src/lens.ts`) and frontend (`web/src/domain/Lens.ts`) decode it with strict `Effect.Schema` validation.
 
 ```ts
 type LensTone = "neutral" | "warn" | "error" | "ok";
@@ -57,7 +57,7 @@ Each block maps to one hand-crafted, accessible Foldkit component in `web/src/co
 
 Free local GPU tokens (OpenCode + GLM 5.3) make on-demand AI visual synthesis practically costless, but a model must never invent a quote, metric, or handle. Overwatch enforces grounding twice:
 
-1. **Server verification (`src/inbox.ts` / `POST /v2/items/:id/lens`)**:
+1. **Server verification (`src/lens.ts` / `POST /v2/items/:id/lens`)**:
    - The service asks OpenCode (spending a committed `Permit`) to return a `LensSpec` JSON citing only handles delivered to that item's frozen evidence set.
    - The reply is decoded with strict `Effect.Schema`. Any malformed output fails closed.
    - Every `handle` cited in `verifiedHandles` and inside `blocks` is checked against SQLite's `evidence` table for that exact item. Unknown or cross-item handles are stripped or rejected; every string passes `Writer` redaction (`cleanDeep`) before persistence in the `lenses` table.
@@ -73,7 +73,7 @@ Free local GPU tokens (OpenCode + GLM 5.3) make on-demand AI visual synthesis pr
 Every incident renders a useful visual lens immediately with zero latency and zero LLM wait:
 
 1. **Deterministic `derived` lens (always available)**:
-   - `buildLens()` on the server (and client-side fallback `web/src/lens.ts` if offline or against an older server) synthesizes a `source: "derived"` `LensSpec` straight from SQLite rows: `lines` (including parsed `SLOW <ms>` Datadog spans), `deploys`/`rollouts`, `commits`, `findings`, `investigations`, and `fixes`.
+   - `lensesFor()` on the server (and client-side fallback `web/src/lens.ts` if offline or against an older server) synthesizes a `source: "derived"` `LensSpec` straight from SQLite rows: `lines` (including parsed `SLOW <ms>` Datadog spans), `deploys`/`rollouts`, `commits`, `findings`, `investigations`, and `fixes`.
    - Exposed on both `GET /v2/items/:id` and the `ow_get` MCP tool as `lens` (active) and `lenses` (all available, e.g., both `ai` and `derived`).
 2. **On-demand `ai` lens (`g` key or "Generate AI lens" button)**:
    - Enabled when OpenCode is connected (and `opencode.genUi: true` for automatic/eager generation).
@@ -87,7 +87,7 @@ Every incident renders a useful visual lens immediately with zero latency and ze
 
 Because `web/` is outside the 5,500-line `src/` service budget, a corporate fork can add domain-specific visual blocks (for example, a queue-depth heatmap or feature-flag rollout matrix) without touching the core kernel:
 
-1. Add the new block variant to `LensBlock` Schema in `web/src/domain/Lens.ts` (and mirror it in `src/inbox.ts` if synthesized server-side).
+1. Add the new block variant to `LensBlock` Schema in `web/src/domain/Lens.ts` (and mirror it in `src/lens.ts` if synthesized server-side).
 2. Add a pure Foldkit view function in `web/src/components/VisualLens.ts` using only `web/src/ui.ts` helpers and `web/tokens.css` variables — never `innerHTML`.
 3. Thread every handle through `validateLensHandles()` so ungrounded rows fall back to `--hatch-unknown`.
 4. Add unit tests in `test/page.test.ts` and rebuild the bundle with `pnpm run build:web`.

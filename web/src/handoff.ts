@@ -55,7 +55,7 @@ export function buildOpenCodeHandoff(
   const source = focus.startsWith("src:") ? snapshot?.sources.find((x) => x.subject === focus) : null;
 
   const handles = bundle?.handles.length
-    ? bundle.handles
+    ? bundle.handles.map((h) => (typeof h === "string" ? h : h.handle))
     : [...knownHandles(detail)];
   const mcpTools = bundle?.mcpTools.length
     ? bundle.mcpTools

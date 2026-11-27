@@ -87,7 +87,7 @@ export const CommitRiskBlock = Schema.Struct({
 export type CommitRiskBlock = typeof CommitRiskBlock.Type;
 
 export const TimelineEvent = Schema.Struct({
-  at: Schema.String,
+  at: Schema.Union([Schema.String, Schema.Number]),
   label: Schema.String,
   kind: Schema.Literals(["deploy", "spike", "span", "finding", "fix"]),
   handle: Maybe(Schema.String),
@@ -155,6 +155,17 @@ export const CommitSummary = Schema.Struct({
 });
 export type CommitSummary = typeof CommitSummary.Type;
 
+export const HandoffHandle = Schema.Union([
+  Schema.String,
+  Schema.Struct({
+    handle: Schema.String,
+    source: Schema.String,
+    origin: Schema.String,
+    text: Schema.String,
+  }),
+]);
+export type HandoffHandle = typeof HandoffHandle.Type;
+
 export const HandoffBundle = Schema.Struct({
   id: Schema.String,
   title: Schema.String,
@@ -163,7 +174,7 @@ export const HandoffBundle = Schema.Struct({
   checkout: Maybe(Schema.String),
   deploy: Maybe(Schema.String),
   previousDeploy: Maybe(Schema.String),
-  handles: Schema.Array(Schema.String),
+  handles: Schema.Array(HandoffHandle),
   mcpTools: Schema.Array(Schema.String),
   commands: Schema.Array(Schema.String),
   prompt: Schema.String,

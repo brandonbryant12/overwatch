@@ -190,7 +190,7 @@ export const Overview = <M>(h: H<M>, { snapshot, connection, serverNow }: Overvi
                   "span",
                   { class: "commit-flags" },
                   el(h, "span", { class: ["flag", c.deployedEnvs.length > 0 ? "flag-ok" : "flag-warn"] }, c.deployedEnvs.length > 0 ? c.deployedEnvs.join(", ") : "unreleased"),
-                  ...c.flags.slice(0, 2).map((flag) => el(h, "span", { class: "flag" }, flag)),
+                  ...c.flags.filter((f) => f !== "deployed" && f !== "unreleased").slice(0, 2).map((flag) => el(h, "span", { class: "flag" }, flag)),
                 ),
               )
             ),

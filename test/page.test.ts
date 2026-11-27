@@ -6,7 +6,7 @@ import fc from "fast-check";
 
 import { Schema } from "effect";
 import { freshness } from "../web/freshness.mjs";
-import { LensSpec } from "../web/src/domain/Lens.ts";
+import { HandoffBundle, LensSpec } from "../web/src/domain/Lens.ts";
 import { buildOpenCodeHandoff } from "../web/src/handoff.ts";
 import { knownHandles, parseSlowSpans, selectActiveLens, synthesizeEnvLens, synthesizeIncidentLens, validateLensHandles } from "../web/src/lens.ts";
 import * as m from "../web/src/model.ts";
@@ -128,7 +128,7 @@ test("LensSpec schema decodes all 6 declarative GenUI block types and rejects ma
       { kind: "span_waterfall", title: "Slow spans", p50Ms: 120, slowMs: 300, spans: [{ label: "POST /authorize", service: "checkout", durationMs: 840, offsetMs: 0, status: "slow", handle: "e_11111111" }] },
       { kind: "metric_compare", title: "Delta", rows: [{ label: "Timeout", before: "3000 ms", after: "300 ms", beforeNum: 3000, afterNum: 300, unit: "ms", delta: "-90%", tone: "error", handle: "e_11111111" }] },
       { kind: "commit_risk", title: "Commits", commits: [{ sha: "a1b2c3d4", subject: "Adjust payments timeout", files: 2, insertions: 4, deletions: 4, flags: ["timeout"], deployed: true, handle: "e_11111111" }] },
-      { kind: "timeline", title: "Timeline", events: [{ at: "4m ago", label: "Deploy landed", kind: "deploy", handle: "e_11111111" }] },
+      { kind: "timeline", title: "Timeline", events: [{ at: "4m ago", label: "Deploy landed", kind: "deploy", handle: "e_11111111" }, { at: 1_700_000_000_000, label: "First slow span", kind: "span", handle: "e_11111111" }] },
       { kind: "key_facts", title: "Facts", facts: [{ label: "Count", value: "42×", origin: "telemetry", handle: "e_11111111" }] },
     ],
   };
@@ -228,4 +228,15 @@ test("parseSlowSpans and synthesizeIncidentLens build grounded waterfall, causal
 
   const mcpOnly = buildOpenCodeHandoff(snap, "inc_1", detail, "mcp_only");
   assert.ok(mcpOnly && mcpOnly.text.includes('ow_get({ id: "inc_1" })'));
+
+  // Server HandoffBundle with structured handle objects decodes cleanly and feeds buildOpenCodeHandoff
+  const serverBundle = Schema.decodeUnknownSync(HandoffBundle)({
+    id: "inc_1", title: "Timeout", app: "shop", env: "prod", checkout: "/repo/shop",
+    deploy: "a1b2c3d4e5f6", previousDeploy: "9f8e7d6c5b4a",
+    handles: [{ handle: "e_span0001", source: "pods", origin: "telemetry", text: "SLOW 890ms checkout POST /v2/authorize" }],
+    mcpTools: ["ow_get", "ow_outlook"], commands: ["git diff 9f8e7d6c5b4a..a1b2c3d4e5f6"],
+    prompt: "Focus inc_1", markdown: "# Overwatch Handoff: Timeout",
+  });
+  const fromBundle = buildOpenCodeHandoff(snap, "inc_1", detail, "mcp_only", serverBundle);
+  assert.ok(fromBundle && fromBundle.handleCount === 1 && fromBundle.text.includes("`e_span0001`"));
 });

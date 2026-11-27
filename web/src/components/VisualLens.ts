@@ -222,7 +222,7 @@ const renderCommitRisk = <M>(h: H<M>, block: CommitRiskBlock, valid: ReadonlySet
             "span",
             { class: "commit-flags" },
             el(h, "span", { class: ["flag", c.deployed ? "flag-ok" : "flag-warn"] }, c.deployed ? "deployed" : "unreleased"),
-            ...c.flags.slice(0, 3).map((flag) => el(h, "span", { class: "flag" }, flag)),
+            ...c.flags.filter((f) => f !== "deployed" && f !== "unreleased").slice(0, 3).map((flag) => el(h, "span", { class: "flag" }, flag)),
           ),
           HandleChip(h, c.handle, valid, onCopy),
         );
@@ -230,7 +230,7 @@ const renderCommitRisk = <M>(h: H<M>, block: CommitRiskBlock, valid: ReadonlySet
     ),
   );
 
-const renderTimeline = <M>(h: H<M>, block: TimelineBlock, valid: ReadonlySet<string>, onCopy: (handle: string) => M) =>
+const renderTimeline = <M>(h: H<M>, block: TimelineBlock, valid: ReadonlySet<string>, nowMs: number, onCopy: (handle: string) => M) =>
   el(
     h,
     "div",
@@ -242,12 +242,13 @@ const renderTimeline = <M>(h: H<M>, block: TimelineBlock, valid: ReadonlySet<str
       { class: "timeline-strip" },
       ...block.events.map((ev) => {
         const grounded = isHandleGrounded(ev.handle, valid);
+        const when = typeof ev.at === "number" ? m.ago(ev.at, nowMs) : ev.at;
         return el(
           h,
           "li",
           { class: ["tl-node", `tl-${ev.kind}`, !grounded && "lens-ungrounded"] },
           el(h, "span", { class: "tl-dot", attrs: { "aria-hidden": "true" } }),
-          el(h, "span", { class: "tl-at" }, ev.at),
+          el(h, "span", { class: "tl-at" }, when),
           el(h, "span", { class: "tl-label" }, ev.label),
           HandleChip(h, ev.handle, valid, onCopy),
         );
@@ -278,13 +279,13 @@ const renderKeyFacts = <M>(h: H<M>, block: KeyFactsBlock, valid: ReadonlySet<str
     ),
   );
 
-const renderBlock = <M>(h: H<M>, block: LensBlock, valid: ReadonlySet<string>, onCopy: (handle: string) => M) => {
+const renderBlock = <M>(h: H<M>, block: LensBlock, valid: ReadonlySet<string>, nowMs: number, onCopy: (handle: string) => M) => {
   switch (block.kind) {
     case "causal_flow": return renderCausalFlow(h, block, valid, onCopy);
     case "span_waterfall": return renderSpanWaterfall(h, block, valid, onCopy);
     case "metric_compare": return renderMetricCompare(h, block, valid, onCopy);
     case "commit_risk": return renderCommitRisk(h, block, valid, onCopy);
-    case "timeline": return renderTimeline(h, block, valid, onCopy);
+    case "timeline": return renderTimeline(h, block, valid, nowMs, onCopy);
     case "key_facts": return renderKeyFacts(h, block, valid, onCopy);
   }
 };
@@ -371,7 +372,7 @@ export const VisualLens = <M>(h: H<M>, options: VisualLensViewOptions, handlers:
       h,
       "div",
       { class: "lens-blocks" },
-      ...lens.blocks.map((block) => renderBlock(h, block, validHandles, handlers.onCopyHandle)),
+      ...lens.blocks.map((block) => renderBlock(h, block, validHandles, lens.generatedAt, handlers.onCopyHandle)),
     ),
   );
 };
